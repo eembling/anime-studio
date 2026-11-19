@@ -46,7 +46,7 @@ The server needs **32 GB of system RAM or more**. The Wan 14B fp8 models are 14.
    - `xcode-select --install` (recommended; it's what builds the native window)
 2. Build the app: `./build_app.sh`. This makes `dist/Anime Studio.app`. Or run `./build_app.sh ~/Applications`.
 3. Open it. The first time, right-click it and choose **Open**, because the app isn't signed.
-4. Project data lives in `AnimeStudio Data`, next to the app.
+4. Project data lives in `AnimeStudio Data`, next to the app. The app remembers this folder, so moving the app to /Applications keeps using the same data. If the app's folder isn't writable, data goes to `~/Documents/AnimeStudio Data`. Set `ANIME_STUDIO_DATA` to use another folder.
 
 You can also run it without the app bundle: `python3 app/anime_studio.py`, then open http://127.0.0.1:8700.
 
@@ -115,3 +115,13 @@ The test starts two fake ComfyUI servers and runs the whole pipeline: script, ca
 
 ## License
 MIT. See `LICENSE`.
+
+## Changes in 2.5 (review fixes)
+
+- Deleting a shot or cast member now removes its takes and voice takes and cancels its queued jobs. Leftover rows are cleaned up on startup, so a new shot never picks up an old shot's takes.
+- Jobs that finish after their shot was deleted are discarded.
+- Parallel Continue jobs no longer read a half-written last frame.
+- TTS voice and language settings are checked against the supported list (unknown values fall back to Auto).
+- Assembly warns when a shot's dialogue is longer than the shot.
+- Names with apostrophes no longer break buttons; Reveal only opens files inside the data folder.
+- The UI no longer redraws the shot, voice and cast lists when nothing changed.

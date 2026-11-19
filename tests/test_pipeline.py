@@ -8,7 +8,7 @@ Covers: script -> shots, cast + turnaround sheet + LoRA, keyframes on two server
 full-quality re-render with the same seed, Continue chains (incl. swapping a part), first-last-frame
 on the final part, upscale, uploaded dialogue audio, music, and assembly to exact lengths.
 """
-import base64, io, json, os, shutil, subprocess, sys, time, urllib.request
+import base64, io, json, shutil, subprocess, sys, time, urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -96,7 +96,7 @@ def main():
     wait_jobs()
     long_id = post("/api/shot/save", {"scene": "Chase", "kind": "motion", "keyframe_prompt": "Aiko runs",
                                       "duration": 10, "end_next": True, "asset_ids": [aiko["id"]]})["id"]
-    next_id = post("/api/shot/save", {"scene": "Chase", "kind": "motion", "keyframe_prompt": "Street corner"})["id"]
+    post("/api/shot/save", {"scene": "Chase", "kind": "motion", "keyframe_prompt": "Street corner"})
     ids = [x["id"] for x in state()["shots"]]
     post("/api/generate", {"stage": "keyframe", "shot_ids": ids, "takes": 2})
     wait_jobs()
@@ -231,6 +231,32 @@ def main():
     post("/api/generate", {"stage": "upscale", "shot_ids": [long_id]})
     wait_jobs()
 
+    # ---------- review fixes (v2.5)
+    r = post("/api/settings", {"settings": {"tts_language": "english", "tts_model": "1.7b"}})
+    st_ = state()["settings"]
+    check(st_["tts_language"] == "English" and st_["tts_model"] == "1.7B", "TTS settings normalized to the node's options")
+    post("/api/settings", {"settings": {"tts_language": "Klingon"}})
+    check(state()["settings"]["tts_language"] == "Auto", "unknown TTS language falls back to Auto")
+    r = post("/api/reveal", {"path": "../../etc"})
+    check(r.get("ok") is False, "Show in Finder refuses paths outside the project")
+
+    # a deleted shot's takes must not reappear on a new shot that reuses its id
+    gone = post("/api/shot/save", {"scene": "Temp", "kind": "motion", "keyframe_prompt": "x", "dialogue": "Aiko: You came after all."})["id"]
+    post("/api/generate", {"stage": "keyframe", "shot_ids": [gone], "takes": 1})
+    wait_jobs()
+    post("/api/generate", {"stage": "voice", "shot_ids": [gone], "takes": 1, "replace": True})
+    wait_jobs()
+    check(shot(gone)["takes"] and shot(gone)["lines"][0]["takes"], "throwaway shot has a keyframe and a voice take")
+    post("/api/shot/delete", {"ids": [gone]})
+    fresh = post("/api/shot/save", {"scene": "Fresh", "kind": "motion", "keyframe_prompt": "y", "dialogue": "Aiko: You came after all."})["id"]
+    fs = shot(fresh)
+    check(fresh == gone and not fs["takes"] and not fs["lines"][0]["takes"], f"new shot reusing id {fresh} starts clean")
+
+    # warning when a shot is shorter than its dialogue
+    short = post("/api/shot/save", {"scene": "Short", "kind": "still", "keyframe_prompt": "z", "dialogue": "Kenji: I always do."})["id"]
+    post("/api/line/set", {"shot_id": short, "index": 0, "src": "upload", "file": tone("long.wav", 3.0, 500)})
+    post("/api/shot/save", {"id": short, "duration": 1.5})
+
     subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=f=220:d=3", str(RUN / "music.mp3")])
     post("/api/music", {"file": b64("music.mp3", (RUN / "music.mp3").read_bytes())})
     post("/api/assemble", {"use_music": True, "music_volume": 0.3})
@@ -240,6 +266,7 @@ def main():
             break
         time.sleep(1)
     check(not any("ERROR" in l for l in A["log"]), "assembly finished")
+    check(any("WARNING" in l and "cut off" in l for l in A["log"]), "assembly warns when dialogue is longer than its shot")
     out = RUN / "data" / A["folder"]
     total = sum(x["duration"] for x in state()["shots"])
     check(abs(duration(out / Path(A["output"]).name) - total) < 0.3, f"episode length matches the shot list ({total:.1f} s)")

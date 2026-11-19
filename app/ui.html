@@ -387,6 +387,7 @@ const $=s=>document.querySelector(s);
 let S=null,sel=new Set(),tab='shots',VOICES=null,FILTER='all',VIEW={},prevApproved={};
 const STAGES=['sheet','keyframe','animate','continue','lipsync','upscale','voice'];
 const TITLES={script:['Script','Write or paste the episode, then turn it into shots.'],cast:['Cast','Characters and locations with their reference sheets.'],voices:['Voices','Generate every line in its character’s voice, choose the best take, and play scenes back.'],shots:['Shots','Keyframe, animate and finish each shot.'],queue:['Render queue','Everything sent to ComfyUI, newest first.'],assemble:['Assemble','Put the episode together and export it for Resolve.'],settings:['Settings','Servers, workflows and project defaults.']};
+const jsq=s=>esc(JSON.stringify((s??'').toString()));   // JS string literal, safe inside an onclick="…" attribute
 const esc=s=>(s??'').toString().replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function post(u,b){try{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.ok===false&&j.error)toast(j.error,1);await load();return j}catch(e){toast('Can’t reach the Anime Studio server. Reopen the app.',1);return {ok:false}}}
 function toast(m,bad){const t=$('#toast');t.textContent=m;t.className=bad?'bad':'';t.style.display='block';clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',5000)}
@@ -394,7 +395,8 @@ function readFile(f){return new Promise(res=>{const r=new FileReader();r.onload=
 function pick(accept,cb){const i=document.createElement('input');i.type='file';i.accept=accept;i.onchange=async()=>{if(i.files[0])cb(await readFile(i.files[0]))};i.click()}
 document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>go(b.dataset.t));
 function go(t){tab=t;document.querySelectorAll('#nav button').forEach(x=>x.classList.toggle('on',x.dataset.t===t));document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x.id==='t-'+t));render(true);window.scrollTo(0,0)}
-async function load(){try{S=await (await fetch('/api/state')).json();render()}catch(e){}}
+let LASTSTATE='';
+async function load(){try{const t=await (await fetch('/api/state')).text();if(t===LASTSTATE)return;LASTSTATE=t;S=JSON.parse(t);render()}catch(e){}}
 const fmtT=sec=>{sec=Math.round(sec);return sec>=3600?`${Math.floor(sec/3600)}h ${String(Math.floor(sec%3600/60)).padStart(2,'0')}m`:`${Math.floor(sec/60)}:${String(sec%60).padStart(2,'0')}`};
 const pad=n=>String(n|0).padStart(3,'0');
 function lb(u){$('#lbimg').src=u;$('#lightbox').style.display='flex'}
@@ -408,7 +410,9 @@ const missingLines=s=>s.audio_mode==='file'?0:(s.lines||[]).filter(l=>!l.audio).
 function counts(){const c={kf:0,clip:0,done:0,voice:0,lines:0};S.shots.forEach(s=>{c[needs(s)]++;const m=missingLines(s);if(m)c.voice++;c.lines+=m});return c}
 function take(id){for(const s of S.shots)for(const t of s.takes)if(t.id===id)return t}
 
-function render(force){if(!S)return;
+const SIG={};   // skip rebuilding a big list when nothing it shows has changed
+function same(name,parts){const k=JSON.stringify(parts);if(SIG[name]===k)return true;SIG[name]=k;return false}
+function render(force){if(!S)return;if(force)for(const k in SIG)delete SIG[k];
  const [t,sub]=TITLES[tab];$('#pagetitle').textContent=tab==='shots'?(S.settings.title||'Shots'):t;$('#pagesub').textContent=tab==='shots'?sub:sub;
  const c=S.job_counts,act=(c.pending||0)+(c.running||0),total=S.shots.reduce((a,s)=>a+(+s.duration||0),0),cn=counts();
  $('#n-shots').textContent=S.shots.length?`${S.shots.length} shots, ${fmtT(total)}`:'';
@@ -428,7 +432,7 @@ function draftShots(){if(!$('#script').value.trim())return toast('Write or paste
  post('/api/script/draft',{script:$('#script').value}).then(r=>{if(r.ok!==false){toast(`Created ${r.made} shots`);go('shots')}})}
 
 /* ---------- cast ---------- */
-function renderCast(){$('#cast').innerHTML=S.assets.map(a=>`<article class="model">
+function renderCast(){if(same('cast',[S.assets]))return;$('#cast').innerHTML=S.assets.map(a=>`<article class="model">
  <div class="art" ${a.url?`onclick="lb('${a.url}')"`:''}>${a.url?`<img src="${a.url}" alt="${esc(a.name)} reference">`:`<div class="ph">No reference image yet.<br><button class="btn sm" style="margin-top:8px" onclick="editAsset(${a.id})">Add one</button></div>`}</div>
  <div class="body"><h3>${esc(a.name)}<span class="k">${a.kind}</span></h3>${a.description?`<div class="desc">${esc(a.description)}</div>`:''}
   <div class="meta">${a.voice?`<span class="flag">Voice: ${esc(a.voice)}</span>`:''}${a.lora?`<span class="flag" title="${esc(a.lora)}">LoRA ${a.lora_strength}</span>`:''}</div>
@@ -439,7 +443,7 @@ function renderCast(){$('#cast').innerHTML=S.assets.map(a=>`<article class="mode
    ${a.clips.slice(0,3).map(c=>`<div class="row"><button class="play" onclick="playA(this,'${c.url}')">▶</button><span class="t" title="${esc(c.transcript)}">${esc(c.transcript||c.name)}</span>${c.is_ref?'<span class="flag" title="Used as the voice to copy for TTS">reference</span>':''}</div>`).join('')}
    ${a.clips.length>3?`<div class="muted" style="font-size:12px">and ${a.clips.length-3} more</div>`:''}</div>`:''}
   <div class="acts">${a.kind==='character'?`<button class="btn sm pri" ${a.url?'':'disabled title="Add a reference image first"'} onclick="post('/api/generate',{stage:'sheet',asset_ids:[${a.id}],takes:+$('#sheetn').value}).then(r=>toast('Queued '+r.queued+' sheet'+(r.queued>1?'s':'')))">Make turnaround sheet</button>`:''}
-  <button class="btn sm" onclick="editAsset(${a.id})">Edit</button><button class="btn sm danger" onclick="if(confirm('Delete ${esc(a.name)}?'))post('/api/asset/delete',{id:${a.id}})">Delete</button></div></div></article>`).join('')
+  <button class="btn sm" onclick="editAsset(${a.id})">Edit</button><button class="btn sm danger" onclick="if(confirm('Delete '+${jsq(a.name)}+'?'))post('/api/asset/delete',{id:${a.id}})">Delete</button></div></div></article>`).join('')
  ||`<div class="empty-state" style="grid-column:1/-1"><h2>Who’s in the show?</h2><p>Add each character with one clean image: front view, plain background. Then make a turnaround sheet from it. Add locations the same way to keep backgrounds consistent.</p><button class="btn pri" onclick="editAsset()">Add character or location</button></div>`}
 function addClips(aid){const i=document.createElement('input');i.type='file';i.accept='audio/*';i.multiple=true;
  i.onchange=async()=>{if(!i.files.length)return;toast(`Adding ${i.files.length} clip${i.files.length>1?'s':''}`);const files=[];for(const f of i.files)files.push(await readFile(f));
@@ -495,6 +499,7 @@ function setFilter(f){FILTER=f;sel.clear();$('#selall').checked=false;renderShot
 function matches(s){return FILTER==='all'||(FILTER==='voice'?missingLines(s)>0:needs(s)===FILTER)}
 function renderShots(){
  if([...document.querySelectorAll('#shotlist video')].some(v=>!v.paused))return;
+ if(same('shots',[S.shots,S.assets,S.settings,S.workflows,FILTER,[...sel],VIEW]))return;
  const cn=counts();
  $('#strip').innerHTML=stripHTML();
  $('#filters').innerHTML=[['all','All',S.shots.length],['kf','Needs keyframe',cn.kf],['clip','Needs clip',cn.clip],['done','Ready',cn.done],['voice','Lines without audio',cn.lines]]
@@ -617,6 +622,7 @@ function allLines(){const out=[];S.shots.forEach(s=>{if(s.audio_mode==='file')re
 function vMatch(x){return VFILTER==='all'||(VFILTER==='missing'?!x.l.audio:(x.l.speaker||'').toLowerCase()===VFILTER)}
 function vGroups(){const groups=[];allLines().filter(vMatch).forEach(x=>{const sc=x.s.scene||'Untitled scene';const g=groups[groups.length-1];if(g&&g.scene===sc)g.items.push(x);else groups.push({scene:sc,items:[x]})});return groups}
 function renderVoices(){
+ if(same('voices',[S.shots,S.assets,S.workflows,S.instances.map(i=>[i.enabled,i.roles]),VFILTER,[...VSEL],SCENEPLAY&&SCENEPLAY.g]))return;
  const lines=allLines(),byName=Object.fromEntries(S.assets.map(a=>[a.name.toLowerCase(),a]));
  const speakers=[...new Set(lines.map(x=>(x.l.speaker||'').toLowerCase()).filter(Boolean))];
  const noRef=speakers.filter(n=>{const a=byName[n];return !a||!(a.clips||[]).length});
@@ -628,7 +634,7 @@ function renderVoices(){
  $('#vwarn').innerHTML=warn;
  const miss=lines.filter(x=>!x.l.audio).length;
  $('#vfilters').innerHTML=[['missing','Needs audio',miss],['all','All lines',lines.length],...speakers.map(n=>[n,byName[n]?byName[n].name:n,lines.filter(x=>(x.l.speaker||'').toLowerCase()===n).length])]
-  .map(([k,l,n])=>`<button class="chip ${VFILTER===k?'on':''}" onclick="VFILTER='${esc(k)}';VSEL.clear();$('#vselall').checked=false;renderVoices()">${esc(l)}<b>${n}</b></button>`).join('');
+  .map(([k,l,n])=>`<button class="chip ${VFILTER===k?'on':''}" onclick="VFILTER=${jsq(k)};VSEL.clear();$('#vselall').checked=false;renderVoices()">${esc(l)}<b>${n}</b></button>`).join('');
  $('#vselinfo').textContent=VSEL.size?`${VSEL.size} selected`:'Selected lines';
  if(!lines.length){$('#vlist').innerHTML=`<div class="empty-state"><h2>No dialogue yet</h2><p>Lines come from the shots’ dialogue (<code>AIKO: line</code>). Create shots from the script, or add dialogue to a shot.</p><button class="btn pri" onclick="go('script')">Open the script</button></div>`;return}
  const groups=vGroups();
@@ -688,7 +694,7 @@ function renderAssemble(){const total=S.shots.reduce((a,s)=>a+(+s.duration||0),0
  $('#musicinfo').innerHTML=S.music_url?`<audio src="${S.music_url}" controls style="height:30px;width:100%"></audio><button class="btn sm ghost" style="margin-top:6px" onclick="post('/api/music',{clear:true})">Remove music</button>`:'No music chosen.';
  const A=S.assembly;$('#arun').textContent=A.running?'Building… this can take a while for a long episode.':'';$('#alog').textContent=(A.log||[]).join('\n')||'No build yet.';
  if(A.output_url){if($('#theater').dataset.u!==A.output_url){$('#theater').dataset.u=A.output_url;$('#theater').innerHTML=`<video src="${A.output_url}" controls></video>`;
-   $('#aout').innerHTML=`<div class="toolbar"><button class="btn" onclick="post('/api/reveal',{path:'${esc(A.output)}'})">Show in Finder</button><a class="btn ghost" href="${A.output_url}" download>Save a copy</a><span class="muted" style="font-size:13px">In Resolve: File › Import › Timeline, choose timeline.edl, then point it at the shots folder.</span></div>`}}
+   $('#aout').innerHTML=`<div class="toolbar"><button class="btn" onclick="post('/api/reveal',{path:${jsq(A.output)}})">Show in Finder</button><a class="btn ghost" href="${A.output_url}" download>Save a copy</a><span class="muted" style="font-size:13px">In Resolve: File › Import › Timeline, choose timeline.edl, then point it at the shots folder.</span></div>`}}
  else if(!$('#theater').dataset.u)$('#theater').innerHTML='<div>Your episode plays here after the first build.</div>'}
 
 /* ---------- settings ---------- */
@@ -713,8 +719,10 @@ function renderSettings(){
   <div class="wf"><div class="wf-h"><span class="dot ${T.rife?'ok':'hollow'}"></span><b>rife-ncnn-vulkan</b><span class="muted" style="font-size:12.5px">${T.rife?esc(T.rife):'Optional, for the smoothest 24 fps. Download the macOS zip from github.com/nihui/rife-ncnn-vulkan/releases and unzip it into Downloads or Applications.'}</span></div></div>`;
  const F=[['title','Episode title','wide'],['style_prompt','Style, added to every keyframe and sheet','ta'],['motion_suffix','Added to every motion prompt','ta'],['keyframe_negative','Keyframe negative prompt','ta'],['video_negative','Video negative prompt','ta'],
   ['default_duration','Default length of a new shot (seconds)'],['draft_max_frames','Draft: most frames per clip (49 = about 3 s)'],['draft_width','Draft video width'],['draft_height','Draft video height'],['kf_width','Keyframe width'],['kf_height','Keyframe height'],['sheet_width','Sheet width'],['sheet_height','Sheet height'],['vid_width','Video width (848 suits a 12 GB card)'],['vid_height','Video height'],
-  ['out_width','Episode width'],['out_height','Episode height'],['out_fps','Episode fps'],['default_voice','Default temporary voice'],['line_gap','Pause between dialogue lines (seconds)'],['tts_model','Voice model size: 0.6B (faster) or 1.7B (better)'],['tts_language','Voice language: Auto, English, Japanese, Chinese, Korean, …'],['job_timeout','Give up on a job after (seconds)','wide']];
- $('#setform').innerHTML='<div class="form2">'+F.map(([k,l,t])=>`<div class="${t?'wide':''}"><label class="f" for="s_${k}">${l}</label>${t==='ta'?`<textarea id="s_${k}" data-k="${k}" style="min-height:52px">${esc(S.settings[k])}</textarea>`:`<input id="s_${k}" data-k="${k}" value="${esc(S.settings[k])}">`}</div>`).join('')+'</div>'}
+  ['out_width','Episode width'],['out_height','Episode height'],['out_fps','Episode fps'],['default_voice','Default temporary voice'],['line_gap','Pause between dialogue lines (seconds)'],['tts_model','Voice model size: 0.6B is faster, 1.7B sounds better'],['tts_language','Voice language'],['job_timeout','Give up on a job after (seconds)','wide']];
+ const OPTS={tts_model:['0.6B','1.7B'],tts_language:S.tts_languages||['Auto']};
+ $('#setform').innerHTML='<div class="form2">'+F.map(([k,l,t])=>`<div class="${t?'wide':''}"><label class="f" for="s_${k}">${l}</label>${t==='ta'?`<textarea id="s_${k}" data-k="${k}" style="min-height:52px">${esc(S.settings[k])}</textarea>`
+  :OPTS[k]?`<select id="s_${k}" data-k="${k}">${OPTS[k].map(o=>`<option ${o===S.settings[k]?'selected':''}>${esc(o)}</option>`).join('')}</select>`:`<input id="s_${k}" data-k="${k}" value="${esc(S.settings[k])}">`}</div>`).join('')+'</div>'}
 function saveInst(id){post('/api/instance/save',{id,name:$('#in_n'+id).value,url:$('#in_u'+id).value,enabled:$('#in_e'+id).checked,roles:[...document.querySelectorAll('.in_r'+id+':checked')].map(x=>x.value)}).then(()=>toast('Server saved'))}
 function addInst(){post('/api/instance/save',{name:'RTX 3060 #2',url:'http://172.16.2.70:8189',roles:['keyframe','animate','continue','lipsync','sheet']})}
 function saveSettings(){const o={};document.querySelectorAll('#setform [data-k]').forEach(e=>o[e.dataset.k]=e.value);post('/api/settings',{settings:o}).then(()=>toast('Settings saved'))}

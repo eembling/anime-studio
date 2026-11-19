@@ -39,7 +39,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "2.4"
+VERSION = "2.5"
 for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebrew/bin")):
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
@@ -290,6 +290,14 @@ def transcript_from_name(name, speaker=""):
     return " ".join(words)
 
 
+TTS_LANGUAGES = ["Auto", "Chinese", "English", "Japanese", "Korean", "French", "German", "Spanish", "Portuguese", "Russian", "Italian"]
+
+
+def norm_choice(value, options, default):
+    v = (value or "").strip().lower()
+    return next((o for o in options if o.lower() == v), default)
+
+
 def find_rife():
     """Optional: rife-ncnn-vulkan (https://github.com/nihui/rife-ncnn-vulkan) for smooth 16->24 fps on the Mac."""
     hit = shutil.which("rife-ncnn-vulkan")
@@ -324,6 +332,13 @@ class Studio:
                   (["voice"] if "keyframe" in roles and "voice" not in roles else [])
             if add:   # job types added in later versions go to servers that already take the related work
                 self.db.x("UPDATE instances SET roles=? WHERE id=?", (",".join(roles + add), inst["id"]))
+        # Takes of deleted shots / cast must not reattach to new ones that reuse the id
+        self.db.x("DELETE FROM takes WHERE stage<>'sheet' AND shot_id NOT IN (SELECT id FROM shots)")
+        self.db.x("DELETE FROM takes WHERE stage='sheet' AND asset_id NOT IN (SELECT id FROM assets)")
+        self.db.x("DELETE FROM voice_takes WHERE shot_id NOT IN (SELECT id FROM shots)")
+        self.db.x("DELETE FROM voice_clips WHERE asset_id NOT IN (SELECT id FROM assets)")
+        self.db.x("UPDATE jobs SET status='cancelled' WHERE status IN ('pending','running') AND "
+                  "((stage<>'sheet' AND shot_id NOT IN (SELECT id FROM shots)) OR (stage='sheet' AND asset_id NOT IN (SELECT id FROM assets)))")
         self.db.x("UPDATE jobs SET status='pending', instance_id=NULL, prompt_id=NULL, progress='requeued after restart' "
                   "WHERE status='running'")
         self.health = {}
@@ -896,8 +911,8 @@ class Worker(threading.Thread):
             p["prompt"], p["negative"], p["ref_text"] = line["text"], None, ref["transcript"] or ""
             S = st.settings()
             p["direction"] = line.get("direction") or ""
-            p["language"] = S.get("tts_language") or None
-            p["tts_model"] = S.get("tts_model") or None
+            p["language"] = norm_choice(S.get("tts_language"), TTS_LANGUAGES, "Auto")
+            p["tts_model"] = norm_choice(S.get("tts_model"), ["0.6B", "1.7B"], "1.7B")
             return "voice", p
         if stage == "keyframe":
             ids = json.loads(shot["asset_ids"] or "[]")
@@ -1065,6 +1080,10 @@ class Worker(threading.Thread):
 
     def finish(self, job, key, local):
         st, stage = self.st, job["stage"]
+        owner = (st.db.one("SELECT id FROM assets WHERE id=?", (job["asset_id"],)) if stage == "sheet"
+                 else st.db.one("SELECT id FROM shots WHERE id=?", (job["shot_id"],)))
+        if not owner:
+            return   # deleted while rendering
         imgs = [f for f in local if f.suffix.lower() in IMG_EXT]
         vids = [f for f in local if f.suffix.lower() in VID_EXT]
         if stage == "voice":
@@ -1168,6 +1187,10 @@ def assemble(st, use_music, music_volume):
             kf = st.take_path(s["keyframe_take"])
             audio = st.abs(s["audio"]) if s["audio"] and st.abs(s["audio"]).exists() else None
             ain = ["-i", str(audio)] if audio else ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
+            if audio:
+                spoken = media_seconds(audio)
+                if spoken > dur + 0.05:
+                    log.append(f"  WARNING shot {i}: dialogue is {spoken:.1f}s but the shot is {dur:.1f}s, so the end is cut off")
             if take:
                 mode = s["retime"] or "hold"
                 parts = [retime(st, take, mode, FPS, log)]
@@ -1290,7 +1313,8 @@ class API:
                      clips=clips.get(a["id"], []))
         insts = db.q("SELECT * FROM instances ORDER BY id")
         for i in insts:
-            i["health"] = st.health.get(i["id"])
+            h = st.health.get(i["id"])
+            i["health"] = {"ok": h["ok"], "info": h["info"]} if h else None
         wfs = {}
         for key in WF_KEYS:
             w = st.wf_row(key)
@@ -1308,13 +1332,18 @@ class API:
         S = st.settings()
         starters = {k: list(v.keys()) for k, v in STARTERS.items()}
         S["max_clip_seconds"] = round((st.max_frames() - 1) / float(st.wf_fps()), 2)
-        return {"settings": S, "shots": shots, "assets": assets, "instances": insts, "workflows": wfs, "starters": starters,
+        return {"settings": S, "tts_languages": TTS_LANGUAGES, "shots": shots, "assets": assets, "instances": insts, "workflows": wfs, "starters": starters,
                 "jobs": jobs, "job_counts": counts, "assembly": A, "tools": st.tools(), "music_url": self.media(S.get("music")),
                 "version": VERSION, "platform": sys.platform}
 
     # ---- settings / servers / workflows / tools
     def settings(self, b):
-        for k, v in (b.get("settings") or {}).items():
+        vals = dict(b.get("settings") or {})
+        if "tts_language" in vals:
+            vals["tts_language"] = norm_choice(vals["tts_language"], TTS_LANGUAGES, "Auto")
+        if "tts_model" in vals:
+            vals["tts_model"] = norm_choice(vals["tts_model"], ["0.6B", "1.7B"], "1.7B")
+        for k, v in vals.items():
             self.st.db.x("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (k, str(v)))
         return {"ok": True}
 
@@ -1369,7 +1398,9 @@ class API:
         return {"voices": list_voices()}
 
     def reveal(self, b):
-        p = self.st.abs(b["path"]) if b.get("path") else self.st.data
+        p = (self.st.data / b["path"]).resolve() if b.get("path") else self.st.data
+        if p != self.st.data and self.st.data not in p.parents:
+            raise RuntimeError("Can only show files inside the project folder.")
         if sys.platform == "darwin":
             subprocess.Popen(["open", "-R", str(p)] if p.is_file() else ["open", str(p)])
         return {"ok": True}
@@ -1436,6 +1467,9 @@ class API:
     def asset_delete(self, b):
         for c in self.st.db.q("SELECT id FROM voice_clips WHERE asset_id=?", (b["id"],)):
             self.clip_delete({"id": c["id"]})
+        self.st.db.x("DELETE FROM takes WHERE asset_id=? AND stage='sheet'", (b["id"],))
+        self.st.db.x("UPDATE jobs SET status='cancelled', finished=? WHERE asset_id=? AND stage='sheet' AND status IN ('pending','running')",
+                     (time.time(), b["id"]))
         self.st.db.x("DELETE FROM assets WHERE id=?", (b["id"],))
         return {"ok": True}
 
@@ -1479,9 +1513,13 @@ class API:
         return {"ok": True, "id": sid}
 
     def shot_delete(self, b):
+        db = self.st.db
         for sid in b["ids"]:
-            self.st.db.x("DELETE FROM shots WHERE id=?", (sid,))
-            self.st.db.x("UPDATE jobs SET status='cancelled' WHERE shot_id=? AND status='pending'", (sid,))
+            db.x("DELETE FROM shots WHERE id=?", (sid,))
+            db.x("DELETE FROM takes WHERE shot_id=? AND stage<>'sheet'", (sid,))
+            db.x("DELETE FROM voice_takes WHERE shot_id=?", (sid,))
+            db.x("UPDATE jobs SET status='cancelled', finished=? WHERE shot_id=? AND stage<>'sheet' AND status IN ('pending','running')",
+                 (time.time(), sid))
         self.st.renumber()
         return {"ok": True}
 
