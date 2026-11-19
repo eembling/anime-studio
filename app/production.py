@@ -147,7 +147,7 @@ class Production:
             shot['outdated'] = sorted(set(stale))
             approval = self.st.db.one('SELECT signature FROM production_approvals WHERE shot_id=?', (shot['id'],))
             shot['keyframe_approved'] = bool(approval and approval['signature'] == digest([shot['keyframe_take'], self.signature(shot, 'keyframe')]))
-        averages = {r['stage']: round(r['seconds']) for r in self.st.db.q("SELECT stage,AVG(finished-started) seconds FROM jobs WHERE status='done' AND finished>started GROUP BY stage")}
+        averages = {r['stage']: round(r['seconds']) for r in self.st.db.q("SELECT stage,AVG(finished-started) seconds FROM render_timing_history GROUP BY stage")}
         pending = self.st.db.q("SELECT * FROM jobs WHERE status='pending' ORDER BY priority DESC,id")
         servers = self.st.db.q('SELECT * FROM instances WHERE enabled=1')
         loads = {s['id']: 0 for s in servers}

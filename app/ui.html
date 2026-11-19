@@ -11,13 +11,13 @@
  --f-script:"Courier Prime","Courier New",Courier,monospace;
 }
 *{box-sizing:border-box}
-html,body{height:100%}
-body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.5 var(--f-ui);-webkit-font-smoothing:antialiased;display:grid;grid-template-columns:208px 1fr}
+html,body{height:100%;overflow:hidden}
+body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.5 var(--f-ui);-webkit-font-smoothing:antialiased;display:grid;grid-template-columns:208px minmax(0,1fr);grid-template-rows:minmax(0,1fr);height:100vh;height:100dvh;overflow:hidden}
 button,input,select,textarea{font:inherit;color:inherit}
 :focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 
 /* ---------- sidebar ---------- */
-aside{background:var(--sheet);border-right:1px solid var(--line);display:flex;flex-direction:column;height:100vh;position:sticky;top:0}
+aside{background:var(--sheet);border-right:1px solid var(--line);display:flex;flex-direction:column;height:100%;min-height:0;overflow-y:auto;overscroll-behavior:contain}
 .brand{padding:20px 18px 18px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line2)}
 .brand svg{flex:none}
 .brand b{font:700 21px/1 var(--f-display);letter-spacing:.2px}
@@ -37,7 +37,11 @@ nav button:focus-visible{outline:2px solid var(--blue)}
 .dot.hollow{background:transparent;border:1.5px solid var(--line)}
 
 /* ---------- main ---------- */
-main{min-width:0;padding:0 28px 80px;background-image:linear-gradient(rgba(47,111,168,.05) 1px,transparent 1px),linear-gradient(90deg,rgba(47,111,168,.05) 1px,transparent 1px);background-size:24px 24px}
+main{min-width:0;min-height:0;height:100%;overflow-y:scroll;overflow-x:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding:0 28px 80px;background-image:linear-gradient(rgba(47,111,168,.05) 1px,transparent 1px),linear-gradient(90deg,rgba(47,111,168,.05) 1px,transparent 1px);background-size:24px 24px}
+main::-webkit-scrollbar{width:12px;height:12px}
+main::-webkit-scrollbar-track{background:var(--paper)}
+main::-webkit-scrollbar-thumb{background:var(--line);border:3px solid var(--paper);border-radius:8px}
+main::-webkit-scrollbar-thumb:hover{background:var(--graphite)}
 .top{display:flex;align-items:flex-end;gap:24px;padding:24px 0 16px}
 .top h1{margin:0;font:700 30px/1.05 var(--f-display);letter-spacing:.2px}
 .top .sub{color:var(--graphite);font-size:13px;margin-top:4px}
@@ -110,6 +114,7 @@ label.f{display:block;font-size:12px;color:var(--graphite);margin:12px 0 4px}
 .screen .empty{color:#9AA3B2;text-align:center;font-size:13px;padding:20px;border:1px dashed #4A5160;border-radius:4px;margin:18px}
 .screen .tag{position:absolute;left:8px;top:8px;background:rgba(20,22,27,.78);color:#fff;font-size:11.5px;padding:2px 8px;border-radius:99px;pointer-events:none}
 .screen .use{position:absolute;right:8px;top:8px}
+.screen .delete-keyframe{position:absolute;left:8px;bottom:8px;background:var(--sheet);box-shadow:0 1px 6px #0005}
 .info{padding:14px 18px 12px;min-width:0;display:flex;flex-direction:column}
 .info h3{margin:0 0 6px;font:600 17px/1.2 var(--f-display);letter-spacing:.2px}
 .cast{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
@@ -166,6 +171,13 @@ label.f{display:block;font-size:12px;color:var(--graphite);margin:12px 0 4px}
 .st-b{margin-top:10px;padding:2px 0 4px 8px;display:flex;gap:14px;flex-wrap:wrap;align-items:center}
 .th{position:relative;width:64px;height:36px;border-radius:3px;cursor:pointer;flex:none;border:0;padding:0;background:#000 center/cover}
 .th:hover{outline:2px solid var(--blue);outline-offset:1px}
+.kf-take{display:inline-flex;flex-direction:column;align-items:center;gap:8px}
+.kf-take .kf-actions{display:flex;align-items:center;justify-content:space-between;width:100%;gap:6px}
+.kf-take .kf-label{font-size:12px;color:var(--graphite)}
+.kf-delete{display:inline-flex;align-items:center;justify-content:center;min-width:28px;min-height:28px;border:1px solid var(--line);border-radius:4px;background:var(--sheet);color:var(--red);font-size:20px;cursor:pointer}
+.kf-delete:hover{background:var(--red);color:#fff}
+.kf-delete:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.kf-delete:disabled{opacity:.5;cursor:wait}
 .take{border:1px solid var(--line);background:var(--sheet);border-radius:4px;padding:2px 8px;font:600 12px/1.4 var(--f-display);cursor:pointer;position:relative}
 .take.view{border-color:var(--blue);color:var(--blue)}
 .th.sel::after,.take.sel::after{content:"";position:absolute;inset:-6px -8px;border:2px solid var(--red);border-radius:50%;transform:rotate(-4deg);pointer-events:none}
@@ -215,6 +227,18 @@ code{font:12.5px var(--f-script);background:var(--paper);padding:1px 5px;border-
 .model .acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:auto}
 
 /* ---------- queue ---------- */
+.queue-section{margin:24px 0}
+.queue-job{background:var(--sheet);border:1px solid var(--line);border-radius:6px;padding:14px 16px;margin:10px 0}
+.queue-job-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.queue-job-head .pill{margin-left:auto}
+.queue-job-body{display:flex;gap:18px;align-items:center;margin-top:10px;flex-wrap:wrap}
+.queue-meter{flex:1;min-width:180px;font-size:13px}
+.queue-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.queue-progress{display:block;width:100%;height:12px;margin:4px 0 8px;accent-color:var(--blue)}
+.queue-progress.done{accent-color:var(--green)}
+.queue-progress::-webkit-progress-bar{background:var(--paper);border-radius:6px}
+.queue-progress::-webkit-progress-value{background:var(--blue);border-radius:6px}
+.queue-progress.done::-webkit-progress-value{background:var(--green)}
 .qstats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
 .qs{background:var(--sheet);border:1px solid var(--line);border-radius:6px;padding:12px 16px}
 .qs b{display:block;font:700 30px/1 var(--f-display);font-variant-numeric:tabular-nums}
@@ -259,6 +283,12 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
 .inst td input{padding:5px 7px}
 .roles{display:flex;gap:10px;flex-wrap:wrap}
 
+/* ---------- soundtrack ---------- */
+.audio-lane{position:relative;height:48px;background:var(--paper);border:1px solid var(--line);border-radius:4px;margin:8px 0;overflow:hidden}
+.audio-cue{position:absolute;top:6px;height:34px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid var(--blue);border-radius:4px;background:var(--blue-soft);cursor:pointer;min-width:4px;padding:4px;text-align:left}
+.audio-cue.sfx{background:var(--amber-soft);border-color:var(--amber)}
+.audio-list{display:flex;flex-direction:column;gap:10px;margin:14px 0}
+.audio-item{border:1px solid var(--line);border-radius:5px;padding:10px;display:flex;flex-wrap:wrap;align-items:center;gap:10px}
 /* ---------- overlays ---------- */
 .modal{position:fixed;inset:0;background:rgba(30,34,41,.45);display:none;align-items:center;justify-content:center;z-index:20;padding:20px}
 .modal.on{display:flex}
@@ -279,7 +309,8 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
 #lightbox{position:fixed;inset:0;background:rgba(15,17,21,.92);display:none;align-items:center;justify-content:center;z-index:25;cursor:zoom-out}
 #lightbox img{max-width:94vw;max-height:92vh}
 @media (max-width:1400px){.cut{grid-template-columns:76px 300px minmax(0,1fr)}.stages{grid-column:2/-1;border-left:0;border-top:1px dashed var(--line);flex-direction:row}.stage{border-bottom:0;border-right:1px solid var(--line2)}.stage:last-child{border-right:0}}
-@media (max-width:1000px){body{grid-template-columns:1fr}aside{position:static;height:auto}nav{flex-direction:row;overflow:auto}.side-foot{display:none}.cut{grid-template-columns:1fr}.cut-no{flex-direction:row;align-items:baseline;border-right:0}.stages{grid-column:auto;flex-direction:column}.script-wrap,.asm,.sec{grid-template-columns:1fr}}
+@media (max-width:1000px){body{grid-template-columns:176px minmax(0,1fr)}main{padding-left:16px;padding-right:16px}.brand{padding-left:12px;padding-right:12px}nav{padding-left:6px;padding-right:6px}.cut{grid-template-columns:1fr}.cut-no{flex-direction:row;align-items:baseline;border-right:0}.stages{grid-column:auto;flex-direction:column}.script-wrap,.asm,.sec{grid-template-columns:1fr}}
+@media (max-width:600px){body{grid-template-columns:144px minmax(0,1fr)}main{padding-left:12px;padding-right:12px}.brand{gap:6px}.brand b{font-size:17px}nav button{padding-left:8px;padding-right:8px}nav button .jp{display:none}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style></head><body>
 <aside>
@@ -357,7 +388,11 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
 <section class="tab" id="t-queue">
  <div class="qstats" id="qstats"></div>
  <div class="toolbar"><button class="btn" onclick="jobs('retry_errors')">Retry failed jobs</button><button class="btn" onclick="jobs('cancel_pending')">Cancel waiting jobs</button><button class="btn ghost" onclick="jobs('clear')">Clear finished</button></div>
- <div class="tbl"><table><thead><tr><th>Job</th><th>For</th><th>Step</th><th>Status</th><th>Server</th><th>Progress</th><th>Time</th><th></th></tr></thead><tbody id="jobrows"></tbody></table></div>
+ <p class="muted">Progress and finish times are approximate, based on similar successful renders. Server load and workflow changes can affect timing. A job reaches 100% only when its output is saved.</p>
+ <section class="queue-section" aria-labelledby="queueactiveheading"><h2 id="queueactiveheading">Active renders</h2><div id="queueactive"></div></section>
+ <section class="queue-section" aria-labelledby="queuequeuedheading"><h2 id="queuequeuedheading">Queued renders</h2><div id="queuequeued"></div></section>
+ <section class="queue-section" aria-labelledby="queuecompletedheading"><h2 id="queuecompletedheading">Completed renders</h2><p id="queuecompletednote" class="muted"></p><div id="queuecompleted"></div></section>
+ <section class="queue-section" id="queueattentionsection" aria-labelledby="queueattentionheading" hidden><h2 id="queueattentionheading">Failed and cancelled</h2><div id="queueattention"></div></section>
 </section>
 
 <section class="tab" id="t-assemble">
@@ -372,9 +407,18 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
     <label class="check" style="margin-top:10px"><input type="checkbox" id="usemusic" checked> Mix music under the episode</label></div>
    <div class="panel"><h3>Build the episode</h3>
     <p class="muted" style="font-size:13px;margin:0 0 12px">Each shot becomes a 1920×1080, 24 fps clip with its dialogue. Still shots get a slow push-in, and anything not ready yet is black. The output folder also holds every shot as a separate file, a <b>timeline.edl</b> for DaVinci Resolve and the shot list.</p>
-    <button class="btn ink" style="width:100%;justify-content:center;padding:10px" onclick="post('/api/assemble',{use_music:$('#usemusic').checked,music_volume:+$('#mvol').value}).then(r=>r.ok!==false&&toast('Building the episode'))">Build episode</button>
+    <button class="btn ink" style="width:100%;justify-content:center;padding:10px" onclick="post('/api/assemble',{use_music:$('#usemusic').checked,music_volume:+$('#mvol').value,use_timed:$('#usetimed').checked}).then(r=>r.ok!==false&&toast('Building the episode'))">Build episode</button>
     <div id="arun" class="warn-t" style="margin-top:8px;font-size:13px"></div></div>
   </div>
+ </div>
+
+ <div class="panel" style="margin-top:20px"><h2>Timed music and sound effects</h2>
+ <p>Add audio at absolute episode times (seconds, MM:SS or HH:MM:SS). Cues overlap freely; dialogue is preserved. Timing stays at these positions if you edit the shot list.</p>
+ <div class="toolbar"><button class="btn pri" onclick="editAudioCue()">Add music / sound effect</button><label class="check"><input type="checkbox" id="usetimed" checked> Include enabled cues when building the episode</label></div>
+ <div id="audiotimeline"></div><div id="audiocues"></div>
+ <h3>Change the soundtrack after rendering</h3><p>Choose an episode, preview it, then export a new soundtrack. This copies the existing picture without rendering shots or using ComfyUI. New episode builds retain a dialogue-only master so repeated mixes do not stack.</p>
+ <div class="toolbar"><label for="audioexport">Rendered episode</label><select id="audioexport" style="width:auto;max-width:100%" onchange="renderSoundtrack(true)"></select><button class="btn" onclick="post('/api/audio/discover',{}).then(r=>r.ok!==false&&toast('Found '+r.found+' older episode exports'))">Find rendered episodes</button><button class="btn" onclick="previewAudioExport()">Preview selected episode</button><button class="btn pri" onclick="exportSoundtrack()">Export new soundtrack</button></div>
+ <p id="audioexportnote" class="muted"></p><p>Soundtrack exports include all enabled cues plus the whole-episode music bed above if its checkbox is selected. Older exports without a dialogue-only master retain their embedded soundtrack.</p>
  </div>
 </section>
 
@@ -403,7 +447,7 @@ function toast(m,bad){const t=$('#toast');t.textContent=m;t.className=bad?'bad':
 function readFile(f){return new Promise(res=>{const r=new FileReader();r.onload=()=>res({name:f.name,data:r.result});r.readAsDataURL(f)})}
 function pick(accept,cb){const i=document.createElement('input');i.type='file';i.accept=accept;i.onchange=async()=>{if(i.files[0])cb(await readFile(i.files[0]))};i.click()}
 document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>go(b.dataset.t));
-function go(t){tab=t;document.querySelectorAll('#nav button').forEach(x=>x.classList.toggle('on',x.dataset.t===t));document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x.id==='t-'+t));render(true);window.scrollTo(0,0)}
+function go(t){tab=t;document.querySelectorAll('#nav button').forEach(x=>x.classList.toggle('on',x.dataset.t===t));document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x.id==='t-'+t));render(true);$('main').scrollTo(0,0)}
 let LASTSTATE='';
 async function load(){try{const t=await (await fetch('/api/state')).text();if(t===LASTSTATE)return;LASTSTATE=t;S=JSON.parse(t);render()}catch(e){}}
 const fmtT=sec=>{sec=Math.round(sec);return sec>=3600?`${Math.floor(sec/3600)}h ${String(Math.floor(sec%3600/60)).padStart(2,'0')}m`:`${Math.floor(sec/60)}:${String(sec%60).padStart(2,'0')}`};
@@ -578,7 +622,7 @@ function renderShots(){
   <div class="cut-no"><label class="check"><input type="checkbox" ${sel.has(s.id)?'checked':''} onchange="tog(${s.id},this.checked)" aria-label="Select shot ${s.seq|0}"></label>
    <div class="no"><small>Shot</small>${pad(s.seq)}</div><div class="dur">${(+s.duration).toFixed(1)} s</div><div class="kind">${s.kind==='still'?'Still':'Motion'}</div>${s.outdated.length?'<span class="err">Outdated renders</span>':''}
    <div class="mv"><button onclick="post('/api/shot/move',{id:${s.id},dir:-1})" title="Move up" aria-label="Move up">▲</button><button onclick="post('/api/shot/move',{id:${s.id},dir:1})" title="Move down" aria-label="Move down">▼</button></div></div>
-  <div class="screen">${media}${viewing?`<span class="tag">${lab(viewing)}</span>`:''}${viewing&&(!approved||viewing.draft)?`<span class="use" style="display:flex;gap:6px">${viewing.draft?`<button class="btn sm" onclick="fullQuality(${viewing.id})" title="Render again at full quality with the same seed">Render full quality</button>`:''}${!approved?`<button class="btn sm red" onclick="approve(${viewing.id})">Use this take</button>`:''}</span>`:''}</div>
+  <div class="screen">${media}${viewing&&viewing.stage==='keyframe'?`<button class="btn sm danger delete-keyframe" onclick="deleteKeyframe(${s.id},${viewing.id},this)" aria-label="Delete keyframe K${kfs.findIndex(t=>t.id===viewing.id)+1} from shot ${pad(s.seq)}">Delete keyframe K${kfs.findIndex(t=>t.id===viewing.id)+1}</button>`:''}${viewing?`<span class="tag">${lab(viewing)}</span>`:''}${viewing&&(!approved||viewing.draft)?`<span class="use" style="display:flex;gap:6px">${viewing.draft?`<button class="btn sm" onclick="fullQuality(${viewing.id})" title="Render again at full quality with the same seed">Render full quality</button>`:''}${!approved?`<button class="btn sm red" onclick="approve(${viewing.id})">Use this take</button>`:''}</span>`:''}</div>
   <div class="info"><h3>${esc(s.scene)||'Untitled scene'}</h3>${names?`<div class="cast">${names}</div>`:''}
    <p>${esc(s.keyframe_prompt)||'<span class="muted">No keyframe description yet.</span>'}</p>
    ${s.kind==='motion'&&s.motion_prompt&&s.motion_prompt!==s.keyframe_prompt?`<p class="mp"><b>Motion:</b> ${esc(s.motion_prompt)}</p>`:''}${s.camera?`<p class="cam"><b>Camera:</b> ${esc(s.camera)}</p>`:''}
@@ -587,7 +631,7 @@ function renderShots(){
    <div class="acts"><button class="btn sm" onclick="editShot(${s.id})">Edit shot</button><button class="btn sm ghost" onclick="editShot(null,${s.seq})">Add shot after</button></div></div>
   <div class="stages">
    <div class="stage"><div class="st-h"><span class="dot ${stState(s.keyframe_take,s.active.keyframe)}"></span>Keyframe<span class="cnt">${kfs.length?kfs.length+' take'+(kfs.length>1?'s':''):''}</span><span class="btns"><button class="btn sm" onclick="gen('keyframe',[${s.id}])">${kfs.length?'More':'Generate'}</button></span></div>
-    <div class="st-b">${kfs.map(t=>`<button class="th ${t.id===s.keyframe_take?'sel'+mark(t.id,'k'):''}" style="background-image:url('${t.url}')" onclick="approve(${t.id})" ondblclick="lb('${t.url}')" title="Click to use, double-click to enlarge" aria-label="Keyframe take"></button>`).join('')}${pend('keyframe')}</div></div>
+    <div class="st-b">${kfs.map((t,i)=>`<span class="kf-take"><button class="th ${t.id===s.keyframe_take?'sel'+mark(t.id,'k'):''}" style="background-image:url('${t.url}')" onclick="approve(${t.id})" ondblclick="lb('${t.url}')" title="Click to use K${i+1}, double-click to enlarge" aria-label="Use keyframe K${i+1} for shot ${pad(s.seq)}"></button><span class="kf-actions"><span class="kf-label">K${i+1}</span><button type="button" class="kf-delete" onclick="deleteKeyframe(${s.id},${t.id},this)" title="Delete keyframe K${i+1}" aria-label="Delete keyframe K${i+1} from shot ${pad(s.seq)}">×</button></span></span>`).join('')}${pend('keyframe')}</div></div>
    <div class="stage"><div class="st-h"><span class="dot ${s.kind==='still'&&!clips.length?(s.keyframe_take?'ok':'hollow'):stState(s.clip_take,s.active.animate||s.active.lipsync)}"></span>${s.kind==='still'?'Push-in':'Clip'}<span class="cnt">${clips.length?clips.length+' take'+(clips.length>1?'s':''):''}</span>
     <span class="btns">${s.kind==='motion'?`<button class="btn sm" ${s.keyframe_take?'':'disabled title="Choose a keyframe first"'} onclick="gen('animate',[${s.id}])">Animate</button>`:''}${s.kind==='motion'&&s.clip_take&&rem>0.25?`<button class="btn sm" onclick="gen('continue',[${s.id}])" title="Animate the next part from the last frame">Continue</button>`:''}${missingLines(s)?`<button class="btn sm" onclick="voiceOne(${s.id})" title="macOS voices for the lines without audio">Temp voice</button>`:''}${s.audio?`<button class="btn sm" ${wfOK('lipsync')&&s.keyframe_take?'':'disabled title="Needs a keyframe and a lip-sync workflow (Settings)"'} onclick="gen('lipsync',[${s.id}])">Lip sync</button>`:''}</span></div>
     <div class="st-b">${clips.length?chips(clips,s.clip_take,'T','c'):s.kind==='still'?'<span class="none">Made from the keyframe when you assemble.</span>':''}${pend('animate')}${pend('lipsync')}</div>${contRow}${pend('continue')}${cover}</div>
@@ -657,6 +701,19 @@ async function lineSrc(sid,idx,sel){const v=sel.value;if(v==='keep')return;let b
  if(v==='none')b.src='none';else if(v==='temp')b.src='temp';else if(v.startsWith('clip:')){b.src='clip';b.clip_id=+v.slice(5)}
  else if(v==='upload'){return pick('audio/*',async f=>{await post('/api/line/set',{shot_id:sid,index:idx,src:'upload',file:f});lineTable(sid)})}
  await post('/api/line/set',b);lineTable(sid)}
+async function deleteKeyframe(sid,tid,button){
+ const s=S.shots.find(x=>x.id===sid),t=s&&s.takes.find(x=>x.id===tid&&x.stage==='keyframe');if(!t)return;
+ const frames=s.takes.filter(x=>x.stage==='keyframe'),index=frames.findIndex(x=>x.id===tid),label='K'+(index+1);
+ const message=`Delete keyframe ${label} from shot ${pad(s.seq)}? Its image file will be removed. Other takes stay available.`+(s.keyframe_take===tid?' This is the keyframe currently used by this shot; choose another before rendering.':'');
+ if(!confirm(message))return;
+ const remaining=frames.filter(x=>x.id!==tid),next=remaining[Math.min(index,remaining.length-1)];
+ button.disabled=true;
+ try{const r=await post('/api/take/delete',{take_id:tid});if(r.ok===false)return;
+  const wasPreviewed=VIEW[sid]===tid||(!VIEW[sid]&&!s.final_take&&!s.clip_take&&s.keyframe_take===tid);
+  if(wasPreviewed){if(next)VIEW[sid]=next.id;else delete VIEW[sid]}
+  renderShots();toast('Deleted keyframe '+label);
+ }finally{button.disabled=false}
+}
 function delView(sid){const s=S.shots.find(x=>x.id===sid);const v=take(VIEW[sid])||take(s.final_take)||take(s.clip_take)||take(s.keyframe_take);if(v){delete VIEW[sid];post('/api/take/delete',{take_id:v.id});closeModal()}}
 
 /* ---------- voices ---------- */
@@ -720,26 +777,77 @@ function playScene(btn,gi){
  SCENEPLAY={g:gi,stop(){if(cur)cur.pause();clearTimeout(timer)}};btn.textContent='Stop';next()}
 
 /* ---------- render queue ---------- */
-function renderQueue(){const inst=Object.fromEntries(S.instances.map(i=>[i.id,i.name])),seq=Object.fromEntries(S.shots.map(s=>[s.id,s.seq|0])),an=Object.fromEntries(S.assets.map(a=>[a.id,a.name]));const c=S.job_counts;
- $('#qstats').innerHTML=`<div class="qs run"><b>${c.running||0}</b><span>Rendering now</span></div><div class="qs"><b>${c.pending||0}</b><span>Waiting</span></div><div class="qs"><b class="ok-t">${c.done||0}</b><span>Finished</span></div><div class="qs err"><b>${c.error||0}</b><span>Failed</span></div>`;
- const step={sheet:'Turnaround sheet',keyframe:'Keyframe',animate:'Animate',continue:'Continue',lipsync:'Lip sync',upscale:'Upscale',voice:'Voice line'};
- $('#jobrows').innerHTML=S.jobs.map(j=>{const t=j.finished&&j.started?fmtT(j.finished-j.started):j.started&&j.status==='running'?fmtT(Date.now()/1000-j.started):'';
-  const who=j.stage==='sheet'?esc(an[j.asset_id]||'Deleted cast'):(seq[j.shot_id]!=null?`Shot ${pad(seq[j.shot_id])}`:'Deleted shot');
-  return `<tr><td class="muted">${j.id}</td><td>${who}</td><td>${step[j.stage]||j.stage}${j.stage==='continue'?' (part '+((j.segment||0)+2)+')':''}${j.draft?' <span class="flag">draft</span>':''}</td><td><span class="pill p-${j.status}">${({running:'Rendering',pending:'Waiting',done:'Done',error:'Failed',cancelled:'Cancelled'})[j.status]||j.status}</span></td><td class="muted">${esc(inst[j.instance_id]||'')}</td>
-  <td>${j.error?`<details><summary class="err">${esc(j.error.slice(0,100))}</summary><pre>${esc(j.error)}</pre></details>`:`<span class="muted">${esc(j.progress||'')}${S.production.job_estimates[j.id]?' · ETA '+fmtT(S.production.job_estimates[j.id]):''}</span>`}</td><td style="font-variant-numeric:tabular-nums">${t}</td>
-  <td>${j.status==='pending'?`<label>Priority <input type="number" min="-10" max="10" value="${j.priority||0}" style="width:60px" aria-label="Priority for job ${j.id}" onchange="post('/api/jobs',{action:'priority',ids:[${j.id}],priority:+this.value})"></label>`:''}${['pending','running'].includes(j.status)?`<button class="btn sm" onclick="post('/api/jobs',{action:'cancel',ids:[${j.id}]})">Cancel</button>`:''}${['error','cancelled'].includes(j.status)?`<button class="btn sm" onclick="post('/api/jobs',{action:'retry',ids:[${j.id}]})">Retry</button>`:''}</td></tr>`}).join('')
-  ||'<tr><td colspan="8" class="muted" style="padding:28px;text-align:center">No jobs yet. Generate keyframes from the Shots page and they’ll appear here.</td></tr>'}
+function queueProgress(j,label){
+ if(j.status==='done')return `<progress class="queue-progress done" value="100" max="100" aria-label="${esc(label)} complete"></progress><span class="ok-t">Complete · 100%</span>`;
+ if(j.status==='pending')return `<progress class="queue-progress" value="0" max="100" aria-label="${esc(label)} queued"></progress><span class="muted">Queued · not started</span>`;
+ if(j.status!=='running')return '';
+ const known=j.estimated_progress!=null;
+ return `<progress class="queue-progress" ${known?`value="${j.estimated_progress}"`:''} max="100" aria-label="${esc(label)} ${known?'estimated progress':'active; progress unknown'}"></progress><span>${known?'Estimated '+j.estimated_progress+'%':'Active · learning timing'}${j.overdue?' · taking longer than typical':''}</span>`;
+}
+function renderQueue(){
+ const inst=Object.fromEntries(S.instances.map(i=>[i.id,i.name])),seq=Object.fromEntries(S.shots.map(s=>[s.id,s.seq|0])),cast=Object.fromEntries(S.assets.map(a=>[a.id,a.name]));
+ const c=S.job_counts,q=S.render_queue;
+ $('#qstats').innerHTML=`<div class="qs run"><b>${c.running||0}</b><span>Active renders</span></div><div class="qs"><b>${c.pending||0}</b><span>Queued</span></div><div class="qs"><b class="ok-t">${c.done||0}</b><span>Completed</span></div><div class="qs err"><b>${(c.error||0)+(c.cancelled||0)}</b><span>Failed / cancelled</span></div>`;
+ const steps={sheet:'Turnaround sheet',keyframe:'Keyframe',animate:'Animation',continue:'Continuation',lipsync:'Lip sync',upscale:'Upscale',voice:'Voice line',voice_design:'Voice design'};
+ const card=j=>{
+  const who=['sheet','voice_design'].includes(j.stage)?cast[j.asset_id]||'Deleted cast member':seq[j.shot_id]!=null?'Shot '+pad(seq[j.shot_id]):'Deleted shot';
+  const label=(steps[j.stage]||j.stage)+' · '+who;
+  let timing='';
+  if(j.status==='running')timing=`${fmtT(j.elapsed_seconds||0)} elapsed · ${j.overdue?'Finish time uncertain; typical duration was '+fmtT(j.typical_seconds):j.remaining_seconds!=null?'about '+fmtT(j.remaining_seconds)+' remaining':'No timing history yet'}`;
+  else if(j.status==='pending')timing=j.estimated_finish_seconds!=null?`Estimated start ${j.estimated_start_seconds?'in '+fmtT(j.estimated_start_seconds):'when dispatched'} · finish in about ${fmtT(j.estimated_finish_seconds)}`:j.wait_reason||'Estimate not available yet';
+  else timing=j.elapsed_seconds!=null?'Render time '+fmtT(j.elapsed_seconds):'No recorded render duration';
+  const server=inst[j.instance_id]||inst[j.estimated_server_id];
+  const controls=j.status==='pending'?`<label class="check">Priority <input type="number" min="-10" max="10" value="${j.priority||0}" style="width:64px" aria-label="Priority for job ${j.id}" onchange="post('/api/jobs',{action:'priority',ids:[${j.id}],priority:+this.value})"></label>`:'';
+  return `<article class="queue-job"><div class="queue-job-head"><b>${esc(label)}</b><span class="muted">#${j.id}${j.queue_position?' · queue position '+j.queue_position:''}${j.draft?' · Draft':''}${j.stage==='continue'?' · part '+((j.segment||0)+2):''}</span><span class="pill p-${j.status}">${({running:'Active',pending:'Queued',done:'Completed',error:'Failed',cancelled:'Cancelled'})[j.status]}</span></div>
+   <div class="queue-job-body"><div class="queue-meter">${queueProgress(j,label)}<div class="muted">${esc(timing)}</div>${j.status==='running'&&j.progress?`<div class="muted">${esc(j.progress)}</div>`:''}${server?`<div class="muted">${j.status==='pending'?'Expected server: ':'Server: '}${esc(server)}</div>`:''}${j.sample_count&&['pending','running'].includes(j.status)?`<div class="muted">Estimate from ${j.sample_count} similar successful render${j.sample_count===1?'':'s'}</div>`:''}${j.error?`<details><summary class="err">${esc(j.error.slice(0,120))}</summary><pre>${esc(j.error)}</pre></details>`:''}</div>
+   <div class="queue-actions">${controls}${['pending','running'].includes(j.status)?`<button class="btn sm" onclick="post('/api/jobs',{action:'cancel',ids:[${j.id}]})">Cancel</button>`:''}${['error','cancelled'].includes(j.status)?`<button class="btn sm" onclick="post('/api/jobs',{action:'retry',ids:[${j.id}]})">Retry</button>`:''}</div></div></article>`;
+ };
+ $('#queueactive').innerHTML=q.active.map(card).join('')||'<p class="muted">No active renders.</p>';
+ // Keep a priority field stable while the user is typing; other sections continue updating.
+ if(!document.activeElement?.closest('#queuequeued input'))$('#queuequeued').innerHTML=q.queued.map(card).join('')||'<p class="muted">Nothing queued.</p>';
+ $('#queuecompleted').innerHTML=q.completed.map(card).join('')||'<p class="muted">No completed renders yet.</p>';
+ $('#queuecompletednote').textContent=c.done>q.completed.length?`Showing the latest ${q.completed.length} of ${c.done} completed renders.`:'';
+ $('#queueattention').innerHTML=q.attention.map(card).join('');
+ $('#queueattentionsection').hidden=!q.attention.length;
+}
 function jobs(a){post('/api/jobs',{action:a})}
 
 /* ---------- assemble ---------- */
-function renderAssemble(){const total=S.shots.reduce((a,s)=>a+(+s.duration||0),0),cn=counts();
+let LAST_ASSEMBLY_OUTPUT=null;
+function renderAssemble(){renderSoundtrack();const total=S.shots.reduce((a,s)=>a+(+s.duration||0),0),cn=counts();
  const held=S.shots.filter(s=>s.kind==='motion'&&s.clip_take&&(s.remaining||0)>0.25).length,drafts=S.shots.filter(s=>s.draft_in_use).length;
  $('#readiness').innerHTML=`<li><span class="dot ${cn.done===S.shots.length&&S.shots.length?'ok':'run'}"></span>Shots ready<b>${cn.done} of ${S.shots.length}</b></li><li><span class="dot ${cn.kf?'bad':'ok'}"></span>Missing a keyframe<b>${cn.kf}</b></li><li><span class="dot ${cn.clip?'run':'ok'}"></span>Missing a clip<b>${cn.clip}</b></li><li><span class="dot ${cn.lines?'run':'ok'}"></span>Dialogue lines without audio<b>${cn.lines}</b></li><li><span class="dot ${held?'run':'ok'}"></span>Motion shots that freeze at the end<b>${held}</b></li><li><span class="dot ${drafts?'run':'ok'}"></span>Shots using draft clips<b>${drafts}</b></li><li><span class="dot hollow"></span>Runtime<b>${fmtT(total)}</b></li>`;
  $('#musicinfo').innerHTML=S.music_url?`<audio src="${S.music_url}" controls style="height:30px;width:100%"></audio><button class="btn sm ghost" style="margin-top:6px" onclick="post('/api/music',{clear:true})">Remove music</button>`:'No music chosen.';
  const A=S.assembly;$('#arun').textContent=A.running?'Building… this can take a while for a long episode.':'';$('#alog').textContent=(A.log||[]).join('\n')||'No build yet.';
- if(A.output_url){if($('#theater').dataset.u!==A.output_url){$('#theater').dataset.u=A.output_url;$('#theater').innerHTML=`<video src="${A.output_url}" controls></video>`;
+ if(A.output_url){if(LAST_ASSEMBLY_OUTPUT!==A.output_url){LAST_ASSEMBLY_OUTPUT=A.output_url;$('#theater').dataset.u=A.output_url;$('#theater').innerHTML=`<video src="${A.output_url}" controls></video>`;
    $('#aout').innerHTML=`<div class="toolbar"><button class="btn" onclick="post('/api/reveal',{path:${jsq(A.output)}})">Show in Finder</button><a class="btn ghost" href="${A.output_url}" download>Save a copy</a><span class="muted" style="font-size:13px">In Resolve: File › Import › Timeline, choose timeline.edl, then point it at the shots folder.</span></div>`}}
  else if(!$('#theater').dataset.u)$('#theater').innerHTML='<div>Your episode plays here after the first build.</div>'}
+
+/* Timed episode soundtrack; edits are saved separately from rendered picture. */
+function audioTime(n){const ms=Math.round(n*1000),hours=Math.floor(ms/3600000),minutes=Math.floor(ms%3600000/60000),secs=((ms%60000)/1000).toFixed(3).padStart(6,'0');return (hours?hours+':':'')+String(minutes).padStart(2,'0')+':'+secs}
+function audioPlayhead(){const v=$('#theater video');return v&&Number.isFinite(v.currentTime)?v.currentTime:0}
+function renderSoundtrack(force=false){
+ const cues=S.audio_cues||[],exports=S.audio_exports||[],sel=$('#audioexport'),old=sel.value;
+ if(force||!same('audioexports',exports)){sel.innerHTML=exports.map(e=>`<option value="${e.id}">${esc(e.title)} · ${audioTime(e.seconds)}</option>`).join('')||'<option value="">No rendered episodes found</option>';if(exports.some(e=>String(e.id)===old))sel.value=old}
+ const current=exports.find(e=>e.id===+sel.value),duration=current?current.seconds:S.shots.reduce((sum,s)=>sum+s.duration,0);
+ $('#audioexportnote').textContent=current?(current.clean?'A dialogue-only master is available. Each export rebuilds the mix from that master.':'This older episode contains its existing audio. New cues will be added on top; rebuild the episode once for a clean master.'):'Build an episode, or click Find rendered episodes for earlier app exports.';
+ if(!force&&same('audiocues',[cues,duration]))return;
+ $('#audiotimeline').innerHTML=duration?`<p class="muted">Episode timeline · ${audioTime(duration)} · click a cue to edit its timing</p>`+['music','sfx'].map(kind=>`<span class="muted">${kind==='music'?'Music':'Sound effects'}</span><div class="audio-lane">${cues.filter(c=>c.kind===kind&&c.enabled&&c.start<duration).map(c=>`<button class="audio-cue ${kind}" style="left:${100*c.start/duration}%;width:${100*Math.min(c.duration,duration-c.start)/duration}%" onclick="editAudioCue(${c.id})" title="${esc(c.name)} at ${audioTime(c.start)}" aria-label="Edit ${esc(c.name)} at ${audioTime(c.start)}">${esc(c.name)}</button>`).join('')}</div>`).join(''):'<p class="muted">Add shots or choose a rendered episode to see the timeline.</p>';
+ $('#audiocues').innerHTML='<div class="audio-list">'+cues.map(c=>`<div class="audio-item"><label class="check"><input type="checkbox" ${c.enabled?'checked':''} onchange="toggleAudioCue(${c.id},this.checked)" aria-label="Enable ${esc(c.name)}">${esc(c.name)}</label><span>${c.kind==='music'?'Music':'Sound effect'} · ${audioTime(c.start)} → ${audioTime(c.start+c.duration)} · volume ${c.volume}${c.loop?' · loop':''}</span>${duration&&c.start>=duration?'<span class="err">Starts after episode end; will be skipped</span>':''}<audio controls preload="none" src="${c.url}" style="height:30px;max-width:220px" aria-label="Preview source ${esc(c.name)}"></audio><button class="btn sm" onclick="seekEpisode(${c.start})">Go to time</button><button class="btn sm" onclick="editAudioCue(${c.id})">Edit timing</button><button class="btn sm danger" onclick="removeAudioCue(${c.id})">Remove cue</button></div>`).join('')+'</div>'+(cues.length?'':'<p class="muted">No timed audio yet. Add a music track, footsteps, a door slam, ambience, or another sound.</p>');
+}
+function seekEpisode(time){const v=$('#theater video');if(!v)return toast('Preview a rendered episode first');v.currentTime=Math.min(time,Number.isFinite(v.duration)?v.duration:time)}
+function previewAudioExport(){const e=(S.audio_exports||[]).find(e=>e.id===+$('#audioexport').value);if(!e)return toast('Choose a rendered episode first',1);$('#theater').dataset.u=e.url;$('#theater').innerHTML=`<video src="${e.url}" controls></video>`;$('#aout').innerHTML=`<a class="btn" href="${e.url}" download>Save this episode</a>`}
+function editAudioCue(id){const cue=id?(S.audio_cues||[]).find(c=>c.id===id):null;if(id&&!cue)return;
+ const c=cue||{name:'',kind:'sfx',start:audioPlayhead(),offset:0,duration:'',volume:1,fade_in:0,fade_out:0,loop:0,enabled:1};
+ modal(`<div class="dlg-h"><h2>${id?'Edit audio cue':'Add music or sound effect'}</h2></div><div class="dlg-b"><label class="f" for="acfile">Audio file ${id?'(leave empty to keep current source)':''}</label><input type="file" id="acfile" accept="audio/*"><div class="g2"><div><label class="f" for="acname">Name</label><input id="acname" value="${esc(c.name)}"></div><div><label class="f" for="ackind">Track</label><select id="ackind"><option value="sfx">Sound effect</option><option value="music">Music</option></select></div></div>
+ <p class="muted">Times accept seconds, MM:SS or HH:MM:SS. Start is measured from the beginning of the episode. Source offset skips the beginning of the audio file.</p>
+ <div class="g2"><div><label class="f" for="acstart">Episode start time</label><input id="acstart" value="${audioTime(c.start)}"><button class="btn sm" onclick="$('#acstart').value=audioTime(audioPlayhead())">Use episode playhead</button></div><div><label class="f" for="acoffset">Source offset</label><input id="acoffset" value="${audioTime(c.offset)}"></div><div><label class="f" for="acduration">Play duration (blank = remaining source length)</label><input id="acduration" value="${c.duration===''?'':audioTime(c.duration)}"></div><div><label class="f" for="acvolume">Volume (0 = mute, 1 = original)</label><input id="acvolume" type="number" min="0" max="4" step="0.05" value="${c.volume}"></div><div><label class="f" for="acfadein">Fade in</label><input id="acfadein" value="${audioTime(c.fade_in)}"></div><div><label class="f" for="acfadeout">Fade out</label><input id="acfadeout" value="${audioTime(c.fade_out)}"></div></div><label class="check"><input id="acloop" type="checkbox" ${c.loop?'checked':''}> Loop source to fill play duration</label><label class="check" style="margin-left:14px"><input id="acenabled" type="checkbox" ${c.enabled?'checked':''}> Enabled</label></div><div class="dlg-f"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn pri" id="acsave">Save cue</button></div>`);
+ $('#ackind').value=c.kind;
+ $('#acsave').onclick=async()=>{const button=$('#acsave'),file=$('#acfile').files[0];if(!id&&!file)return toast('Choose an audio file first',1);button.disabled=true;try{const b={id,name:$('#acname').value,kind:$('#ackind').value,start:$('#acstart').value,offset:$('#acoffset').value,duration:$('#acduration').value,volume:+$('#acvolume').value,fade_in:$('#acfadein').value,fade_out:$('#acfadeout').value,loop:$('#acloop').checked,enabled:$('#acenabled').checked};if(file)b.file=await readFile(file);const r=await post('/api/audio/cue/save',b);if(r.ok!==false){closeModal();toast('Audio cue saved')}}finally{button.disabled=false}};
+}
+function toggleAudioCue(id,on){const c=(S.audio_cues||[]).find(c=>c.id===id);if(c)post('/api/audio/cue/save',{...c,enabled:on})}
+function removeAudioCue(id){if(confirm('Remove this audio cue from future mixes? Existing episode exports stay unchanged.'))post('/api/audio/cue/delete',{id})}
+function exportSoundtrack(){const id=+$('#audioexport').value;if(!id)return toast('Choose a rendered episode first',1);post('/api/audio/remix',{export_id:id,use_music:$('#usemusic').checked,music_volume:+$('#mvol').value}).then(r=>r.ok!==false&&toast('Exporting new soundtrack; picture stays unchanged'))}
 
 /* ---------- settings ---------- */
 const WFLAB={keyframe:'Keyframes and turnaround sheets',animate:'Animate',animate_flf:'Animate to the next shot (first and last frame)',lipsync:'Lip sync (optional)',upscale:'Upscale (optional)',voice:'Voices: text to speech (Qwen3-TTS)',voice_design:'Voice design: a new voice from a description (Qwen3-TTS)'};
