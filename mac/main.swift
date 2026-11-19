@@ -3,6 +3,16 @@
 import Cocoa
 import WebKit
 
+func databaseAccessDenied(_ message: String) -> Bool {
+    let text = message.lowercased()
+    return text.contains("anime_studio_data_access_denied") ||
+        (text.contains("sqlite") && (text.contains("authorization denied") || text.contains("permission denied") || text.contains("operation not permitted")))
+}
+
+func htmlEscaped(_ text: String) -> String {
+    text.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate, WKDownloadDelegate {
     var window: NSWindow!
     var webView: WKWebView!
@@ -10,11 +20,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     var lastDownload: URL?
     let env = ProcessInfo.processInfo.environment
     lazy var port: String = env["AS_PORT"] ?? "8700"
-    lazy var dataDir: String = env["AS_DATA"] ?? (NSHomeDirectory() + "/Documents/AnimeStudio")
+    var selectedDataDir: String?
+    var dataDir: String { selectedDataDir ?? env["AS_DATA"] ?? (NSHomeDirectory() + "/Library/Application Support/AnimeStudio/Project Data") }
+    var startupGeneration = 0
+    var startupFailed = false
+    var serverReady = false
+    var quitting = false
+    var folderPanelOpen = false
+    var grantedFolder: URL?
+    let configDirectory = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/AnimeStudio")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
-        startServer()
+        restoreFolderAccess()
         let config = WKWebViewConfiguration()
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
         webView = WKWebView(frame: .zero, configuration: config)
@@ -30,40 +48,147 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         webView.loadHTMLString("<body style='background:#0f1115;color:#8b93a3;font:15px -apple-system;padding:40px'>Starting Anime Studio...</body>", baseURL: nil)
-        waitAndLoad(tries: 0)
+        startServer()
+    }
+
+    func restoreFolderAccess() {
+        // Managed app-owned storage never resolves or requests access to the old Documents bookmark.
+        if URL(fileURLWithPath: dataDir).standardizedFileURL.path.hasPrefix(configDirectory.standardizedFileURL.path + "/") { return }
+        let bookmark = configDirectory.appendingPathComponent("project-folder.bookmark")
+        guard let data = try? Data(contentsOf: bookmark) else { return }
+        var stale = false
+        guard let url = try? URL(resolvingBookmarkData: data, options: [.withSecurityScope], relativeTo: nil, bookmarkDataIsStale: &stale),
+              url.standardizedFileURL.path == URL(fileURLWithPath: dataDir).standardizedFileURL.path else { return }
+        if url.startAccessingSecurityScopedResource() { grantedFolder = url }
     }
 
     func startServer() {
-        guard let py = env["AS_PYTHON"], let script = env["AS_SCRIPT"] else { return }
-        try? FileManager.default.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
-        let logPath = dataDir + "/app.log"
-        FileManager.default.createFile(atPath: logPath, contents: nil)
+        startupGeneration += 1
+        let generation = startupGeneration
+        startupFailed = false
+        serverReady = false
+        webView.loadHTMLString("<body style='font:15px -apple-system;padding:40px'>Starting Anime Studio…</body>", baseURL: nil)
+        guard let py = env["AS_PYTHON"], let script = env["AS_SCRIPT"] else {
+            startupFailure("The Python launcher configuration is missing. Open Anime Studio.app rather than the native executable.", accessDenied: false)
+            return
+        }
+        let logURL = URL(fileURLWithPath: dataDir).appendingPathComponent("app.log")
         let p = Process()
         p.executableURL = URL(fileURLWithPath: py)
         p.arguments = [script, "--host", "127.0.0.1", "--port", port, "--data", dataDir]
-        if let h = FileHandle(forWritingAtPath: logPath) { p.standardOutput = h; p.standardError = h }
-        do { try p.run(); server = p } catch { NSLog("Anime Studio: could not start server: \(error)") }
+        do {
+            try FileManager.default.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
+            try Data().write(to: logURL)
+            let handle = try FileHandle(forWritingTo: logURL)
+            p.standardOutput = handle
+            p.standardError = handle
+            p.terminationHandler = { [weak self] process in
+                DispatchQueue.main.async {
+                    guard let self = self, !self.quitting, generation == self.startupGeneration, !self.startupFailed else { return }
+                    let log = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
+                    self.startupFailure(log.isEmpty ? "The local server exited (status \(process.terminationStatus))." : String(log.suffix(6000)),
+                                        accessDenied: databaseAccessDenied(log))
+                }
+            }
+            server = p
+            try p.run()
+            try? handle.close()
+            waitAndLoad(tries: 0, generation: generation)
+        } catch {
+            startupFailure("Cannot start the local server: \(error.localizedDescription)",
+                           accessDenied: (error as NSError).domain == NSCocoaErrorDomain && [NSFileReadNoPermissionError, NSFileWriteNoPermissionError].contains((error as NSError).code))
+        }
     }
 
-    func waitAndLoad(tries: Int) {
+    func waitAndLoad(tries: Int, generation: Int) {
+        guard generation == startupGeneration, !startupFailed, !quitting else { return }
         let ping = URL(string: "http://127.0.0.1:\(port)/api/ping")!
-        URLSession.shared.dataTask(with: ping) { _, response, _ in
+        URLSession.shared.dataTask(with: ping) { data, response, _ in
             DispatchQueue.main.async {
-                if (response as? HTTPURLResponse)?.statusCode == 200 {
+                guard generation == self.startupGeneration, !self.startupFailed, !self.quitting else { return }
+                let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                if (response as? HTTPURLResponse)?.statusCode == 200, json?["app"] as? String == "anime-studio", self.server?.isRunning == true {
+                    self.serverReady = true
                     self.webView.load(URLRequest(url: URL(string: "http://127.0.0.1:\(self.port)/")!))
                 } else if tries < 120 {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.waitAndLoad(tries: tries + 1) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.waitAndLoad(tries: tries + 1, generation: generation) }
                 } else {
-                    self.webView.loadHTMLString("<body style='background:#0f1115;color:#ff5c6c;font:15px -apple-system;padding:40px'>The Anime Studio server did not start.<br>See \(self.dataDir)/app.log</body>", baseURL: nil)
+                    self.startupFailure("The local server did not become ready. See \(self.dataDir)/app.log.", accessDenied: false)
                 }
             }
         }.resume()
     }
 
+    func startupFailure(_ details: String, accessDenied: Bool) {
+        guard !startupFailed, !quitting else { return }
+        startupFailed = true
+        let heading = accessDenied ? "Allow access to your project folder" : "Anime Studio server did not start"
+        let explanation = accessDenied ? "macOS blocked access to the project database. Choose the existing AnimeStudio Data folder to grant this app access. Your project will not be moved or replaced." : "The local server stopped. Check the error below or open the log."
+        webView.loadHTMLString("<body style='font:15px -apple-system;padding:40px'><h2>\(heading)</h2><p>\(explanation)</p><p>Use Anime Studio → Choose Project Folder… to retry.</p><pre style='white-space:pre-wrap'>\(htmlEscaped(details))</pre></body>", baseURL: nil)
+        let alert = NSAlert()
+        alert.messageText = heading
+        alert.informativeText = explanation + "\n\nProject: " + dataDir
+        alert.addButton(withTitle: accessDenied ? "Choose Project Folder…" : "Open Log")
+        alert.addButton(withTitle: "Close")
+        alert.beginSheetModal(for: window) { response in
+            if response == .alertFirstButtonReturn {
+                if accessDenied { self.chooseProjectFolder() }
+                else { NSWorkspace.shared.open(URL(fileURLWithPath: self.dataDir).appendingPathComponent("app.log")) }
+            }
+        }
+    }
+
+    @objc func chooseProjectFolderAction(_ sender: Any?) { chooseProjectFolder() }
+
+    func chooseProjectFolder() {
+        guard !folderPanelOpen else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Allow Anime Studio to open your project"
+        panel.message = "Select your existing AnimeStudio Data folder. It must contain studio.db. Your project will stay in place."
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.directoryURL = URL(fileURLWithPath: dataDir)
+        panel.prompt = "Use Project Folder"
+        folderPanelOpen = true
+        panel.beginSheetModal(for: window) { response in
+            self.folderPanelOpen = false
+            guard response == .OK, let url = panel.url else { return }
+            guard FileManager.default.fileExists(atPath: url.appendingPathComponent("studio.db").path) else {
+                let alert = NSAlert()
+                alert.messageText = "This is not an existing Anime Studio project"
+                alert.informativeText = "Choose the folder that contains studio.db. No project files were changed."
+                alert.beginSheetModal(for: self.window)
+                return
+            }
+            // A folder switch may also be requested while the current server is healthy.
+            self.startupGeneration += 1
+            if self.server?.isRunning == true {
+                self.server?.terminate()
+                self.server?.waitUntilExit()
+            }
+            self.grantedFolder?.stopAccessingSecurityScopedResource()
+            self.grantedFolder = nil
+            if url.startAccessingSecurityScopedResource() { self.grantedFolder = url }
+            self.selectedDataDir = url.path
+            do {
+                try FileManager.default.createDirectory(at: self.configDirectory, withIntermediateDirectories: true)
+                try url.path.write(to: self.configDirectory.appendingPathComponent("data-folder"), atomically: true, encoding: .utf8)
+                if let bookmark = try? url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil) {
+                    try bookmark.write(to: self.configDirectory.appendingPathComponent("project-folder.bookmark"), options: .atomic)
+                }
+            } catch { NSLog("Anime Studio: could not remember folder: \(error)") }
+            self.startServer()
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationWillTerminate(_ notification: Notification) {
+        quitting = true
         server?.terminate()
+        grantedFolder?.stopAccessingSecurityScopedResource()
     }
 
     @objc func reload(_ sender: Any?) { webView.reload() }
@@ -74,6 +199,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         main.addItem(appItem)
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Anime Studio", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: "Choose Project Folder…", action: #selector(chooseProjectFolderAction(_:)), keyEquivalent: "o")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Anime Studio", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(.separator())

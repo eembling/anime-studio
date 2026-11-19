@@ -12,6 +12,8 @@ nodes built into ComfyUI, so nothing needs installing on the server - just model
 
     python3 anime_studio.py --port 8700 --data ~/Documents/AnimeStudio
 """
+from script_dialogue import dialogue_line, script_blocks, recovery_preview, recover_dialogue
+import hashlib
 import argparse
 import base64
 import copy
@@ -246,7 +248,8 @@ MIGRATIONS = [  # columns added after v2.0 - existing projects get them on start
     ("shots", "cont_takes", "TEXT DEFAULT '[]'"), ("takes", "frames", "INTEGER"), ("takes", "segment", "INTEGER"),
     ("takes", "draft", "INTEGER DEFAULT 0"), ("jobs", "segment", "INTEGER"), ("jobs", "draft", "INTEGER DEFAULT 0"),
     ("shots", "line_audio", "TEXT DEFAULT '[]'"), ("shots", "audio_mode", "TEXT DEFAULT 'lines'"), ("jobs", "note", "TEXT"),
-    ("jobs", "priority", "INTEGER DEFAULT 0"),
+    ("jobs", "priority", "INTEGER DEFAULT 0"), ("jobs", "speaker", "TEXT DEFAULT ''"),
+    ("voice_takes", "line_index", "INTEGER"),
     ("takes", "input_signature", "TEXT"), ("voice_takes", "input_signature", "TEXT"),
     ("assets", "voice_desc", "TEXT DEFAULT ''"), ("assets", "voice_sample", "TEXT DEFAULT ''"),
 ]
@@ -254,9 +257,24 @@ MIGRATIONS = [  # columns added after v2.0 - existing projects get them on start
 # ======================================================================================
 # Storage
 # ======================================================================================
+class ProjectDatabaseAccessError(RuntimeError):
+    """macOS/file authorization denied access to the existing project, not a corrupt database."""
+
+
 class DB:
     def __init__(self, path):
-        self.conn = sqlite3.connect(str(path), check_same_thread=False)
+        try:
+            self.conn = sqlite3.connect(str(path), check_same_thread=False)
+        except sqlite3.DatabaseError as exc:
+            denied = getattr(exc, 'sqlite_errorcode', None) in (23, 3) or any(
+                text in str(exc).lower() for text in ('authorization denied', 'permission denied', 'not authorized', 'operation not permitted'))
+            if denied:
+                raise ProjectDatabaseAccessError(
+                    f"ANIME_STUDIO_DATA_ACCESS_DENIED: Cannot open project database {path}. "
+                    "macOS denied this app access to the project folder. In Anime Studio, choose "
+                    "Choose Project Folder and select the existing AnimeStudio Data folder to grant access. "
+                    "Do not delete or replace studio.db. Original SQLite error: " + str(exc)) from exc
+            raise
         self.conn.row_factory = sqlite3.Row
         self.lock = threading.RLock()
         with self.lock:
@@ -301,9 +319,11 @@ def parse_lines(dialogue, default_speaker=""):
     for line in (dialogue or "").splitlines():
         if not line.strip():
             continue
-        m = LINE_RE.match(line)
-        who, text = (m.group(1).strip(), m.group(2).strip()) if m else (default_speaker, line.strip())
-        out.append({"speaker": re.sub(r"\s*\([^)]*\)\s*$", "", who), "text": text})
+        parsed = dialogue_line(line)
+        if parsed:
+            out.append(parsed)
+        else:
+            out.append({'speaker':default_speaker,'text':line.strip(),'direction':''})
     return out
 
 
@@ -377,8 +397,7 @@ class Studio:
         self.db.x("DELETE FROM voice_clips WHERE asset_id NOT IN (SELECT id FROM assets)")
         self.db.x("UPDATE jobs SET status='cancelled' WHERE status IN ('pending','running') AND "
                   f"((stage NOT IN {_ASSET_SQL} AND shot_id NOT IN (SELECT id FROM shots)) OR (stage IN {_ASSET_SQL} AND asset_id NOT IN (SELECT id FROM assets)))")
-        self.db.x("UPDATE jobs SET status='pending', instance_id=NULL, prompt_id=NULL, progress='requeued after restart' "
-                  "WHERE status='running'")
+        self.db.x("UPDATE jobs SET status='pending', progress='reconnecting after restart' WHERE status='running'")
         self.health = {}
         from production import Production
         self.production = Production(self, API, http_json)
@@ -389,6 +408,8 @@ class Studio:
         self.frame_lock = threading.Lock()
         self.assembly = {"running": False, "log": [], "output": None, "folder": None}
         self.tools_cache = None
+        from studio_tools import StudioTools
+        self.editor = StudioTools(self)
 
     def tools(self, refresh=False):
         if self.tools_cache is None or refresh:
@@ -485,6 +506,15 @@ class Studio:
         n = (name or "").strip().lower()
         return next((a for a in self.db.q("SELECT * FROM assets") if a["name"].strip().lower() == n), None) if n else None
 
+    def job_line(self, shot, job):
+        lines = self.shot_lines(shot)
+        same = lambda line: norm_text(line['text']) == norm_text(job.get('note')) and (not job.get('speaker') or line['speaker'].casefold() == job['speaker'].casefold())
+        index = job.get('segment')
+        if index is not None:
+            return lines[int(index)] if 0 <= int(index) < len(lines) and same(lines[int(index)]) else None
+        matches = [line for line in lines if same(line)]
+        return matches[0] if len(matches) == 1 else None
+
     def ref_clip(self, asset_id):
         return (self.db.one("SELECT * FROM voice_clips WHERE asset_id=? AND is_ref=1", (asset_id,))
                 or self.db.one("SELECT * FROM voice_clips WHERE asset_id=? ORDER BY id LIMIT 1", (asset_id,)))
@@ -495,13 +525,14 @@ class Studio:
         lines = parse_lines(shot["dialogue"], next((c["name"] for c in cast if c), ""))
         saved, used = json.loads(shot.get("line_audio") or "[]"), set()
         for i, l in enumerate(lines):
-            l.update(index=i, audio=None, src=None, clip_id=None, direction="")
-            hits = [j for j, e in enumerate(saved) if j not in used and norm_text(e.get("text")) == norm_text(l["text"])]
+            l.update(index=i, audio=None, src=None, clip_id=None)
+            l.setdefault("direction", "")
+            hits = [j for j, e in enumerate(saved) if j not in used and norm_text(e.get("text")) == norm_text(l["text"]) and (e.get("speaker") or "").casefold() == l["speaker"].casefold()]
             if hits:
                 j = i if i in hits else hits[0]
                 used.add(j)
                 e = saved[j]
-                l["direction"] = e.get("direction") or ""
+                l["direction"] = e.get("direction") or l.get("direction") or ""
                 if e.get("path") and self.abs(e["path"]).exists():
                     l.update(audio=e["path"], src=e.get("src"), clip_id=e.get("clip_id"))
         return lines
@@ -540,11 +571,7 @@ class Studio:
             if fit and secs + 0.4 > dur:
                 dur = round(secs + 0.4, 1)
             self.db.x("UPDATE shots SET audio=?, duration=? WHERE id=?", (self.rel(dest), dur, shot_id))
-        if old and "_mix_" in old:
-            try:
-                self.abs(old).unlink()
-            except OSError:
-                pass
+        # Prior mixes remain available to history and archived episodes.
 
     def say_line(self, text, voice=""):
         if not self.tools()["say"]:
@@ -859,7 +886,8 @@ def retime(st, take, mode, out_fps, log=None):
         mode = "blend"
         if log is not None:
             log.append("  (rife-ncnn-vulkan not found - using blend)")
-    dst = st.data / "cache" / f"take{take['id']}_{mode}{out_fps}.mp4"
+    stamp = hashlib.sha256((str(src) + str(src.stat().st_mtime_ns)).encode()).hexdigest()[:12]
+    dst = st.data / "cache" / f"take{take['id']}_{stamp}_{mode}{out_fps}.mp4"
     if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
         return dst
     enc = ["-c:v", "libx264", "-crf", "14", "-preset", "medium", "-pix_fmt", "yuv420p", "-an"]
@@ -949,18 +977,21 @@ class Worker(threading.Thread):
             readiness = next((s['stages'] for s in inspected if s['id'] == inst['id']), None)
             if readiness is not None:
                 roles = [r for r in roles if readiness.get(r, {}).get('ready')]
-            if not roles:
+            resumable = db.q("SELECT * FROM jobs WHERE status='pending' AND prompt_id IS NOT NULL AND instance_id=? ORDER BY id", (inst['id'],))
+            if not roles and not resumable:
                 continue
-            candidates = db.q(f"SELECT * FROM jobs WHERE status='pending' AND stage IN ({','.join('?' * len(roles))}) ORDER BY priority DESC,id", roles)
+            candidates = resumable + db.q(f"SELECT * FROM jobs WHERE status='pending' AND stage IN ({','.join('?' * len(roles))}) AND prompt_id IS NULL ORDER BY priority DESC,id", roles)
             job = None
             for candidate in candidates:
+                if candidate.get("prompt_id") and candidate.get("instance_id") != inst["id"]:
+                    continue
                 shot = db.one('SELECT end_next FROM shots WHERE id=?', (candidate['shot_id'],))
-                if candidate['stage'] in ('animate', 'continue') and shot and shot['end_next'] and not (readiness or {}).get('animate_flf', {}).get('ready'):
+                if not candidate.get('prompt_id') and candidate['stage'] in ('animate', 'continue') and shot and shot['end_next'] and not (readiness or {}).get('animate_flf', {}).get('ready'):
                     continue
                 job = candidate
                 break
             if job and db.u("UPDATE jobs SET status='running', instance_id=?, started=?, progress='starting', error=NULL "
-                            "WHERE id=? AND status='pending'", (inst["id"], time.time(), job["id"])):
+                            "WHERE id=? AND status='pending'", (inst["id"], job.get("started") or time.time(), job["id"])):
                 busy.add(inst["id"])
                 threading.Thread(target=self.execute, args=(job["id"], inst), daemon=True).start()
 
@@ -997,7 +1028,7 @@ class Worker(threading.Thread):
         if not shot:
             raise RuntimeError("Shot was deleted.")
         if stage == "voice":
-            line = next((l for l in st.shot_lines(shot) if norm_text(l["text"]) == norm_text(job.get("note"))), None)
+            line = st.job_line(shot, job)
             if not line:
                 raise RuntimeError("That dialogue line was changed or removed.")
             sp = st.speaker_asset(line["speaker"])
@@ -1014,6 +1045,13 @@ class Worker(threading.Thread):
         if stage == "keyframe":
             ids = json.loads(shot["asset_ids"] or "[]")
             assets = [a for a in (st.db.one("SELECT * FROM assets WHERE id=?", (i,)) for i in ids) if a]
+            context = st.editor.context(shot['scene'])
+            overrides = {v['asset_id']: v for v in context['variants']}
+            for v in context['variants']:
+                if v['asset_id'] not in {a['id'] for a in assets}:
+                    a = st.db.one('SELECT * FROM assets WHERE id=?', (v['asset_id'],))
+                    if a: assets.append(a)
+            assets = [dict(a, image=overrides[a['id']]['image']) if a['id'] in overrides else a for a in assets]
             lines, refs, loras = [], [], []
             for a in assets:
                 if a["lora"]:
@@ -1029,7 +1067,7 @@ class Worker(threading.Thread):
                 if pp:
                     refs.append(pp)
                     lines.append(f"Picture {len(refs)} is the previous shot: keep the same location, lighting and outfits")
-            parts = [". ".join(lines), shot["keyframe_prompt"], shot["camera"], S.get("style_prompt", "")]
+            parts = [". ".join(lines), shot["keyframe_prompt"], shot["camera"], context["lighting"], context["notes"], ". ".join(v["notes"] for v in context["variants"]), S.get("style_prompt", "")]
             p["prompt"] = ". ".join(x.strip().rstrip(".") for x in parts if x and x.strip()) + "."
             p["negative"] = S.get("keyframe_negative", "")
             p["files"] = {f"ref{i + 1}": r for i, r in enumerate(refs)}
@@ -1099,29 +1137,44 @@ class Worker(threading.Thread):
     def execute(self, job_id, inst):
         st, db = self.st, self.st.db
         base, pid = inst["url"].rstrip("/"), None
+        events = None
         try:
             job = db.one("SELECT * FROM jobs WHERE id=?", (job_id,))
-            st.production.capture(job)
-            key, p = self.compose(job)
-            row = st.wf_row(key)
-            if not row:
-                raise RuntimeError(f"No '{key}' workflow set. Upload one in Settings > Workflows.")
-            tpl = json.loads(row["json"])
-            problems = check_workflow(tpl, key)
-            if problems:
-                raise RuntimeError(f"'{key}' workflow: " + " ".join(problems))
-            self._progress(job_id, "uploading inputs")
-            p["images"] = {slot: comfy_upload(base, path, f"anime_j{job_id}_{slot}{Path(path).suffix.lower()}")
-                           for slot, path in p["files"].items()}
-            wf = build_workflow(tpl, key, p)
-            try:
-                res = http_json("POST", base + "/prompt", {"prompt": wf, "client_id": f"anime-studio-{job_id}"}, 60)
-            except RuntimeError as e:
-                raise RuntimeError(explain_missing_nodes(str(e), base) or str(e)) from None
-            if res.get("node_errors"):
-                raise RuntimeError("ComfyUI rejected the workflow: " + json.dumps(res["node_errors"])[:2500])
-            pid = res["prompt_id"]
-            db.x("UPDATE jobs SET prompt_id=?, progress='queued on ComfyUI' WHERE id=?", (pid, job_id))
+            pid = job.get("prompt_id")
+            key = 'animate' if job['stage'] == 'continue' else job['stage']
+            if not pid:
+                st.production.capture(job)
+                key, p = self.compose(job)
+                row = st.wf_row(key)
+                if not row:
+                    raise RuntimeError(f"No '{key}' workflow set. Upload one in Settings > Workflows.")
+                tpl = json.loads(row["json"])
+                problems = check_workflow(tpl, key)
+                if problems:
+                    raise RuntimeError(f"'{key}' workflow: " + " ".join(problems))
+            from comfy_events import ProgressEvents
+            def progress_event(event):
+                data = event.get('data', {})
+                if data.get('prompt_id') not in (None, pid):
+                    return
+                if event['type'] == 'progress' and data.get('max'):
+                    self._progress(job_id, f"Sampler {data.get('value',0)}/{data['max']} (current node)")
+                elif data.get('node'):
+                    self._progress(job_id, 'Executing node ' + str(data['node']))
+            events = ProgressEvents(base, f'anime-studio-{job_id}', progress_event).start()
+            if not pid:
+                self._progress(job_id, "uploading inputs")
+                p["images"] = {slot: comfy_upload(base, path, f"anime_j{job_id}_{slot}{Path(path).suffix.lower()}")
+                               for slot, path in p["files"].items()}
+                wf = build_workflow(tpl, key, p)
+                try:
+                    res = http_json("POST", base + "/prompt", {"prompt": wf, "client_id": f"anime-studio-{job_id}"}, 60)
+                except RuntimeError as e:
+                    raise RuntimeError(explain_missing_nodes(str(e), base) or str(e)) from None
+                if res.get("node_errors"):
+                    raise RuntimeError("ComfyUI rejected the workflow: " + json.dumps(res["node_errors"])[:2500])
+                pid = res["prompt_id"]
+                db.x("UPDATE jobs SET prompt_id=?, progress='queued on ComfyUI' WHERE id=?", (pid, job_id))
             t0, timeout, fails, entry = time.time(), int(float(st.settings().get("job_timeout") or 3600)), 0, None
             while True:
                 if (db.one("SELECT status FROM jobs WHERE id=?", (job_id,)) or {}).get("status") != "running":
@@ -1143,9 +1196,12 @@ class Worker(threading.Thread):
                 if time.time() - t0 > timeout:
                     self._interrupt(base, pid)
                     raise RuntimeError(f"Timed out after {timeout}s")
-                self._progress(job_id, f"rendering {int(time.time() - t0)}s")
+                current = db.one('SELECT progress FROM jobs WHERE id=?', (job_id,)) or {}
+                if not current.get('progress', '').startswith(('Sampler ', 'Executing node ')):
+                    self._progress(job_id, f"rendering {int(time.time() - t0)}s")
                 time.sleep(2)
             if entry.get("status", {}).get("status_str") == "error":
+                db.x("UPDATE jobs SET prompt_id=NULL WHERE id=?", (job_id,))
                 msgs = [m for m in entry["status"].get("messages", []) if m and m[0] == "execution_error"]
                 raise RuntimeError("ComfyUI error: " + json.dumps(msgs[-1][1] if msgs else entry["status"])[:2500])
             files = collect_outputs(entry)
@@ -1160,7 +1216,10 @@ class Worker(threading.Thread):
                 dest = out_dir / f"{i:06d}_{Path(f['filename']).name}"
                 dest.write_bytes(http("GET", f"{base}/view?{q}", timeout=300))
                 local.append(dest)
-            self.finish(job, key, local)
+            with st.production.lock:
+                if (db.one("SELECT status FROM jobs WHERE id=?", (job_id,)) or {}).get("status") != "running":
+                    return
+                self.finish(job, key, local)
             db.x("UPDATE jobs SET status='done', finished=?, progress='done' WHERE id=? AND status='running'", (time.time(), job_id))
             from render_queue import remember_timings
             remember_timings(db)
@@ -1169,6 +1228,10 @@ class Worker(threading.Thread):
             traceback.print_exc()
             db.x("UPDATE jobs SET status='error', error=?, finished=?, progress='' WHERE id=? AND status='running'",
                  (str(e)[:4000], time.time(), job_id))
+
+        finally:
+            if events:
+                events.close()
 
     def _interrupt(self, base, pid):
         if not pid:
@@ -1183,6 +1246,7 @@ class Worker(threading.Thread):
 
     def finish(self, job, key, local):
         st, stage = self.st, job["stage"]
+        output_id = uuid.uuid4().hex[:12]
         signature = (st.db.one("SELECT signature FROM production_inputs WHERE job_id=?", (job["id"],)) or {}).get("signature")
         owner = (st.db.one("SELECT id FROM assets WHERE id=?", (job["asset_id"],)) if stage in ASSET_STAGES
                  else st.db.one("SELECT id FROM shots WHERE id=?", (job["shot_id"],)))
@@ -1198,7 +1262,7 @@ class Worker(threading.Thread):
             folder = st.data / "voices" / "reference"
             folder.mkdir(parents=True, exist_ok=True)
             safe = re.sub(r"[^A-Za-z0-9_-]+", "_", a["name"]).strip("_") or f"cast{a['id']}"
-            dest = folder / f"{safe}_designed_{job['id']}.wav"
+            dest = folder / f"{safe}_designed_{job['id']}_{output_id}.wav"
             ffmpeg(["-i", str(auds[0]), "-ar", "48000", str(dest)])
             has_ref = st.db.one("SELECT id FROM voice_clips WHERE asset_id=? AND is_ref=1", (a["id"],))
             st.db.x("INSERT INTO voice_clips(asset_id,path,name,transcript,seconds,is_ref,created) VALUES(?,?,?,?,?,?,?)",
@@ -1210,16 +1274,18 @@ class Worker(threading.Thread):
             if not auds:
                 raise RuntimeError("The voice workflow saved no audio file.")
             (st.data / "voices" / "lines").mkdir(parents=True, exist_ok=True)
-            dest = st.data / "voices" / "lines" / f"tts_j{job['id']}.wav"
+            dest = st.data / "voices" / "lines" / f"tts_j{job['id']}_{output_id}.wav"
             ffmpeg(["-i", str(auds[0]), "-ar", "48000", str(dest)])
             shot = st.db.one("SELECT * FROM shots WHERE id=?", (job["shot_id"],))
             if not shot:
                 return
             lines = st.shot_lines(shot)
-            line = next((l for l in lines if norm_text(l["text"]) == norm_text(job.get("note"))), None)
-            st.db.x("INSERT INTO voice_takes(shot_id,text,speaker,path,seed,job_id,seconds,created,input_signature) VALUES(?,?,?,?,?,?,?,?,?)",
+            line = st.job_line(shot, job)
+            if line:
+                line = lines[line["index"]]
+            st.db.x("INSERT INTO voice_takes(shot_id,text,speaker,path,seed,job_id,seconds,created,input_signature,line_index) VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (shot["id"], job.get("note"), (line or {}).get("speaker", ""), st.rel(dest), job["seed"], job["id"],
-                     round(media_seconds(dest), 2), time.time(), signature))
+                     round(media_seconds(dest), 2), time.time(), signature, job.get("segment")))
             if line and not line["audio"]:
                 line.update(audio=st.rel(dest), src="tts", clip_id=None)
                 st.save_lines(shot["id"], lines)
@@ -1233,7 +1299,7 @@ class Worker(threading.Thread):
         made = []
         if stage in ("sheet", "keyframe"):
             for i, f in enumerate(imgs or local):
-                dest = folder / f"{stage}_j{job['id']}_{i}{f.suffix.lower()}"
+                dest = folder / f"{stage}_j{job['id']}_{output_id}_{i}{f.suffix.lower()}"
                 shutil.move(str(f), dest)
                 made.append((dest, 0))
         else:
@@ -1242,7 +1308,7 @@ class Worker(threading.Thread):
                 fps = (src or {}).get("fps") or 16
             else:
                 fps = st.wf_fps(key)
-            dest = folder / f"{stage}_j{job['id']}.mp4"
+            dest = folder / f"{stage}_j{job['id']}_{output_id}.mp4"
             if vids:
                 dest = dest.with_suffix(vids[0].suffix.lower())
                 shutil.move(str(vids[0]), dest)
@@ -1301,6 +1367,7 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
         segs, edl, rec = [], [f"TITLE: {name}", "FCM: NON-DROP FRAME", ""], 0
         for i, s in enumerate(shots, 1):
             dur = max(0.5, float(s["duration"] or 4))
+            trim_in = float(s.get("trim_in") or 0)
             nfr = int(round(dur * FPS))
             seg = out / "shots" / f"{i:04d}_shot.mp4"
             chain = st.chain(s)
@@ -1320,7 +1387,8 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
                 mode = s["retime"] or "hold"
                 parts = [retime(st, take, mode, FPS, log)]
                 for t in chain[1:]:
-                    trimmed = st.data / "cache" / f"take{t['id']}_trim.mp4"
+                    source_stamp = hashlib.sha256(t["path"].encode()).hexdigest()[:12]
+                    trimmed = st.data / "cache" / f"take{t['id']}_{source_stamp}_trim.mp4"
                     if not trimmed.exists():
                         ffmpeg(["-i", str(st.abs(t["path"])), "-vf", "trim=start_frame=1,setpts=PTS-STARTPTS",
                                 "-c:v", "libx264", "-crf", "14", "-pix_fmt", "yuv420p", "-an", str(trimmed)])
@@ -1328,7 +1396,7 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
                 vin = sum((["-i", str(x)] for x in parts), [])
                 n = len(parts)
                 vf = "".join(f"[{k}:v]fps={FPS},{fill}[p{k}];" for k in range(n))
-                vf += "".join(f"[p{k}]" for k in range(n)) + f"concat=n={n}:v=1:a=0,tpad=stop_mode=clone:stop_duration={dur}[v]"
+                vf += "".join(f"[p{k}]" for k in range(n)) + f"concat=n={n}:v=1:a=0,trim=start={trim_in},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={dur}[v]"
                 motion = st.chain_seconds(chain) if chain else 0
                 how = f"clip ({take['stage']}{' + ' + str(n - 1) + ' continued' if n > 1 else ''}, {mode})"
                 if any(t.get("draft") for t in [take] + chain):
@@ -1345,7 +1413,7 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
                 how, vin = "MISSING - black", ["-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r={FPS}"]
                 vf = "[0:v]setsar=1[v]"
             a_idx = (len(vin) // 2) if take else 1
-            ffmpeg(vin + ain + ["-filter_complex", vf + f";[{a_idx}:a]aresample=48000,apad[a]", "-map", "[v]", "-map", "[a]",
+            ffmpeg(vin + ain + ["-filter_complex", vf + f";[{a_idx}:a]atrim=start={trim_in},asetpts=PTS-STARTPTS,aresample=48000,apad[a]", "-map", "[v]", "-map", "[a]",
                                 "-frames:v", str(nfr), "-t", f"{nfr / FPS:.3f}"] + venc + aenc + [str(seg)])
             segs.append(seg)
             edl += [f"{i:03d}  AX       AA/V  C        {tc(0, FPS)} {tc(nfr, FPS)} {tc(rec, FPS, 1)} {tc(rec + nfr, FPS, 1)}",
@@ -1410,29 +1478,30 @@ class API:
         vtakes, vjobs = {}, {}
         for t in db.q("SELECT * FROM voice_takes ORDER BY id"):
             t["url"] = self.media(t["path"])
-            vtakes.setdefault((t["shot_id"], norm_text(t["text"])), []).append(t)
-        for j in db.q("SELECT shot_id, note, status FROM jobs WHERE stage='voice' AND status IN ('pending','running')"):
-            vjobs.setdefault((j["shot_id"], norm_text(j["note"])), []).append(j["status"])
+            vtakes.setdefault((t["shot_id"], norm_text(t["text"]), (t.get("speaker") or "").casefold()), []).append(t)
+        for j in db.q("SELECT shot_id, note, speaker, segment, status FROM jobs WHERE stage='voice' AND status IN ('pending','running')"):
+            vjobs.setdefault((j["shot_id"], norm_text(j["note"]), (j["speaker"] or "").casefold(), j["segment"]), []).append(j["status"])
         shots = []
         for s in st.ordered_shots():
             lines = st.shot_lines(s)
             for l in lines:
                 l["url"] = self.media(l["audio"])
-                key = (s["id"], norm_text(l["text"]))
-                l["takes"] = vtakes.get(key, [])
-                l["pending"] = vjobs.get(key, [])
+                key = (s["id"], norm_text(l["text"]), l['speaker'].casefold())
+                l['takes'] = [t for t in vtakes.get(key, []) if t.get('line_index') in (None, l['index'])]
+                l['pending'] = vjobs.get((*key,l['index']), []) + vjobs.get((s['id'],key[1],'',l['index']), [])
             s["lines"] = lines
             chain = st.chain(s)
             covered = st.chain_seconds(chain) if chain else 0.0
             s.update(asset_ids=json.loads(s["asset_ids"] or "[]"), takes=takes.get(s["id"], []), active=active.get(s["id"], {}),
                      audio_url=self.media(s["audio"]), frames=st.frames_for(s["duration"]),
                      cont=[t["id"] for t in chain[1:]], covered=round(covered, 2),
-                     remaining=round(max(0.0, float(s["duration"]) - covered), 2) if chain else None,
+                     remaining=round(max(0.0, float(s["duration"]) + float(s.get("trim_in") or 0) - covered), 2) if chain else None,
                      draft_in_use=any(t.get("draft") for t in chain))
             shots.append(s)
         clips = {}
         for c in db.q("SELECT * FROM voice_clips ORDER BY id"):
             c["url"] = self.media(c["path"])
+            c["available"] = st.abs(c["path"]).is_file()
             clips.setdefault(c["asset_id"], []).append(c)
         assets = db.q("SELECT * FROM assets ORDER BY kind, name")
         for a in assets:
@@ -1472,7 +1541,8 @@ class API:
                 "jobs": jobs, "job_counts": counts, "assembly": A, "tools": st.tools(), "music_url": self.media(S.get("music")),
                 "version": VERSION, "platform": sys.platform, "production": production, "render_queue": queue,
                 "audio_cues": [dict(c, url=self.media(c['path'])) for c in st.soundtrack.cues()],
-                "audio_exports": [dict(e, url=self.media(e['output'])) for e in st.soundtrack.exports()]}
+                "audio_exports": [dict(e, url=self.media(e['output'])) for e in st.soundtrack.exports()],
+                "editor": st.editor.state(), "voice_recovery_count": len(recovery_preview(st)[0])}
 
     # ---- settings / servers / workflows / tools
     def settings(self, b):
@@ -1532,6 +1602,9 @@ class API:
         self.st.db.x("UPDATE workflows SET fps=?, max_frames=? WHERE stage=?", (int(b["fps"]), int(b["max_frames"]), b["stage"]))
         return {"ok": True}
 
+    def voice_recover(self, body):
+        return recover_dialogue(self.st, body)
+
     def voices(self, _):
         return {"voices": list_voices()}
 
@@ -1555,35 +1628,29 @@ class API:
         names = {a["name"].strip().lower(): a["id"] for a in st.db.q("SELECT id,name FROM assets")}
         mx = st.db.one("SELECT COALESCE(MAX(seq),0) m FROM shots")["m"]
         scene, made = "", 0
-        speaker_re = r"^([A-Z][A-Za-z0-9 .'-]{0,30})\s*(?:\([^)]*\))?\s*:\s*(.+)$"
-        for block in re.split(r"\n\s*\n", text):
-            m = re.match(speaker_re, block.strip(), re.S)
-            if m and m.group(1).strip().lower() not in names:
-                who = m.group(1).strip()
-                names[who.lower()] = st.db.x("INSERT INTO assets(kind,name) VALUES('character',?)", (who.title() if who.isupper() else who,))
-        display = {a["id"]: a["name"] for a in st.db.q("SELECT id,name FROM assets")}
-        for block in re.split(r"\n\s*\n", text):
-            block = block.strip()
-            if not block:
-                continue
-            first = block.splitlines()[0].strip()
-            if re.match(r"^(#+|INT\.|EXT\.|INT/EXT|SCENE\b)", first, re.I):
-                scene = first.lstrip("#").strip()
-                block = "\n".join(block.splitlines()[1:]).strip()
-                if not block:
-                    continue
-            m = re.match(speaker_re, block, re.S)
-            if m:
-                who, line = m.group(1).strip(), " ".join(m.group(2).split())
-                who = display.get(names[who.lower()], who)
-                dur = round(max(2.0, len(line.split()) / 2.6 + 0.8), 1)
-                vals = (mx + made + 1, scene, "still", json.dumps([names[who.lower()]]), f"{who} speaking, medium close-up", "",
-                        "slow push-in", f"{who}: {line}", dur)
+        blocks = script_blocks(text)
+        for block in blocks:
+            for entry in block['entries']:
+                who = entry['speaker']
+                if who.casefold() not in names:
+                    names[who.casefold()] = st.db.x("INSERT INTO assets(kind,name) VALUES('character',?)", (who.title() if who.isupper() else who,))
+        for block in blocks:
+            entries = block['entries']
+            if entries:
+                cast = list(dict.fromkeys(names[e['speaker'].casefold()] for e in entries))
+                words = sum(len(e['text'].split()) for e in entries)
+                duration = round(max(2.0, words / 2.6 + 0.8), 1)
+                vals = (mx+made+1, block['scene'], 'still', json.dumps(cast), block['speaker']+' speaking, medium close-up', '',
+                        'slow push-in', block['text'], duration)
             else:
-                action = " ".join(block.split())
-                cast = [i for n, i in names.items() if re.search(r"\b" + re.escape(n) + r"\b", action.lower())][:3]
-                vals = (mx + made + 1, scene, "motion", json.dumps(cast), action, action, "", "", st.default_duration())
-            st.db.x("INSERT INTO shots(seq,scene,kind,asset_ids,keyframe_prompt,motion_prompt,camera,dialogue,duration) VALUES(?,?,?,?,?,?,?,?,?)", vals)
+                action = block['text']
+                cast = [i for n,i in names.items() if re.search(r'\b'+re.escape(n)+r'\b',action.casefold())][:3]
+                vals = (mx+made+1, block['scene'], 'motion', json.dumps(cast), action, action, '', '', st.default_duration())
+            sid = st.db.x("INSERT INTO shots(seq,scene,kind,asset_ids,keyframe_prompt,motion_prompt,camera,dialogue,duration) VALUES(?,?,?,?,?,?,?,?,?)",vals)
+            if entries:
+                lines = st.shot_lines(st.db.one('SELECT * FROM shots WHERE id=?',(sid,)))
+                for line,entry in zip(lines,entries):line['direction']=entry['direction']
+                st.save_lines(sid,lines)
             made += 1
         st.renumber()
         return {"ok": True, "made": made}
@@ -1759,10 +1826,7 @@ class API:
         if not c:
             return {"ok": True}
         st.db.x("DELETE FROM voice_clips WHERE id=?", (c["id"],))
-        try:
-            st.abs(c["path"]).unlink()
-        except OSError:
-            pass
+        # Retain media for recovery history and existing exports.
         for sh in st.db.q("SELECT id FROM shots WHERE line_audio LIKE ?", (f"%{c['path']}%",)):
             st.rebuild_audio(sh["id"])
         if c["is_ref"]:
@@ -1803,19 +1867,23 @@ class API:
         """Set one line's audio: src = clip | upload | temp | none."""
         st = self.st
         shot = st.db.one("SELECT * FROM shots WHERE id=?", (b["shot_id"],))
-        if shot["audio_mode"] == "file":
-            st.db.x("UPDATE shots SET audio_mode='lines', audio=NULL WHERE id=?", (shot["id"],))
-            shot = st.db.one("SELECT * FROM shots WHERE id=?", (shot["id"],))
+        if not shot:
+            raise ValueError('Shot not found')
         lines = st.shot_lines(shot)
-        l = lines[int(b["index"])]
+        index = int(b["index"])
+        if not 0 <= index < len(lines):raise ValueError("Dialogue line not found")
+        l = lines[index]
         src = b["src"]
         if src == "none":
             l.update(audio=None, src=None, clip_id=None)
         elif src == "clip":
             c = st.db.one("SELECT * FROM voice_clips WHERE id=?", (b["clip_id"],))
+            if not c or not st.abs(c["path"]).is_file():raise ValueError("Voice clip file is missing")
             l.update(audio=c["path"], src="clip", clip_id=c["id"])
         elif src == "take":
             t = st.db.one("SELECT * FROM voice_takes WHERE id=?", (b["take_id"],))
+            if not t or t['shot_id'] != shot['id'] or norm_text(t['text']) != norm_text(l['text']) or (t.get('speaker') or '').casefold() != l['speaker'].casefold() or t.get('line_index') not in (None,l['index']):
+                raise ValueError('This voice take belongs to another dialogue line.')
             l.update(audio=t["path"], src="tts", clip_id=None)
         elif src == "upload":
             l.update(audio=st.save_upload(b["file"], "voices/lines"), src="upload", clip_id=None)
@@ -1823,6 +1891,10 @@ class API:
             sp = st.speaker_asset(l["speaker"])
             l.update(audio=st.say_line(l["text"], (sp or {}).get("voice") or st.settings().get("default_voice") or ""),
                      src="temp", clip_id=None)
+        else:
+            raise ValueError('Unknown audio source')
+        if shot['audio_mode'] == 'file':
+            st.db.x("UPDATE shots SET audio_mode='lines',audio=NULL WHERE id=?", (shot['id'],))
         st.save_lines(shot["id"], lines)
         st.rebuild_audio(shot["id"])
         return {"ok": True}
@@ -1848,10 +1920,7 @@ class API:
                 if l["audio"] == t["path"]:
                     l.update(audio=None, src=None, clip_id=None)
             st.save_lines(shot["id"], lines)
-        try:
-            st.abs(t["path"]).unlink()
-        except OSError:
-            pass
+        # Retain media for recovery history and existing exports.
         if shot:
             st.rebuild_audio(shot["id"])
         return {"ok": True}
@@ -1929,6 +1998,7 @@ class API:
             for sid in b.get("shot_ids") or []:
                 targets.append((int(sid), None, bool(b.get("replace"))))
             no_voice = set()
+            seen = set()
             for sid, idx, force in targets:
                 s = st.db.one("SELECT * FROM shots WHERE id=?", (sid,))
                 if not s or s["audio_mode"] == "file":
@@ -1938,13 +2008,19 @@ class API:
                         continue
                     if l["audio"] and not force:
                         continue
+                    target = (sid, l['index'])
+                    if target in seen:continue
+                    seen.add(target)
+                    if st.db.one("SELECT id FROM jobs WHERE shot_id=? AND stage='voice' AND status IN ('pending','running') AND segment=? AND note=? LIMIT 1", (sid,l['index'],l['text'])):
+                        skipped.append(f"Shot {int(s['seq'])}, line {l['index']+1}: voice generation already queued or running.")
+                        continue
                     sp = st.speaker_asset(l["speaker"])
-                    if not sp or not st.ref_clip(sp["id"]):
+                    if not sp or not st.ref_clip(sp["id"]) or not st.abs(st.ref_clip(sp["id"])["path"]).is_file():
                         no_voice.add(l["speaker"] or "A speaker")
                         continue
                     for _ in range(takes):
-                        st.db.x("INSERT INTO jobs(shot_id,stage,status,seed,created,progress,segment,note) VALUES(?,?,'pending',?,?,'waiting',?,?)",
-                                (sid, "voice", random.randint(1, 2**48), time.time(), l["index"], l["text"]))
+                        st.db.x("INSERT INTO jobs(shot_id,stage,status,seed,created,progress,segment,note,speaker) VALUES(?,?,'pending',?,?,'waiting',?,?,?)",
+                                (sid, "voice", random.randint(1, 2**48), time.time(), l["index"], l["text"], l["speaker"]))
                         made += 1
             skipped += [f"{n} has no reference voice (add one in Cast)" for n in sorted(no_voice)]
             return {"ok": True, "queued": made, "skipped": skipped}
@@ -2028,10 +2104,7 @@ class API:
                 f = TAKE_FIELD[t["stage"]]
                 st.db.x(f"UPDATE shots SET {f}=NULL WHERE id=? AND {f}=?", (t["shot_id"], t["id"]))
             st.db.x("DELETE FROM takes WHERE id=?", (t["id"],))
-            try:
-                st.abs(t["path"]).unlink()
-            except OSError:
-                pass
+            # Retain media for recovery history and existing exports.
         return {"ok": True}
 
     def job_action(self, b):
@@ -2045,16 +2118,19 @@ class API:
                 db.x("UPDATE jobs SET status='cancelled', finished=? WHERE id=? AND status IN ('pending','running')", (now, jid))
         elif act == "retry":
             for jid in b["ids"]:
-                db.x("UPDATE jobs SET status='pending', instance_id=NULL, prompt_id=NULL, started=NULL, finished=NULL, error=NULL, progress='waiting' "
+                db.x("UPDATE jobs SET prompt_id=NULL, instance_id=NULL WHERE id=? AND status='cancelled'", (jid,))
+                db.x("UPDATE jobs SET status='pending', finished=NULL, error=NULL, progress='reconnect or queue' "
                      "WHERE id=? AND status IN ('error','cancelled')", (jid,))
         elif act == "retry_errors":
-            db.x("UPDATE jobs SET status='pending', instance_id=NULL, prompt_id=NULL, started=NULL, finished=NULL, error=NULL, progress='waiting' WHERE status='error'")
+            db.x("UPDATE jobs SET status='pending', finished=NULL, error=NULL, progress='reconnect or queue' WHERE status='error'")
         elif act == "cancel_pending":
             db.x("UPDATE jobs SET status='cancelled', finished=? WHERE status='pending'", (now,))
         elif act == "clear":
             from render_queue import remember_timings
             remember_timings(db)
             db.x("DELETE FROM jobs WHERE status IN ('done','cancelled')")
+        if act in ('retry', 'retry_errors'):
+            db.x("UPDATE jobs SET started=NULL WHERE status='pending' AND prompt_id IS NULL")
         return {"ok": True}
 
     def music(self, b):
@@ -2100,6 +2176,19 @@ class API:
                 result.append({'shot_id': shot['id'], 'stage': stage, **r})
         return {'ok': True, 'results': result}
 
+    def editor_action(self, b):
+        actions = {'scene': self.st.editor.scene, 'history': self.st.editor.history,
+                   'timeline': self.st.editor.timeline, 'continuity': self.st.editor.continuity,
+                   'library': self.st.editor.library, 'backup': self.st.editor.backup,
+                   'import': self.st.editor.restore_backup, 'subtitles': self.st.editor.subtitles,
+                   'delivery': self.st.editor.delivery,
+                   'qc': lambda _: {'ok': True, 'issues': self.st.editor.qc(self.state()['shots'])}}
+        action = b.get('tool')
+        if action not in actions:
+            raise ValueError('Unknown editor action')
+        with self.st.production.lock:
+            return actions[action](b)
+
     def assemble(self, b):
         if self.st.assembly["running"]:
             return {"ok": False, "error": "Already assembling."}
@@ -2111,7 +2200,13 @@ class API:
         return {"ok": True}
 
 
+EDIT_ROUTES = {'/api/settings','/api/shot/save','/api/shot/delete','/api/shot/move',
+    '/api/take/delete','/api/approve','/api/asset/save','/api/asset/delete',
+    '/api/voice_take/delete','/api/clip/delete','/api/line/set','/api/line/direction',
+    '/api/audio/cue/save','/api/audio/cue/delete','/api/script/revision'}
 ROUTES = {
+    '/api/voice/recover': 'voice_recover',
+    '/api/editor': 'editor_action',
     '/api/audio/cue/save': 'audio_cue_save', '/api/audio/cue/delete': 'audio_cue_delete',
     '/api/audio/discover': 'audio_discover', '/api/audio/remix': 'audio_remix',
     '/api/production/check': 'production_check', '/api/production/plan': 'production_plan',
@@ -2153,6 +2248,8 @@ def make_handler(st, api):
                 path = urllib.parse.urlparse(self.path).path
                 if path in ("/", "/index.html"):
                     return self._send(200, INDEX_HTML, "text/html; charset=utf-8")
+                if path == '/editor.js':
+                    return self._send(200, (Path(__file__).resolve().parent / 'editor.js').read_text(), 'text/javascript; charset=utf-8')
                 if path == '/production.js':
                     return self._send(200, (Path(__file__).resolve().parent / 'production.js').read_text(), 'text/javascript; charset=utf-8')
                 if path == "/api/ping":
@@ -2182,7 +2279,10 @@ def make_handler(st, api):
                 fn = ROUTES.get(path)
                 if not fn:
                     return self._send(404, {"error": "not found"})
-                result = getattr(api, fn)(body)
+                with st.production.lock:
+                    if path in EDIT_ROUTES:
+                        st.editor.checkpoint(path.removeprefix('/api/'))
+                    result = getattr(api, fn)(body)
                 if path.startswith('/api/workflow') or path.startswith('/api/instance/'):
                     st.production.readiness = {}
                 self._send(200, result)

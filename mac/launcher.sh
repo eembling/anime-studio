@@ -4,28 +4,20 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 RES="$(cd "$HERE/../Resources" && pwd)"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 APPDIR="$(cd "$HERE/../../.." && pwd)"
-# The project folder is remembered, so moving the app (e.g. into Applications) keeps the same project.
+# App-owned settings/logs live in Application Support, not a protected Documents folder.
 CONF_DIR="$HOME/Library/Application Support/AnimeStudio"
-CONF="$CONF_DIR/data-folder"
-if [ -n "${ANIME_STUDIO_DATA:-}" ]; then
-  AS_DATA="$ANIME_STUDIO_DATA"
-elif [ -f "$CONF" ] && [ -d "$(cat "$CONF")" ]; then
-  AS_DATA="$(cat "$CONF")"
-elif [ -w "$APPDIR" ] && [ "$APPDIR" != "/Applications" ]; then
-  AS_DATA="$APPDIR/AnimeStudio Data"
-else
-  AS_DATA="$HOME/Documents/AnimeStudio Data"
-fi
-export AS_DATA
-mkdir -p "$CONF_DIR" && printf '%s' "$AS_DATA" > "$CONF"
-export AS_PORT="${ANIME_STUDIO_PORT:-8700}"
-export AS_SCRIPT="$RES/anime_studio.py"
-mkdir -p "$AS_DATA"
-LOG="$AS_DATA/launcher.log"
+mkdir -p "$CONF_DIR"
+LOG="$CONF_DIR/launcher.log"
 exec >>"$LOG" 2>&1
 echo "===== $(date) launching from $HERE"
-
-alert() { ( osascript -e "display alert \"Anime Studio\" message \"$1\"" >/dev/null 2>&1 & ) ; }
+export AS_PORT="${ANIME_STUDIO_PORT:-8700}"
+export AS_SCRIPT="$RES/anime_studio.py"
+alert() { ( osascript - "$1" <<'APPLESCRIPT'
+on run argv
+  display alert "Anime Studio" message (item 1 of argv)
+end run
+APPLESCRIPT
+) >/dev/null 2>&1 & }
 
 HAVE_CLT=0
 xcode-select -p >/dev/null 2>&1 && HAVE_CLT=1
@@ -45,19 +37,29 @@ fi
 export AS_PYTHON="$PY"
 command -v ffmpeg >/dev/null || echo "WARNING: ffmpeg not found - brew install ffmpeg"
 
-# Native window: if it has been built, use it. Otherwise build it in the BACKGROUND (first launch)
-# and open the app in a browser-style window right now, so you never wait on the build.
+# Stop only a verified Anime Studio backend before resolving/migrating its data.
+STATUS="$(curl --noproxy "*" -s -m 1 "http://127.0.0.1:$AS_PORT/api/ping" 2>/dev/null || true)"
+if printf '%s' "$STATUS" | "$PY" -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("app")=="anime-studio" else 1)' 2>/dev/null; then
+  curl --noproxy "*" -s -m 2 -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$AS_PORT/api/quit" >/dev/null 2>&1 || true
+  for i in $(seq 1 20); do curl --noproxy "*" -s -m 1 "http://127.0.0.1:$AS_PORT/api/ping" >/dev/null 2>&1 || break; sleep 0.25; done
+fi
+if lsof -ti tcp:"$AS_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  alert "Port $AS_PORT is still in use. Close the other local server and reopen Anime Studio. No unrelated process was stopped."
+  exit 1
+fi
+
+# Resolve the remembered app-owned project, or safely copy a legacy project once.
+# The original stays untouched; the helper changes the preference only after validation.
+STORAGE_ARGS=(--config-dir "$CONF_DIR" --app-dir "$APPDIR")
+if [ -n "${ANIME_STUDIO_DATA:-}" ]; then STORAGE_ARGS+=(--override "$ANIME_STUDIO_DATA"); fi
+if ! AS_DATA="$("$PY" "$RES/project_storage.py" "${STORAGE_ARGS[@]}")"; then
+  alert "Could not load your saved project. See $LOG. Your original project was not replaced."
+  exit 1
+fi
+export AS_DATA
+echo "project data: $AS_DATA"
 BIN="$HERE/AnimeStudioWindow"
 if [ -x "$BIN" ] && [ ! "$RES/main.swift" -nt "$BIN" ]; then
-  # A server left over from a browser-window launch is stopped so the app window owns its own server
-  if curl --noproxy "*" -s -m 1 "http://127.0.0.1:$AS_PORT/api/ping" >/dev/null 2>&1; then
-    echo "stopping previous background server"
-    curl --noproxy "*" -s -m 2 -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$AS_PORT/api/quit" >/dev/null 2>&1
-    for i in $(seq 1 20); do curl --noproxy "*" -s -m 1 "http://127.0.0.1:$AS_PORT/api/ping" >/dev/null 2>&1 || break; sleep 0.25; done
-  fi
-  # Anything still holding the port (an older copy of the server) is stopped too
-  OLD="$(lsof -ti tcp:"$AS_PORT" -sTCP:LISTEN 2>/dev/null)"
-  if [ -n "$OLD" ]; then echo "killing old server on port $AS_PORT: $OLD"; kill $OLD 2>/dev/null; sleep 0.5; fi
   echo "starting native window"
   exec "$BIN"
 fi

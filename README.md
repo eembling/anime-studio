@@ -46,7 +46,7 @@ The server needs **32 GB of system RAM or more**. The Wan 14B fp8 models are 14.
    - `xcode-select --install` (recommended; it's what builds the native window)
 2. Build the app: `./build_app.sh`. This makes `dist/Anime Studio.app`. Or run `./build_app.sh ~/Applications`.
 3. Open it. The first time, right-click it and choose **Open**, because the app isn't signed.
-4. Project data lives in `AnimeStudio Data`, next to the app. The app remembers this folder, so moving the app to /Applications keeps using the same data. If the app's folder isn't writable, data goes to `~/Documents/AnimeStudio Data`. Set `ANIME_STUDIO_DATA` to use another folder.
+4. Settings and project data load automatically from `~/Library/Application Support/AnimeStudio`. On the first updated launch, the app copies your remembered legacy project into this app-owned location, validates the database, and remembers the new location. The original folder stays intact. Later launches use the saved copy without accessing Documents or asking you to select a folder. Set `ANIME_STUDIO_DATA` to explicitly use another folder.
 
 You can also run it without the app bundle: `python3 app/anime_studio.py`, then open http://127.0.0.1:8700.
 
@@ -111,7 +111,7 @@ The test starts two fake ComfyUI servers and runs the whole pipeline: script, ca
 - **Red server dot:** check that ComfyUI was started with `--listen` and that `http://<server>:8188` opens from the Mac.
 - **"value not in list":** a model file is missing on the server or has a different name. Compare with `server/download_models.sh`.
 - **Unknown node:** update ComfyUI. The workflows use Qwen-Image-Edit 2509 and Wan 2.2 nodes, which were added in 2025.
-- **Logs:** `AnimeStudio Data/app.log`, `launcher.log` and `build.log`.
+- **Logs:** `~/Library/Application Support/AnimeStudio/launcher.log`; `app.log` and `build.log` live in the saved project folder named by `~/Library/Application Support/AnimeStudio/data-folder`.
 
 ## License
 MIT. See `LICENSE`.
@@ -220,3 +220,39 @@ Render queue separates **Active renders**, **Queued renders**, and **Completed r
 Progress percentages are estimates from elapsed time and the median of up to 20 recent successful runs of the same stage and draft/full-quality mode, preferring the same server. They are not measured ComfyUI sampler progress. Jobs without history show an indeterminate bar. Overdue jobs stay below 100% and report an uncertain finish time; work waiting behind an unknown/overdue render does not receive a fabricated ETA. Estimates account for enabled compatible servers and parallel work but cannot predict external ComfyUI workloads. Learned timings survive clearing completed jobs.
 
 Focused validation: `python3 tests/test_render_queue.py` and `node --test tests/test_render_queue_ui.cjs`.
+
+## macOS project-folder access
+
+Normal startup uses Application Support so rebuilding the app does not require selecting a Documents folder again. A legacy project is copied once, including settings, media and SQLite WAL contents, and the saved location switches only after database validation. The original is retained. Migration failures are recorded in `~/Library/Application Support/AnimeStudio/launcher.log` and never silently replace a saved project with an empty one. An explicitly selected external project or `ANIME_STUDIO_DATA` override can still require macOS permission for its location; **Choose Project Folder…** remains available for these cases.
+
+Do not delete `studio.db`, create a blank replacement project, or change broad disk permissions to repair an access denial. Database corruption errors remain separate from permission errors. Native startup exits are surfaced promptly with log access rather than waiting for the generic startup timeout.
+
+
+## Studio: episode editing, history and delivery
+
+**Studio → Episode timeline** previews selected takes, shot dialogue, timed music/effects and the music bed together. Scrub or step at the configured output frame rate, drag shot blocks to reorder, trim source-in/duration, or split a shot at the playhead. Timeline edits preserve the original takes and apply to picture and dialogue during assembly. Missing picture is shown explicitly. Preview is a timing aid; browser playback is not an encoded final-quality render. A dialogue waveform can be displayed for the current shot.
+
+Audio cues can follow a **shot plus an offset**, rather than an absolute episode time. Anchored cues ripple when shots move or change length. A missing anchor disables the cue until it is reassigned. Absolute cues retain their existing behavior.
+
+**Production → Delete scene clips** previews and removes animation, continuation, lip-sync and upscale takes from the selected scene. It keeps keyframes, dialogue audio and the script. **Reset scene settings** keeps scene membership, shot rows/order/kind, dialogue and the saved script; it clears generation prompts, cast links, camera/notes, duration overrides, retiming, source-in, continuity rules, selected/generated takes and shot-anchored audio cues. It returns shot duration to the project default. Both operations create a recovery checkpoint, retain underlying files for history, and reject a stale preview or a scene with queued/running renders. Existing exports remain intact. Finish/cancel jobs and preparation plans through their normal controls first.
+
+**Studio → History** provides undo/restore through labeled editorial checkpoints. Restoring creates another checkpoint so the change can be reversed. Daily startup checkpoints also save a standalone SQLite copy under `history/`. Deleted takes, reference clips and prior dialogue mixes retain their source media for recovery. History and archived episodes consume disk space; these controls remove items from the active edit rather than permanently purging their files. Running renders/exports and active preparation plans must finish or be cancelled before restoring. Restored preparation plans are blocked until explicitly reviewed/resumed.
+
+**Studio → Series and episodes** saves, creates, duplicates and opens episodes with independent scripts, shot lists, settings, cues and export records. Cast/reference voices and server/workflow configuration are shared. Save or switch to persist the current episode into the series library; its live edit is always stored in the project database. Portable ZIP backups contain the database, media, exports and recovery files. Import validates the database and archive paths, namespaces imported media and preserves the current edit in history first. Imports merge archived episodes into the library and do not import server credentials/configuration. Large projects can take time and disk space to archive; the import size limit is 100 GB.
+
+**Production → Scene continuity** records lighting, outfits, expressions, props and scene notes, with up to three cast/location reference overrides. These references and rules feed actual keyframe generation; edits flag older keyframes as outdated. **Compare takes** displays generated options side by side and lets you choose a take.
+
+**Render recovery** keeps ComfyUI prompt/server IDs across app restarts and download failures. Retry reconnects to an existing remote render instead of submitting it again; explicitly cancelled jobs start a new render when retried. ComfyUI execution errors clear the failed remote prompt so Retry can regenerate. Optional WebSocket events show the executing node and current sampler-step progress, while overall completion estimates remain clearly labeled. A finished render is collected through history even when its current workflow/settings have changed. This cannot recover a submission whose HTTP response was lost before its prompt ID was saved, or history removed from ComfyUI. No server updates are applied automatically.
+
+**Studio → Final delivery** checks missing picture/dialogue, incomplete animation, draft selections, outdated takes and dialogue cutoffs. Edit subtitle times/text and export SRT; generated timings for unvoiced lines are estimates and need review. After choosing an existing render in Assemble, export separate 24-bit WAV dialogue/music/effects stems and a loudness analysis report. A dialogue-only master is required. Quality checks describe the current edit; stems describe the chosen rendered master. Review picture/audio together before delivery. Existing EDL export for Resolve remains available.
+
+Validation includes unit and UI behavior suites, FFmpeg checks for source trims and isolated stems, remote-output reconnection without resubmission, archive import safety, scoped scene cleanup and recovery, plus the full pipeline against local mock ComfyUI servers. Real GPU output quality and hardware playback require separate acceptance testing.
+
+
+## Voice dialogue import and recovery
+
+Script import and script revision recognize plain speaker labels (`TOBI: ...`) and Markdown labels (`**TOBI:** ...`, `**TOBI**: ...`, `__TOBI:__ ...`). Bold scene headings such as `**EXT. ROAD — DAWN**` start scenes. Script metadata and montage/sequence headings are not speakers. Italic parenthetical stage directions become delivery notes instead of spoken text. Several labeled lines in one paragraph remain separate speaker lines.
+
+For an existing project imported before this fix, open **Voices → Recover dialogue from shot prompts**. Review the checked rows and apply them to the original shots. This action adds dialogue/cast links and preserves shot IDs, scene membership, duration, picture prompts, existing dialogue and generated takes. It creates a history checkpoint and does not submit TTS jobs. New speakers need reference audio uploaded or designed in Cast before their lines can be generated. Whole-shot audio overrides are excluded from recovery.
+
+Voice jobs and new takes are bound to the speaker and line occurrence, preventing identical words from routing to another character or repeated line. A changed speaker does not inherit the previous speaker’s selected audio. Duplicate clicks do not queue more work for lines already waiting/rendering. **More takes** remains available once the current batch finishes. Legacy takes without a saved line position are still matched by speaker and text; review ambiguous repeated lines manually.
