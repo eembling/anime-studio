@@ -164,8 +164,9 @@ def main():
     check(abs(duration(RUN / "data" / shot(two)["audio"]) - (2.0 + 0.3 + 1.0)) < 0.2, "a line without audio keeps its place as silence")
 
     tts = {"1": {"class_type": "LoadAudio", "inputs": {"audio": "x.wav"}, "_meta": {"title": "AUDIO_IN"}},
-           "2": {"class_type": "FakeTTS", "inputs": {"text": "", "voice": ["1", 0], "seed": 1}, "_meta": {"title": "PROMPT"}},
-           "3": {"class_type": "SaveAudio", "inputs": {"audio": ["2", 0], "filename_prefix": "x"}}}
+           "2": {"class_type": "FakeTTS", "inputs": {"text": "", "voice": ["1", 0], "ref": ["4", 0], "seed": 1}, "_meta": {"title": "PROMPT"}},
+           "3": {"class_type": "SaveAudio", "inputs": {"audio": ["2", 0], "filename_prefix": "x"}},
+           "4": {"class_type": "FakeText", "inputs": {"text": ""}, "_meta": {"title": "REF_TEXT"}}}
     r = post("/api/workflow", {"stage": "voice", "file": b64("tts.json", json.dumps(tts).encode())})
     check(r.get("ok"), "voice workflow accepted")
     r = post("/api/generate", {"stage": "voice", "shot_ids": [two]})
@@ -176,6 +177,23 @@ def main():
     wait_jobs()
     sh = shot(two)
     check(sh["lines"][1]["src"] == "tts" and sh["lines"][0]["src"] == "clip", "TTS line lands on the right line; edited dialogue keeps matched audio")
+
+    sent = [json.loads(p.read_text()) for p in list((RUN / "m1").glob("last_*.json")) + list((RUN / "m2").glob("last_*.json"))
+            if '"FakeTTS"' in p.read_text()]
+    check(sent and sent[-1]["4"]["inputs"]["text"] == "you came after all", "TTS gets the reference clip's transcript (REF_TEXT)")
+
+    # reference voice from the cast dialog: new character + recording + what is said
+    mina = post("/api/asset/save", {"name": "Mina", "kind": "character", "description": "calm"})
+    check(isinstance(mina.get("id"), int), "creating a cast member returns its id")
+    post("/api/clips/upload", {"asset_id": mina["id"], "files": [tone("random_name.wav", 6, 520)], "as_ref": True,
+                               "transcript": "The sea is quiet tonight."})
+    m = [a for a in state()["assets"] if a["id"] == mina["id"]][0]
+    check(len(m["clips"]) == 1 and m["clips"][0]["is_ref"] and m["clips"][0]["transcript"] == "The sea is quiet tonight.",
+          "reference voice saved with the typed transcript")
+    post("/api/clips/upload", {"asset_id": mina["id"], "files": [tone("better.wav", 8, 520)], "as_ref": True, "transcript": "New words."})
+    m = [a for a in state()["assets"] if a["id"] == mina["id"]][0]
+    refs = [c for c in m["clips"] if c["is_ref"]]
+    check(len(refs) == 1 and refs[0]["transcript"] == "New words." and len(m["clips"]) == 2, "replacing the reference keeps one reference")
 
     post("/api/shot/save", {"id": dia["id"], "audio_file": tone("whole.wav", 4)})
     check(shot(dia["id"])["audio_mode"] == "file" and shot(dia["id"])["duration"] >= 4.4, "one file for the whole shot still works")

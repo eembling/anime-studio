@@ -39,7 +39,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "2.2"
+VERSION = "2.3"
 for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebrew/bin")):
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
@@ -563,7 +563,7 @@ def detect_slots(wf, key):
          "negative": (_tagged(wf, "NEGATIVE") or [k for k in encs if "neg" in _title(wf[k]).lower()])[:1],
          "save": [k for k in keys if cls(k) in SAVE_NODES],
          "seeds": [[k, f] for k in keys for f in ("seed", "noise_seed") if isinstance(ins(k).get(f), int)],
-         "refs": [], "start_image": [], "end_image": [], "video_in": [], "audio_in": [], "size": []}
+         "refs": [], "start_image": [], "end_image": [], "video_in": [], "audio_in": [], "size": [], "ref_text": []}
     if key == "keyframe":
         m["refs"] = [k for i in (1, 2, 3) for k in _tagged(wf, f"REF{i}")] or loads[:3]
         m["size"] = _tagged(wf, "SIZE") or [k for k in keys if "Latent" in cls(k) and {"width", "height"} <= set(ins(k))][:1]
@@ -578,6 +578,7 @@ def detect_slots(wf, key):
         m["video_in"] = (_tagged(wf, "VIDEO_IN") or [k for k in keys if cls(k) in VIDEO_LOADERS])[:1]
     elif key == "voice":
         m["audio_in"] = (_tagged(wf, "AUDIO_IN") or [k for k in keys if cls(k) == "LoadAudio"])[:1]
+        m["ref_text"] = _tagged(wf, "REF_TEXT")[:1]
         if not m["prompt"]:
             m["prompt"] = [k for k in keys if isinstance(ins(k).get("text"), str) and cls(k) not in ("LoadAudio",)][:1]
     return m
@@ -672,6 +673,8 @@ def build_workflow(template, key, p):
             wf[k]["inputs"]["image"] = imgs[field_name]
     for k in m["audio_in"]:
         wf[k]["inputs"]["audio"] = imgs["audio"]
+    for k in m.get("ref_text", []):
+        _set_text(wf[k], p.get("ref_text", ""))
     for k in m["video_in"]:
         wf[k]["inputs"][VIDEO_LOADERS.get(wf[k]["class_type"], "file")] = imgs["video"]
     for k, f in m["seeds"]:
@@ -865,7 +868,7 @@ class Worker(threading.Thread):
             if not ref or not st.abs(ref["path"]).exists():
                 raise RuntimeError(f"{line['speaker'] or 'The speaker'} has no voice clip to copy. Add one in Cast.")
             p["files"] = {"audio": st.abs(ref["path"])}
-            p["prompt"], p["negative"] = line["text"], None
+            p["prompt"], p["negative"], p["ref_text"] = line["text"], None, ref["transcript"] or ""
             return "voice", p
         if stage == "keyframe":
             ids = json.loads(shot["asset_ids"] or "[]")
@@ -1384,9 +1387,9 @@ class API:
             db.x("UPDATE assets SET kind=?, name=?, description=?, voice=?, lora=?, lora_strength=? WHERE id=?", vals + (b["id"],))
             if img:
                 db.x("UPDATE assets SET image=? WHERE id=?", (img, b["id"]))
-        else:
-            db.x("INSERT INTO assets(kind,name,description,voice,lora,lora_strength,image) VALUES(?,?,?,?,?,?,?)", vals + (img,))
-        return {"ok": True}
+            return {"ok": True, "id": b["id"]}
+        aid = db.x("INSERT INTO assets(kind,name,description,voice,lora,lora_strength,image) VALUES(?,?,?,?,?,?,?)", vals + (img,))
+        return {"ok": True, "id": aid}
 
     def asset_delete(self, b):
         for c in self.st.db.q("SELECT id FROM voice_clips WHERE asset_id=?", (b["id"],)):
@@ -1504,12 +1507,16 @@ class API:
         if not a:
             raise RuntimeError("That cast member was deleted.")
         has_ref = bool(st.db.one("SELECT id FROM voice_clips WHERE asset_id=? AND is_ref=1", (a["id"],)))
+        as_ref = bool(b.get("as_ref"))
+        if as_ref:
+            st.db.x("UPDATE voice_clips SET is_ref=0 WHERE asset_id=?", (a["id"],))
         added = 0
         for f in b["files"]:
             rel = st.save_upload(f, f"cast/voice_{a['id']:04d}")
+            transcript = b["transcript"] if (as_ref and b.get("transcript") is not None) else transcript_from_name(f.get("name", ""), a["name"])
+            ref = 1 if (as_ref and not added) or (not as_ref and not has_ref and not added) else 0
             st.db.x("INSERT INTO voice_clips(asset_id,path,name,transcript,seconds,is_ref,created) VALUES(?,?,?,?,?,?,?)",
-                    (a["id"], rel, f.get("name", ""), transcript_from_name(f.get("name", ""), a["name"]),
-                     round(media_seconds(st.abs(rel)), 2), 0 if (has_ref or added) else 1, time.time()))
+                    (a["id"], rel, f.get("name", ""), transcript, round(media_seconds(st.abs(rel)), 2), ref, time.time()))
             added += 1
         matched = self.match({"asset_id": a["id"]})["matched"] if b.get("auto_match", True) else 0
         return {"ok": True, "added": added, "matched": matched}

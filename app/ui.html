@@ -420,7 +420,8 @@ function manageClips(aid){const a=S.assets.find(x=>x.id===aid);if(!a)return;
   <td><input type="radio" name="ref" ${c.is_ref?'checked':''} onchange="post('/api/clip/update',{id:${c.id},is_ref:true})" aria-label="Reference" style="accent-color:var(--blue)"></td>
   <td><button class="btn sm danger" onclick="if(confirm('Delete this clip? Lines using it lose their audio.'))post('/api/clip/delete',{id:${c.id}}).then(()=>manageClips(${aid}))">Delete</button></td></tr>`).join('')}</tbody></table></div>`:'<div class="muted">No clips yet.</div>'}</div>
  <div class="dlg-f"><button class="btn" onclick="post('/api/lines/match',{asset_id:${aid}}).then(r=>toast(r.matched?'Matched '+r.matched+' line'+(r.matched>1?'s':''):'No new matches'))">Match to dialogue</button><button class="btn pri" onclick="closeModal()">Done</button></div>`)}
-async function editAsset(id){const a=id?S.assets.find(x=>x.id===id):{kind:'character',name:'',description:'',voice:'',lora:'',lora_strength:1};
+async function editAsset(id){const a=id?S.assets.find(x=>x.id===id):{kind:'character',name:'',description:'',voice:'',lora:'',lora_strength:1,clips:[]};
+ const ref=(a.clips||[]).find(c=>c.is_ref)||(a.clips||[])[0];
  if(VOICES===null){try{VOICES=(await (await fetch('/api/voices',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json()).voices||[]}catch(e){VOICES=[]}}
  modal(`<div class="dlg-h"><h2>${id?esc(a.name):'New cast entry'}</h2></div><div class="dlg-b">
  <div class="g2"><div><label class="f" for="a_name">Name, as written in the script</label><input id="a_name" value="${esc(a.name)}"></div>
@@ -429,11 +430,23 @@ async function editAsset(id){const a=id?S.assets.find(x=>x.id===id):{kind:'chara
  <div class="g3"><div><label class="f" for="a_lora">Character LoRA file on the server (optional)</label><input id="a_lora" placeholder="aiko_qwen_lora.safetensors" value="${esc(a.lora)}"></div>
  <div><label class="f" for="a_ls">LoRA strength</label><input id="a_ls" type="number" step="0.05" value="${a.lora_strength}"></div>
  <div><label class="f" for="a_voice">Temporary voice</label><select id="a_voice"><option value="">System default</option>${VOICES.map(v=>`<option value="${esc(v.name)}">${esc(v.name)} (${v.lang})</option>`).join('')}</select></div></div>
- <label class="f" for="a_img">Reference image${a.url?' (leave empty to keep the current one)':''}</label><input type="file" id="a_img" accept="image/*"></div>
+ <label class="f" for="a_img">Reference image${a.url?' (leave empty to keep the current one)':''}</label><input type="file" id="a_img" accept="image/*">
+ ${a.kind==='location'||a.kind==='prop'?'':`<div id="a_voicebox"><h3 style="font:600 16px var(--f-display);margin:18px 0 2px">Reference voice</h3>
+ <p class="muted" style="font-size:12.5px;margin:0 0 4px">The voice that text-to-speech copies for this character. Use 5–15 seconds of clean speech by this character alone, with no music or effects, and type exactly what is said.</p>
+ ${ref?`<div class="toolbar" style="margin:6px 0"><button class="play" type="button" onclick="playA(this,'${ref.url}')" aria-label="Play reference voice">▶</button><span style="font-size:13px">${esc(ref.name||'Reference clip')}, ${(+ref.seconds).toFixed(1)} s</span></div>`:''}
+ <div class="g2"><div><label class="f" for="a_vfile">${ref?'Replace with a new recording':'Voice recording'} (wav, mp3, m4a…)</label><input type="file" id="a_vfile" accept="audio/*"></div>
+ <div><label class="f" for="a_vtext">What is said in the recording</label><input id="a_vtext" value="${esc(ref?ref.transcript:'')}" placeholder="Exactly the words in the clip"></div></div></div>`}</div>
  <div class="dlg-f"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn pri" id="a_save">Save</button></div>`);
  $('#a_kind').value=a.kind;$('#a_voice').value=a.voice||'';
+ $('#a_kind').onchange=()=>{const vb=$('#a_voicebox');if(vb)vb.style.display=$('#a_kind').value==='character'?'':'none'};
  $('#a_save').onclick=async()=>{const b={id:id||undefined,name:$('#a_name').value,kind:$('#a_kind').value,description:$('#a_desc').value,voice:$('#a_voice').value,lora:$('#a_lora').value.trim(),lora_strength:+$('#a_ls').value};
-  const f=$('#a_img').files[0];if(f)b.file=await readFile(f);await post('/api/asset/save',b);closeModal()}}
+  const f=$('#a_img').files[0];if(f)b.file=await readFile(f);
+  const vf=$('#a_vfile')&&$('#a_vfile').files[0],vt=$('#a_vtext')?$('#a_vtext').value.trim():'';
+  if(vf&&!vt&&!confirm('Save the voice without saying what is said in it? Voice-copying TTS needs the exact words to work well.'))return;
+  const r=await post('/api/asset/save',b);if(r.ok===false)return;const aid=r.id||id;
+  if(vf)await post('/api/clips/upload',{asset_id:aid,files:[await readFile(vf)],as_ref:true,transcript:vt,auto_match:true});
+  else if(ref&&$('#a_vtext')&&vt!==(ref.transcript||''))await post('/api/clip/update',{id:ref.id,transcript:vt});
+  closeModal()}}
 
 /* ---------- shots ---------- */
 function stripHTML(){const total=S.shots.reduce((a,s)=>a+(+s.duration||0),0);if(!total)return '';
@@ -599,7 +612,7 @@ function renderSettings(){
   ${w&&vid?`<span class="meta" style="margin-left:auto">Model fps <input id="fps_${k}" value="${w.fps}"> Max frames <input id="mf_${k}" value="${w.max_frames}"><button class="btn sm" onclick="post('/api/workflow/meta',{stage:'${k}',fps:$('#fps_${k}').value,max_frames:$('#mf_${k}').value}).then(()=>toast('Saved'))">Save</button></span>`:''}</div>
   ${w?`<div class="slots">Fills: ${esc(show)}</div>`:''}${w?(w.problems||[]).map(p=>`<div class="err" style="font-size:12.5px">${esc(p)}</div>`).join(''):''}
   ${k==='lipsync'&&!w?'<div class="slots">In ComfyUI open Templates › Wan2.2 S2V, check that it runs, then Workflow › Export (API) and upload it here.</div>':''}
-  ${k==='voice'&&!w?'<div class="slots">Any text-to-speech workflow that copies a voice: a Load Audio node titled AUDIO_IN gets the character’s reference clip, a text node titled PROMPT gets the line, and a Save Audio node writes the result. ComfyUI has no free one built in; its Fish Audio and ElevenLabs partner nodes work (paid), as would a custom TTS node if you install one.</div>':''}
+  ${k==='voice'&&!w?'<div class="slots">Any text-to-speech workflow that copies a voice: a Load Audio node titled AUDIO_IN gets the character’s reference voice, a text node titled PROMPT gets the line, an optional text node titled REF_TEXT gets what the reference voice says, and a Save Audio node writes the result. ComfyUI has no free one built in; its Fish Audio and ElevenLabs partner nodes work (paid), as would a custom TTS node if you install one.</div>':''}
   <div class="acts"><button class="btn sm" onclick="pick('.json',f=>post('/api/workflow',{stage:'${k}',file:f,fps:${vid?16:0},max_frames:81}).then(r=>r.ok?toast('Workflow saved'):toast((r.problems||[]).join(' '),1)))">Upload API workflow</button>
   ${w?`<a class="btn sm ghost" href="/api/workflow/${k}">Download</a>`:''}${starters}${w&&(k==='lipsync'||k==='upscale')?`<button class="btn sm danger" onclick="post('/api/workflow',{stage:'${k}',remove:true})">Remove</button>`:''}</div></div>`}).join('');
  const T=S.tools;$('#tools').innerHTML=`<div class="wf"><div class="wf-h"><span class="dot ${T.ffmpeg?'ok':'bad'}"></span><b>ffmpeg</b><span class="muted" style="font-size:12.5px">${T.ffmpeg?esc(T.ffmpeg):'Missing and required. In Terminal, run: brew install ffmpeg'}</span></div></div>
