@@ -76,7 +76,7 @@ def main():
 
     s = state()
     iid = s["instances"][0]["id"]
-    roles = ["sheet", "keyframe", "animate", "continue", "lipsync", "upscale"]
+    roles = ["sheet", "keyframe", "animate", "continue", "lipsync", "upscale", "voice"]
     post("/api/instance/save", {"id": iid, "name": "GPU0", "url": f"127.0.0.1:{M1}", "roles": roles, "enabled": True})
     post("/api/instance/save", {"name": "GPU1", "url": f"http://127.0.0.1:{M2}", "roles": ["keyframe", "animate", "continue"]})
     post("/api/instance/check", {})
@@ -133,10 +133,54 @@ def main():
     check(loras and all(any(n["inputs"].get("lora_name") == "aiko.safetensors" for n in wf.values()) for wf in loras),
           "character LoRA injected into Aiko's keyframes")
 
-    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=4", "-ar", "48000", str(RUN / "line.wav")])
-    dia = state()["shots"][1]
-    post("/api/shot/save", {"id": dia["id"], "audio_file": b64("line.wav", (RUN / "line.wav").read_bytes())})
-    check(shot(dia["id"])["duration"] >= 4.4, "shot lengthens to fit its dialogue audio")
+    # ---------- dialogue audio
+    def tone(name, secs, hz=440):
+        path = RUN / name
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"sine=f={hz}:d={secs}", "-ar", "44100", str(path)])
+        return b64(name, path.read_bytes())
+
+    dia = state()["shots"][1]                      # "AIKO: You came after all."
+    r = post("/api/clips/upload", {"asset_id": aiko["id"], "files": [tone("aiko_01_you_came_after_all.wav", 2.0),
+                                                                      tone("aiko_see_you_tomorrow.mp3", 1.5)]})
+    clips = [a for a in state()["assets"] if a["id"] == aiko["id"]][0]["clips"]
+    check(r["added"] == 2 and [c["transcript"] for c in clips] == ["you came after all", "see you tomorrow"],
+          "clip transcripts come from file names")
+    check(sum(c["is_ref"] for c in clips) == 1, "first clip becomes the reference voice")
+    check(r["matched"] == 1, "uploading clips matches them to dialogue lines")
+    l0 = shot(dia["id"])["lines"][0]
+    check(l0["src"] == "clip" and shot(dia["id"])["audio"], "matched line has audio and the shot gets a dialogue track")
+
+    two = post("/api/shot/save", {"scene": "Rooftop", "kind": "still", "keyframe_prompt": "both",
+                                  "dialogue": "Aiko: You came after all!\nKenji: I always do."})["id"]
+    post("/api/lines/match", {"shot_ids": [two]})
+    sh = shot(two)
+    check(sh["lines"][0]["src"] == "clip" and not sh["lines"][1]["audio"], "match tolerates punctuation; Kenji has no clips")
+    post("/api/line/set", {"shot_id": two, "index": 1, "src": "upload", "file": tone("kenji.wav", 1.2, 600)})
+    sh = shot(two)
+    track = duration(RUN / "data" / sh["audio"])
+    check(abs(track - (2.0 + 0.3 + 1.2)) < 0.15, f"shot track = line 1 + pause + line 2 ({track:.2f} s)")
+    check(sh["duration"] >= round(track + 0.4, 1) - 0.01, "shot lengthens to fit its dialogue")
+    post("/api/line/set", {"shot_id": two, "index": 1, "src": "none"})
+    check(abs(duration(RUN / "data" / shot(two)["audio"]) - (2.0 + 0.3 + 1.0)) < 0.2, "a line without audio keeps its place as silence")
+
+    tts = {"1": {"class_type": "LoadAudio", "inputs": {"audio": "x.wav"}, "_meta": {"title": "AUDIO_IN"}},
+           "2": {"class_type": "FakeTTS", "inputs": {"text": "", "voice": ["1", 0], "seed": 1}, "_meta": {"title": "PROMPT"}},
+           "3": {"class_type": "SaveAudio", "inputs": {"audio": ["2", 0], "filename_prefix": "x"}}}
+    r = post("/api/workflow", {"stage": "voice", "file": b64("tts.json", json.dumps(tts).encode())})
+    check(r.get("ok"), "voice workflow accepted")
+    r = post("/api/generate", {"stage": "voice", "shot_ids": [two]})
+    check(r["queued"] == 0 and r["skipped"], "TTS skips speakers without a voice clip")
+    post("/api/shot/save", {"id": two, "dialogue": "Aiko: You came after all!\nAiko: Let's go home."})
+    r = post("/api/generate", {"stage": "voice", "shot_ids": [two]})
+    check(r["queued"] == 1, "TTS queues only the line without audio")
+    wait_jobs()
+    sh = shot(two)
+    check(sh["lines"][1]["src"] == "tts" and sh["lines"][0]["src"] == "clip", "TTS line lands on the right line; edited dialogue keeps matched audio")
+
+    post("/api/shot/save", {"id": dia["id"], "audio_file": tone("whole.wav", 4)})
+    check(shot(dia["id"])["audio_mode"] == "file" and shot(dia["id"])["duration"] >= 4.4, "one file for the whole shot still works")
+    post("/api/shot/save", {"id": dia["id"], "clear_audio": True})
+    check(shot(dia["id"])["audio_mode"] == "lines" and shot(dia["id"])["lines"][0]["src"] == "clip", "removing it goes back to line audio")
     post("/api/generate", {"stage": "upscale", "shot_ids": [long_id]})
     wait_jobs()
 

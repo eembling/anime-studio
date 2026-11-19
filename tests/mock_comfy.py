@@ -38,6 +38,15 @@ def validate(wf):
 def render(pid, wf):
     time.sleep(1.0)
     cls = {n["class_type"]: (k, n) for k, n in wf.items()}
+    if "SaveAudio" in cls:   # fake text-to-speech: a tone whose length follows the text
+        save_k, save = cls["SaveAudio"]
+        text = next((n["inputs"]["text"] for n in wf.values() if (n.get("_meta") or {}).get("title") == "PROMPT"), "x")
+        sub = "audio"; (out / sub).mkdir(parents=True, exist_ok=True)
+        fn = f"tts_{pid[:8]}.flac"
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"sine=f=330:d={max(0.5, len(text) / 15):.2f}", str(out / sub / fn)])
+        history[pid] = {"outputs": {save_k: {"audio": [{"filename": fn, "subfolder": sub, "type": "output"}]}},
+                        "status": {"status_str": "success", "completed": True, "messages": []}}
+        return
     save_k, save = cls["SaveImage"]
     prefix = save["inputs"]["filename_prefix"]
     sub, base = (prefix.rsplit("/", 1) + [""])[:2] if "/" in prefix else ("", prefix)

@@ -63,11 +63,14 @@ Add each copy under **Settings → ComfyUI servers** and tick which jobs it take
    - **End on the next shot's keyframe** uses first-last-frame mode on the final part, so the cut into the next shot is smooth.
    - **Draft** renders at 512×288 and at most 49 frames, for quick motion tests. **Render full quality** re-renders a draft take with the same seed.
 5. **24 fps.** Set per shot and applied at assembly: hold frames (classic anime timing), blend (ffmpeg interpolation), or RIFE.
-6. **Voices and lip sync.**
-   - Video models make picture only, no sound.
-   - **Temp voice** reads each shot's dialogue with macOS voices and lengthens the shot to fit. You can upload real voice or TTS audio instead.
+6. **Voices and lip sync.** Video models make picture only, no sound. Dialogue audio is set **per line** and joined into each shot's dialogue track, with a short pause between lines (adjustable in Settings). The shot also gets longer if its dialogue needs more time.
+   - **Voice clips per character (Cast).** Upload any number of recorded lines at once. The file name becomes the clip's transcript, for example `aiko_03_you_came_after_all.wav` becomes "you came after all"; you can edit it. Clips are matched automatically to dialogue lines with the same words, when you upload them or with **Match clips**.
+   - **Per line in the shot editor.** For each line, pick one of the speaker's clips, a temporary voice, an uploaded file, or no audio. A line without audio keeps its place as silence, so the timing stays right.
+   - **Temp voices** use the macOS voices assigned to each character, for lines that have no audio yet.
+   - **Voice (TTS), optional.** Upload a text-to-speech workflow with a `LoadAudio` node titled `AUDIO_IN`, a text node titled `PROMPT` and a `SaveAudio` node. The app sends each line together with the character's reference clip, so the result is in that character's voice. ComfyUI has no free voice-copying TTS built in: its Fish Audio and ElevenLabs partner nodes work (paid), as does a custom TTS node if you install one.
+   - You can still use one audio file for a whole shot instead of per-line audio.
    - The shot preview plays the dialogue in sync with the video.
-   - Lip sync is optional: export ComfyUI's Wan2.2 S2V template in API format and upload it under Settings → Workflows.
+   - Lip sync is optional: export ComfyUI's Wan2.2 S2V template in API format and upload it under Settings → Workflows. It uses the shot's dialogue track.
 7. **Upscale and assemble.**
    - Upscaling is optional (RealESRGAN anime → 1080p).
    - **Assemble** makes a 1920×1080 / 24 fps episode with dialogue and music.
@@ -88,7 +91,7 @@ The app fills nodes by title: `PROMPT`, `NEGATIVE`, `REF1`–`REF3`, `START_IMAG
 ```bash
 python3 tests/test_pipeline.py      # needs ffmpeg and Pillow
 ```
-The test starts two fake ComfyUI servers and runs the whole pipeline: script, cast and sheets, keyframes on two servers, drafts, full-quality re-render, Continue chains, first-last-frame, upscale, audio, music and assembly. It checks the exact output lengths.
+The test starts two fake ComfyUI servers and runs the whole pipeline: script, cast and sheets, keyframes on two servers, drafts, full-quality re-render, Continue chains, first-last-frame, voice clips and line matching, per-line audio, TTS, upscale, music and assembly. It checks the exact output lengths.
 
 ## Troubleshooting
 - **Red server dot:** check that ComfyUI was started with `--listen` and that `http://<server>:8188` opens from the Mac.
