@@ -370,6 +370,26 @@ def main():
 
 
 
+    # Character-driven voice generation is available directly on a saved shot.
+    bound = post('/api/shot/save', {'scene':'Shot voice test','kind':'still','dialogue':'Words for this shot.','asset_ids':[aiko['id'],mina['id']]})['id']
+    sh = shot(bound)
+    check(sh['lines'][0]['character_id'] is None, 'multi-character shots require an explicit speaking character')
+    response = post('/api/shot/voices', {'shot_id':bound,'token':sh['voice_token'],
+        'lines':[{'line_id':sh['lines'][0]['line_id'],'character_id':mina['id'],'text':'This voice belongs to this shot.','direction':'warmly'}],
+        'generate':[0],'takes':2})
+    check(response.get('queued') == 2, 'shot dialogue saves and queues character voices in one action')
+    wait_jobs()
+    sh = shot(bound); line = sh['lines'][0]
+    check(line['character_id']==mina['id'] and len(line['takes'])==2 and line['audio'], 'generated character takes are attached to their exact shot line')
+    old_take=line['takes'][0]['id']
+    response=post('/api/shot/voices', {'shot_id':bound,'token':sh['voice_token'],
+        'lines':[{'line_id':line['line_id'],'character_id':aiko['id'],'text':line['text'],'direction':''}], 'generate':[]})
+    check(response.get('ok') and not shot(bound)['lines'][0]['audio'], 'changing the speaking character clears the previous selected audio')
+    response=post('/api/line/set', {'shot_id':bound,'index':0,'src':'take','take_id':old_take})
+    check(response.get('ok') is False, 'a take from the previous character cannot be selected on the changed line')
+    post('/api/shot/delete', {'ids':[bound]})
+
+
 if __name__ == "__main__":
     try:
         main()

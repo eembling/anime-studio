@@ -53,8 +53,8 @@ class Production:
                 prev = st.neighbor(shot, -1)
                 common['previous'] = prev and prev['keyframe_take']
         elif stage == 'voice':
-            assets = [st.speaker_asset(l['speaker']) for l in st.shot_lines(shot)]
-            common.update(dialogue=shot['dialogue'],
+            assets = [st.line_character(l) for l in st.shot_lines(shot)]
+            common.update(dialogue=shot['dialogue'], characters=[a['id'] if a else None for a in assets],
                           directions=[l.get('direction') for l in st.shot_lines(shot)],
                           refs=[st.ref_clip(a['id']) for a in assets if a],
                           ref_stamps=[self.file_stamp((st.ref_clip(a['id']) or {}).get('path')) for a in assets if a],
