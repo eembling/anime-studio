@@ -250,6 +250,10 @@ MIGRATIONS = [  # columns added after v2.0 - existing projects get them on start
     ("shots", "line_audio", "TEXT DEFAULT '[]'"), ("shots", "audio_mode", "TEXT DEFAULT 'lines'"), ("jobs", "note", "TEXT"),
     ("jobs", "priority", "INTEGER DEFAULT 0"), ("jobs", "speaker", "TEXT DEFAULT ''"),
     ("voice_takes", "line_index", "INTEGER"),
+    ("voice_takes", "character_id", "INTEGER"), ("voice_takes", "line_id", "TEXT"),
+    ("jobs", "voice_character_id", "INTEGER"), ("jobs", "voice_line_id", "TEXT"),
+    ("jobs", "voice_autoselect", "INTEGER DEFAULT 0"), ("jobs", "voice_previous_audio", "TEXT"),
+    ("jobs", "voice_ref_path", "TEXT"), ("jobs", "voice_ref_text", "TEXT"), ("jobs", "voice_direction", "TEXT"),
     ("takes", "input_signature", "TEXT"), ("voice_takes", "input_signature", "TEXT"),
     ("assets", "voice_desc", "TEXT DEFAULT ''"), ("assets", "voice_sample", "TEXT DEFAULT ''"),
 ]
@@ -325,6 +329,11 @@ def parse_lines(dialogue, default_speaker=""):
         else:
             out.append({'speaker':default_speaker,'text':line.strip(),'direction':''})
     return out
+
+
+def spoken_key(text):
+    """Exact spoken words, preserving punctuation and case that affect delivery."""
+    return ' '.join((text or '').split())
 
 
 def norm_text(t):
@@ -504,11 +513,18 @@ class Studio:
 
     def speaker_asset(self, name):
         n = (name or "").strip().lower()
-        return next((a for a in self.db.q("SELECT * FROM assets") if a["name"].strip().lower() == n), None) if n else None
+        return next((a for a in self.db.q("SELECT * FROM assets WHERE kind='character'") if a["name"].strip().lower() == n), None) if n else None
+
+    def line_character(self, line):
+        if 'character_id' in line:
+            return self.db.one("SELECT * FROM assets WHERE id=? AND kind='character'", (line['character_id'],)) if line['character_id'] else None
+        return self.speaker_asset(line['speaker'])
 
     def job_line(self, shot, job):
         lines = self.shot_lines(shot)
         same = lambda line: norm_text(line['text']) == norm_text(job.get('note')) and (not job.get('speaker') or line['speaker'].casefold() == job['speaker'].casefold())
+        if job.get('voice_line_id'):
+            return next((line for line in lines if line['line_id']==job['voice_line_id'] and spoken_key(line['text'])==spoken_key(job.get('note')) and line['character_id']==job.get('voice_character_id') and (job.get('voice_direction') is None or line.get('direction','')==job['voice_direction'])),None)
         index = job.get('segment')
         if index is not None:
             return lines[int(index)] if 0 <= int(index) < len(lines) and same(lines[int(index)]) else None
@@ -521,25 +537,34 @@ class Studio:
 
     def shot_lines(self, shot):
         """The shot's dialogue lines, each with the audio assigned to it (kept when lines are reordered or edited elsewhere)."""
-        cast = [self.db.one("SELECT name FROM assets WHERE id=?", (i,)) for i in json.loads(shot["asset_ids"] or "[]")]
-        lines = parse_lines(shot["dialogue"], next((c["name"] for c in cast if c), ""))
+        cast_ids=shot["asset_ids"] if isinstance(shot["asset_ids"],list) else json.loads(shot["asset_ids"] or "[]")
+        cast = [self.db.one("SELECT name FROM assets WHERE id=? AND kind='character'", (i,)) for i in cast_ids]
+        characters = [c for c in cast if c]
+        lines = parse_lines(shot["dialogue"], characters[0]["name"] if len(characters)==1 else "")
         saved, used = json.loads(shot.get("line_audio") or "[]"), set()
         for i, l in enumerate(lines):
             l.update(index=i, audio=None, src=None, clip_id=None)
             l.setdefault("direction", "")
-            hits = [j for j, e in enumerate(saved) if j not in used and norm_text(e.get("text")) == norm_text(l["text"]) and (e.get("speaker") or "").casefold() == l["speaker"].casefold()]
+            character = self.speaker_asset(l['speaker'])
+            l['character_id'] = character['id'] if character else None
+            l['line_id'] = hashlib.sha256(json.dumps([shot['id'],i,l['speaker'],l['text']]).encode()).hexdigest()[:24]
+            hits = [j for j, e in enumerate(saved) if j not in used and spoken_key(e.get("text")) == spoken_key(l["text"]) and (e.get("speaker") or "").casefold() == l["speaker"].casefold()]
             if hits:
                 j = i if i in hits else hits[0]
                 used.add(j)
                 e = saved[j]
                 l["direction"] = e.get("direction") or l.get("direction") or ""
+                l['line_id'] = e.get('line_id') or l['line_id']
+                if 'character_id' in e:l['character_id']=e['character_id']
                 if e.get("path") and self.abs(e["path"]).exists():
                     l.update(audio=e["path"], src=e.get("src"), clip_id=e.get("clip_id"))
         return lines
 
     def save_lines(self, shot_id, lines):
         data = [{"speaker": l["speaker"], "text": l["text"], "path": l.get("audio"), "src": l.get("src"),
-                 "clip_id": l.get("clip_id"), "direction": l.get("direction") or ""} for l in lines]
+                 "clip_id": l.get("clip_id"), "direction": l.get("direction") or "",
+                 **({"character_id":l["character_id"]} if "character_id" in l else {}),
+                 **({"line_id":l["line_id"]} if "line_id" in l else {})} for l in lines]
         self.db.x("UPDATE shots SET line_audio=? WHERE id=?", (json.dumps(data), shot_id))
 
     def rebuild_audio(self, shot_id, fit=True):
@@ -1031,14 +1056,14 @@ class Worker(threading.Thread):
             line = st.job_line(shot, job)
             if not line:
                 raise RuntimeError("That dialogue line was changed or removed.")
-            sp = st.speaker_asset(line["speaker"])
-            ref = st.ref_clip(sp["id"]) if sp else None
+            sp = st.line_character(line)
+            ref = ({'path':job['voice_ref_path'],'transcript':job.get('voice_ref_text') or ''} if job.get('voice_ref_path') else st.ref_clip(sp['id']) if sp else None)
             if not ref or not st.abs(ref["path"]).exists():
                 raise RuntimeError(f"{line['speaker'] or 'The speaker'} has no voice clip to copy. Add one in Cast.")
             p["files"] = {"audio": st.abs(ref["path"])}
             p["prompt"], p["negative"], p["ref_text"] = line["text"], None, ref["transcript"] or ""
             S = st.settings()
-            p["direction"] = line.get("direction") or ""
+            p["direction"] = job.get("voice_direction") if job.get("voice_direction") is not None else line.get("direction") or ""
             p["language"] = norm_choice(S.get("tts_language"), TTS_LANGUAGES, "Auto")
             p["tts_model"] = norm_choice(S.get("tts_model"), ["0.6B", "1.7B"], "1.7B")
             return "voice", p
@@ -1143,7 +1168,8 @@ class Worker(threading.Thread):
             pid = job.get("prompt_id")
             key = 'animate' if job['stage'] == 'continue' else job['stage']
             if not pid:
-                st.production.capture(job)
+                if not db.one("SELECT job_id FROM production_inputs WHERE job_id=?",(job_id,)):
+                    st.production.capture(job)
                 key, p = self.compose(job)
                 row = st.wf_row(key)
                 if not row:
@@ -1283,10 +1309,10 @@ class Worker(threading.Thread):
             line = st.job_line(shot, job)
             if line:
                 line = lines[line["index"]]
-            st.db.x("INSERT INTO voice_takes(shot_id,text,speaker,path,seed,job_id,seconds,created,input_signature,line_index) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            st.db.x("INSERT INTO voice_takes(shot_id,text,speaker,path,seed,job_id,seconds,created,input_signature,line_index,character_id,line_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     (shot["id"], job.get("note"), (line or {}).get("speaker", ""), st.rel(dest), job["seed"], job["id"],
-                     round(media_seconds(dest), 2), time.time(), signature, job.get("segment")))
-            if line and not line["audio"]:
+                     round(media_seconds(dest), 2), time.time(), signature, line["index"] if line else job.get("segment"), job.get("voice_character_id"), job.get("voice_line_id")))
+            if line and (not line["audio"] or (job.get("voice_autoselect") and line["audio"]==job.get("voice_previous_audio"))) and (not signature or signature==st.production.signature(shot,"voice")):
                 line.update(audio=st.rel(dest), src="tts", clip_id=None)
                 st.save_lines(shot["id"], lines)
                 st.rebuild_audio(shot["id"])
@@ -1479,16 +1505,26 @@ class API:
         for t in db.q("SELECT * FROM voice_takes ORDER BY id"):
             t["url"] = self.media(t["path"])
             vtakes.setdefault((t["shot_id"], norm_text(t["text"]), (t.get("speaker") or "").casefold()), []).append(t)
-        for j in db.q("SELECT shot_id, note, speaker, segment, status FROM jobs WHERE stage='voice' AND status IN ('pending','running')"):
+        voice_jobs = db.q("SELECT * FROM jobs WHERE stage='voice' AND status IN ('pending','running')")
+        for j in voice_jobs:
             vjobs.setdefault((j["shot_id"], norm_text(j["note"]), (j["speaker"] or "").casefold(), j["segment"]), []).append(j["status"])
         shots = []
+        voice_recovery_rows,_ = recovery_preview(st)
+        voice_suggestions={row["id"]:row["entries"] for row in voice_recovery_rows}
         for s in st.ordered_shots():
             lines = st.shot_lines(s)
             for l in lines:
                 l["url"] = self.media(l["audio"])
                 key = (s["id"], norm_text(l["text"]), l['speaker'].casefold())
-                l['takes'] = [t for t in vtakes.get(key, []) if t.get('line_index') in (None, l['index'])]
-                l['pending'] = vjobs.get((*key,l['index']), []) + vjobs.get((s['id'],key[1],'',l['index']), [])
+                exact = [t for rows in vtakes.values() for t in rows if t['shot_id']==s['id'] and t.get('line_id')==l['line_id'] and t.get('character_id')==l['character_id'] and spoken_key(t['text'])==spoken_key(l['text'])]
+                legacy = [t for t in vtakes.get(key,[]) if not t.get('line_id') and spoken_key(t['text'])==spoken_key(l['text']) and t.get('line_index') in (None,l['index']) and t.get('character_id') in (None,l['character_id'])]
+                l['takes'] = sorted(exact+legacy,key=lambda t:t['id'])
+                character=st.line_character(l)
+                l['character_name']=character['name'] if character else None
+                l['pending'] = [j['status'] for j in voice_jobs if j['shot_id']==s['id'] and ((j.get('voice_line_id')==l['line_id'] and j.get('voice_character_id')==l['character_id'] and spoken_key(j['note'])==spoken_key(l['text']) and (j.get('voice_direction') is None or j['voice_direction']==l.get('direction',''))) or (not j.get('voice_line_id') and j['segment']==l['index'] and norm_text(j['note'])==key[1] and (not j.get('speaker') or j['speaker'].casefold()==l['speaker'].casefold())))]
+            from shot_voices import edit_token
+            s['voice_token']=edit_token(st,s)
+            s['voice_suggestion']=voice_suggestions.get(s['id'],[])
             s["lines"] = lines
             chain = st.chain(s)
             covered = st.chain_seconds(chain) if chain else 0.0
@@ -1542,7 +1578,7 @@ class API:
                 "version": VERSION, "platform": sys.platform, "production": production, "render_queue": queue,
                 "audio_cues": [dict(c, url=self.media(c['path'])) for c in st.soundtrack.cues()],
                 "audio_exports": [dict(e, url=self.media(e['output'])) for e in st.soundtrack.exports()],
-                "editor": st.editor.state(), "voice_recovery_count": len(recovery_preview(st)[0])}
+                "editor": st.editor.state(), "voice_recovery_count": len(voice_recovery_rows)}
 
     # ---- settings / servers / workflows / tools
     def settings(self, b):
@@ -1601,6 +1637,10 @@ class API:
     def workflow_meta(self, b):
         self.st.db.x("UPDATE workflows SET fps=?, max_frames=? WHERE stage=?", (int(b["fps"]), int(b["max_frames"]), b["stage"]))
         return {"ok": True}
+
+    def shot_voices(self, body):
+        from shot_voices import save_and_generate
+        return save_and_generate(self,body)
 
     def voice_recover(self, body):
         return recover_dialogue(self.st, body)
@@ -1852,8 +1892,8 @@ class API:
             for l in lines:
                 if l["audio"] and not b.get("replace"):
                     continue
-                sp = st.speaker_asset(l["speaker"])
-                pool = [c for c in clips if c["asset_id"] == sp["id"]] if sp else clips
+                sp = st.line_character(l)
+                pool = [c for c in clips if c["asset_id"] == sp["id"]] if sp else []
                 best = max(pool, key=lambda c: similarity(c["transcript"], l["text"]), default=None)
                 if best and similarity(best["transcript"], l["text"]) >= threshold and st.abs(best["path"]).exists():
                     l.update(audio=best["path"], src="clip", clip_id=best["id"])
@@ -1873,22 +1913,25 @@ class API:
         index = int(b["index"])
         if not 0 <= index < len(lines):raise ValueError("Dialogue line not found")
         l = lines[index]
+        if b.get('line_id') and b['line_id']!=l['line_id']:raise ValueError('Dialogue order changed. Reopen this shot’s voice editor.')
         src = b["src"]
         if src == "none":
             l.update(audio=None, src=None, clip_id=None)
         elif src == "clip":
             c = st.db.one("SELECT * FROM voice_clips WHERE id=?", (b["clip_id"],))
             if not c or not st.abs(c["path"]).is_file():raise ValueError("Voice clip file is missing")
+            character=st.line_character(l)
+            if not character or c['asset_id'] != character['id']:raise ValueError('This recording belongs to another character. Choose the line character first.')
             l.update(audio=c["path"], src="clip", clip_id=c["id"])
         elif src == "take":
             t = st.db.one("SELECT * FROM voice_takes WHERE id=?", (b["take_id"],))
-            if not t or t['shot_id'] != shot['id'] or norm_text(t['text']) != norm_text(l['text']) or (t.get('speaker') or '').casefold() != l['speaker'].casefold() or t.get('line_index') not in (None,l['index']):
+            if not t or t['shot_id'] != shot['id'] or spoken_key(t['text']) != spoken_key(l['text']) or (t.get('line_id') != l['line_id'] if t.get('line_id') else (t.get('speaker') or '').casefold() != l['speaker'].casefold() or t.get('line_index') not in (None,l['index'])) or (t.get('character_id') is not None and t['character_id'] != l['character_id']):
                 raise ValueError('This voice take belongs to another dialogue line.')
             l.update(audio=t["path"], src="tts", clip_id=None)
         elif src == "upload":
             l.update(audio=st.save_upload(b["file"], "voices/lines"), src="upload", clip_id=None)
         elif src == "temp":
-            sp = st.speaker_asset(l["speaker"])
+            sp = st.line_character(l)
             l.update(audio=st.say_line(l["text"], (sp or {}).get("voice") or st.settings().get("default_voice") or ""),
                      src="temp", clip_id=None)
         else:
@@ -1945,7 +1988,7 @@ class API:
             for l in lines:
                 if l["audio"] and not b.get("replace"):
                     continue
-                sp = st.speaker_asset(l["speaker"])
+                sp = st.line_character(l)
                 l.update(audio=st.say_line(l["text"], (sp or {}).get("voice") or default), src="temp", clip_id=None)
                 changed, made = True, made + 1
             if changed:
@@ -2011,16 +2054,19 @@ class API:
                     target = (sid, l['index'])
                     if target in seen:continue
                     seen.add(target)
-                    if st.db.one("SELECT id FROM jobs WHERE shot_id=? AND stage='voice' AND status IN ('pending','running') AND segment=? AND note=? LIMIT 1", (sid,l['index'],l['text'])):
+                    sp = st.line_character(l)
+                    if st.db.one("SELECT id FROM jobs WHERE shot_id=? AND stage='voice' AND status IN ('pending','running') AND ((voice_line_id=? AND voice_character_id IS ? AND note=? AND voice_direction=?) OR (voice_line_id IS NULL AND segment=? AND note=? AND speaker=? COLLATE NOCASE)) LIMIT 1", (sid,l['line_id'],sp['id'] if sp else None,l['text'],l.get('direction') or '',l['index'],l['text'],l['speaker'])):
                         skipped.append(f"Shot {int(s['seq'])}, line {l['index']+1}: voice generation already queued or running.")
                         continue
-                    sp = st.speaker_asset(l["speaker"])
                     if not sp or not st.ref_clip(sp["id"]) or not st.abs(st.ref_clip(sp["id"])["path"]).is_file():
                         no_voice.add(l["speaker"] or "A speaker")
                         continue
-                    for _ in range(takes):
-                        st.db.x("INSERT INTO jobs(shot_id,stage,status,seed,created,progress,segment,note,speaker) VALUES(?,?,'pending',?,?,'waiting',?,?,?)",
-                                (sid, "voice", random.randint(1, 2**48), time.time(), l["index"], l["text"], l["speaker"]))
+                    for take_number in range(takes):
+                        jid = st.db.x("INSERT INTO jobs(shot_id,stage,status,seed,created,progress,segment,note,speaker,voice_character_id,voice_line_id,voice_ref_path,voice_ref_text,voice_direction) VALUES(?,?,'pending',?,?,'waiting',?,?,?,?,?,?,?,?)",
+                                (sid, "voice", random.randint(1, 2**48), time.time(), l["index"], l["text"], l["speaker"], sp["id"], l["line_id"], st.ref_clip(sp["id"])["path"], st.ref_clip(sp["id"])["transcript"] or "", l.get("direction") or ""))
+                        if b.get("select_generated") and take_number==0:
+                            st.db.x("UPDATE jobs SET voice_autoselect=1,voice_previous_audio=? WHERE id=?",(l.get("audio"),jid))
+                        st.production.capture(st.db.one("SELECT * FROM jobs WHERE id=?",(jid,)))
                         made += 1
             skipped += [f"{n} has no reference voice (add one in Cast)" for n in sorted(no_voice)]
             return {"ok": True, "queued": made, "skipped": skipped}
@@ -2205,6 +2251,7 @@ EDIT_ROUTES = {'/api/settings','/api/shot/save','/api/shot/delete','/api/shot/mo
     '/api/voice_take/delete','/api/clip/delete','/api/line/set','/api/line/direction',
     '/api/audio/cue/save','/api/audio/cue/delete','/api/script/revision'}
 ROUTES = {
+    '/api/shot/voices': 'shot_voices',
     '/api/voice/recover': 'voice_recover',
     '/api/editor': 'editor_action',
     '/api/audio/cue/save': 'audio_cue_save', '/api/audio/cue/delete': 'audio_cue_delete',
@@ -2248,6 +2295,8 @@ def make_handler(st, api):
                 path = urllib.parse.urlparse(self.path).path
                 if path in ("/", "/index.html"):
                     return self._send(200, INDEX_HTML, "text/html; charset=utf-8")
+                if path == '/shot_voices.js':
+                    return self._send(200, (Path(__file__).resolve().parent / 'shot_voices.js').read_text(), 'text/javascript; charset=utf-8')
                 if path == '/editor.js':
                     return self._send(200, (Path(__file__).resolve().parent / 'editor.js').read_text(), 'text/javascript; charset=utf-8')
                 if path == '/production.js':

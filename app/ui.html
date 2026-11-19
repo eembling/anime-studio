@@ -373,7 +373,7 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
   <span class="sp"></span>
   <span class="group"><label class="check" style="margin-right:2px"><input type="checkbox" id="selall" onchange="selAll(this.checked)"> All</label><span class="lbl" id="selinfo">Selected</span><select id="ntakes" aria-label="Takes per shot"><option value="1">1 take</option><option value="2" selected>2 takes</option><option value="3">3 takes</option><option value="4">4 takes</option></select>
    <label class="draftbox check" title="Draft: lower resolution and at most 49 frames, for quick motion tests"><input type="checkbox" id="draft"> Draft</label>
-   <button class="btn sm" onclick="bulk('keyframe')">Keyframes</button><button class="btn sm" onclick="bulk('animate')">Animate</button><button class="btn sm" onclick="bulk('continue')">Continue</button><button class="btn sm" onclick="bulkMatch()" title="Give lines without audio the character clip whose words match best">Match clips</button><button class="btn sm" onclick="bulkVoice()" title="macOS voices for lines that have no audio yet">Temp voices</button><button class="btn sm" onclick="bulk('voice')" title="Text-to-speech in the character's voice (needs a Voice workflow)">Voice (TTS)</button><button class="btn sm" onclick="bulk('lipsync')">Lip sync</button><button class="btn sm" onclick="bulk('upscale')">Upscale</button><button class="btn sm danger" onclick="delSel()">Delete</button></span>
+   <button class="btn sm" onclick="bulk('keyframe')">Keyframes</button><button class="btn sm" onclick="bulk('animate')">Animate</button><button class="btn sm" onclick="bulk('continue')">Continue</button><button class="btn sm" onclick="bulkMatch()" title="Use a recorded line only from its selected character, when its transcript matches">Use matching recordings</button><button class="btn sm" onclick="bulkVoice()" title="macOS voices for lines that have no audio yet">Temp voices</button><button class="btn sm" onclick="bulk('voice')" title="Text-to-speech in the character's voice (needs a Voice workflow)">Voice (TTS)</button><button class="btn sm" onclick="bulk('lipsync')">Lip sync</button><button class="btn sm" onclick="bulk('upscale')">Upscale</button><button class="btn sm danger" onclick="delSel()">Delete</button></span>
  </div>
  <div id="shotlist"></div>
 </section>
@@ -477,7 +477,7 @@ function go(t){const main=$('main');TAB_SCROLL[tab]={top:main.scrollTop,left:mai
  const position=TAB_SCROLL[t]||{top:0,left:0};++SCROLL_PAINT;main.scrollTop=position.top;main.scrollLeft=position.left;
 }
 let LASTSTATE='';
-async function load(){try{const t=await (await fetch('/api/state')).text();if(t===LASTSTATE)return;LASTSTATE=t;S=JSON.parse(t);render()}catch(e){}}
+async function load(){try{const t=await (await fetch('/api/state')).text();if(t===LASTSTATE)return;LASTSTATE=t;S=JSON.parse(t);if(typeof refreshShotVoiceResults==='function')refreshShotVoiceResults();render()}catch(e){}}
 const fmtT=sec=>{sec=Math.round(sec);return sec>=3600?`${Math.floor(sec/3600)}h ${String(Math.floor(sec%3600/60)).padStart(2,'0')}m`:`${Math.floor(sec/60)}:${String(sec%60).padStart(2,'0')}`};
 const pad=n=>String(n|0).padStart(3,'0');
 function lb(u){$('#lbimg').src=u;$('#lightbox').style.display='flex'}
@@ -660,7 +660,7 @@ function renderShotsContent(){
   const names=s.asset_ids.map(i=>cast[i]).filter(Boolean).map(a=>`<span class="who ${a.kind==='location'?'loc':''}">${a.url?`<img src="${a.url}" alt="">`:'<span class="ph"></span>'}${esc(a.name)}</span>`).join('');
   const SRC={clip:'clip',temp:'temp voice',tts:'TTS',upload:'uploaded'};
   const dia=s.audio_mode==='file'?(s.dialogue?`<div class="p">${esc(s.dialogue)}</div><div class="mixbar">${s.audio_url?`<button class="play" onclick="playA(this,'${s.audio_url}')" aria-label="Play">▶</button>One audio file for the whole shot`:''}</div>`:'')
-   :(s.lines||[]).map(l=>`<div class="ln">${l.speaker?`<span class="spk">${esc(l.speaker)}</span>`:''}${l.url?`<button class="play" onclick="playA(this,'${l.url}')" aria-label="Play line">▶</button>`:'<span class="play off" title="No audio for this line yet">•</span>'}<span>${esc(l.text)}<span class="src ${l.audio?'':'missing'}">${l.audio?SRC[l.src]||'audio':'no audio'}</span></span></div>`).join('');
+   :(s.lines||[]).map(l=>`<div class="ln">${l.speaker?`<span class="spk">${esc(l.character_name||l.speaker)}</span>`:''}${l.url?`<button class="play" onclick="playA(this,'${l.url}')" aria-label="Play line">▶</button>`:'<span class="play off" title="No audio for this line yet">•</span>'}<span>${esc(l.text)}<span class="src ${l.audio?'':'missing'}">${l.audio?SRC[l.src]||'audio':'no audio'}</span></span></div>`).join('');
   const stState=(has,act)=>act?'run':has?'ok':'hollow';
   return `<article class="cut" id="cut-${s.id}">
   <div class="cut-no"><label class="check"><input type="checkbox" ${sel.has(s.id)?'checked':''} onchange="tog(${s.id},this.checked)" aria-label="Select shot ${s.seq|0}"></label>
@@ -672,12 +672,12 @@ function renderShotsContent(){
    ${s.kind==='motion'&&s.motion_prompt&&s.motion_prompt!==s.keyframe_prompt?`<p class="mp"><b>Motion:</b> ${esc(s.motion_prompt)}</p>`:''}${s.camera?`<p class="cam"><b>Camera:</b> ${esc(s.camera)}</p>`:''}
    ${dia?`<div class="lines">${dia}${s.audio_mode!=='file'&&(s.lines||[]).length>1&&s.audio_url?`<div class="mixbar"><button class="play" onclick="playA(this,'${s.audio_url}')" aria-label="Play all lines">▶</button>All lines together</div>`:''}</div>`:''}
    <div class="flags">${s.draft_in_use?'<span class="flag" style="border-color:var(--amber);color:var(--amber)">Uses a draft clip</span>':''}${s.kind==='motion'?`<span class="flag">24 fps by ${s.retime==='hold'?'holding frames':s.retime==='blend'?'blending':'RIFE'}</span>`:''}${s.ref_prev?'<span class="flag">Matches previous shot</span>':''}${s.end_next?'<span class="flag">Ends on next shot</span>':''}${s.notes?`<span class="flag">${esc(s.notes)}</span>`:''}</div>
-   <div class="acts"><button class="btn sm" onclick="editShot(${s.id})">Edit shot</button><button class="btn sm ghost" onclick="editShot(null,${s.seq})">Add shot after</button></div></div>
+   <div class="acts"><button class="btn sm pri" onclick="editShotVoices(${s.id})">Dialogue & character voices</button><button class="btn sm" onclick="editShot(${s.id})">Edit shot</button><button class="btn sm ghost" onclick="editShot(null,${s.seq})">Add shot after</button></div></div>
   <div class="stages">
    <div class="stage"><div class="st-h"><span class="dot ${stState(s.keyframe_take,s.active.keyframe)}"></span>Keyframe<span class="cnt">${kfs.length?kfs.length+' take'+(kfs.length>1?'s':''):''}</span><span class="btns"><button class="btn sm" onclick="gen('keyframe',[${s.id}])">${kfs.length?'More':'Generate'}</button></span></div>
     <div class="st-b">${kfs.map((t,i)=>`<span class="kf-take"><button class="th ${t.id===s.keyframe_take?'sel'+mark(t.id,'k'):''}" style="background-image:url('${t.url}')" onclick="approve(${t.id})" ondblclick="lb('${t.url}')" title="Click to use K${i+1}, double-click to enlarge" aria-label="Use keyframe K${i+1} for shot ${pad(s.seq)}"></button><span class="kf-actions"><span class="kf-label">K${i+1}</span><button type="button" class="kf-delete" onclick="deleteKeyframe(${s.id},${t.id},this)" title="Delete keyframe K${i+1}" aria-label="Delete keyframe K${i+1} from shot ${pad(s.seq)}">×</button></span></span>`).join('')}${pend('keyframe')}</div></div>
    <div class="stage"><div class="st-h"><span class="dot ${s.kind==='still'&&!clips.length?(s.keyframe_take?'ok':'hollow'):stState(s.clip_take,s.active.animate||s.active.lipsync)}"></span>${s.kind==='still'?'Push-in':'Clip'}<span class="cnt">${clips.length?clips.length+' take'+(clips.length>1?'s':''):''}</span>
-    <span class="btns">${s.kind==='motion'?`<button class="btn sm" ${s.keyframe_take?'':'disabled title="Choose a keyframe first"'} onclick="gen('animate',[${s.id}])">Animate</button>`:''}${s.kind==='motion'&&s.clip_take&&rem>0.25?`<button class="btn sm" onclick="gen('continue',[${s.id}])" title="Animate the next part from the last frame">Continue</button>`:''}${missingLines(s)?`<button class="btn sm" onclick="voiceOne(${s.id})" title="macOS voices for the lines without audio">Temp voice</button>`:''}${s.audio?`<button class="btn sm" ${wfOK('lipsync')&&s.keyframe_take?'':'disabled title="Needs a keyframe and a lip-sync workflow (Settings)"'} onclick="gen('lipsync',[${s.id}])">Lip sync</button>`:''}</span></div>
+    <span class="btns">${s.kind==='motion'?`<button class="btn sm" ${s.keyframe_take?'':'disabled title="Choose a keyframe first"'} onclick="gen('animate',[${s.id}])">Animate</button>`:''}${s.kind==='motion'&&s.clip_take&&rem>0.25?`<button class="btn sm" onclick="gen('continue',[${s.id}])" title="Animate the next part from the last frame">Continue</button>`:''}${(s.lines||[]).length?`<button class="btn sm" onclick="editShotVoices(${s.id})">Character voices</button>`:''}${s.audio?`<button class="btn sm" ${wfOK('lipsync')&&s.keyframe_take?'':'disabled title="Needs a keyframe and a lip-sync workflow (Settings)"'} onclick="gen('lipsync',[${s.id}])">Lip sync</button>`:''}</span></div>
     <div class="st-b">${clips.length?chips(clips,s.clip_take,'T','c'):s.kind==='still'?'<span class="none">Made from the keyframe when you assemble.</span>':''}${pend('animate')}${pend('lipsync')}</div>${contRow}${pend('continue')}${cover}</div>
    <div class="stage"><div class="st-h"><span class="dot ${stState(s.final_take,s.active.upscale)}"></span>Upscale<span class="cnt">optional</span><span class="btns"><button class="btn sm" ${s.clip_take?'':'disabled title="Choose a clip first"'} onclick="gen('upscale',[${s.id}])">Upscale</button></span></div>
     <div class="st-b">${chips(ups,s.final_take,'U','u')}${pend('upscale')}</div></div>
@@ -702,7 +702,7 @@ function playA(btn,url){if(PLAYER){PLAYER.pause();if(PLAYBTN){PLAYBTN.classList.
  PLAYER.onended=()=>{btn.classList.remove('on');btn.textContent='▶';PLAYER=null;PLAYBTN=null};PLAYER.play().catch(()=>toast('Can’t play that file',1))}
 async function voiceOne(id){toast('Making temporary voices');const r=await post('/api/voice',{shot_ids:[id],fit:true});if(r.ok!==false)toast(r.made?`Added ${r.made} temporary line${r.made===1?'':'s'}`:'Every line already has audio')}
 async function bulkVoice(){if(!sel.size)return toast('Select shots first',1);toast('Making temporary voices');const r=await post('/api/voice',{shot_ids:[...sel],fit:true});if(r.ok!==false)toast(`Added ${r.made} temporary line${r.made===1?'':'s'}`+(r.skipped?`. Skipped ${r.skipped} shot${r.skipped>1?'s':''} that use one audio file`:''))}
-async function bulkMatch(){const ids=sel.size?[...sel]:null;const r=await post('/api/lines/match',ids?{shot_ids:ids}:{});if(r.ok!==false)toast(r.matched?`Matched ${r.matched} line${r.matched===1?'':'s'} to voice clips`:'No new matches. Check the clip transcripts in Cast.')}
+async function bulkMatch(){const ids=sel.size?[...sel]:null;const r=await post('/api/lines/match',ids?{shot_ids:ids}:{});if(r.ok!==false)toast(r.matched?`Matched ${r.matched} line${r.matched===1?'':'s'} to voice clips`:'No matching recordings. Choose each line’s character first, or use Dialogue & character voices to generate its exact words.')}
 function approve(id){const t=take(id);if(t)delete VIEW[t.shot_id];post('/api/approve',{take_id:id})}
 function delSel(){if(sel.size&&confirm(`Delete ${sel.size} shot${sel.size>1?'s':''}? Their takes stay in the project folder.`))post('/api/shot/delete',{ids:[...sel]}).then(()=>sel.clear())}
 function editShot(id,after){const s=id?S.shots.find(x=>x.id===id):{scene:'',kind:'motion',duration:+S.settings.default_duration||4,retime:'hold',keyframe_prompt:'',motion_prompt:'',camera:'',dialogue:'',asset_ids:[],ref_prev:0,end_next:0,notes:''};
@@ -717,22 +717,23 @@ function editShot(id,after){const s=id?S.shots.find(x=>x.id===id):{scene:'',kind
  <div><label class="f" for="f_rt">Getting to 24 fps</label><select id="f_rt"><option value="hold">Hold frames: classic anime timing</option><option value="blend">Blend: ffmpeg interpolation</option><option value="rife">RIFE: smoothest, needs rife-ncnn-vulkan</option></select></div></div>
  <div class="opts"><label class="check"><input type="checkbox" id="f_prev" ${s.ref_prev?'checked':''}> Match the previous shot (its keyframe is used as a reference)</label>
  <label class="check"><input type="checkbox" id="f_next" ${s.end_next?'checked':''}> End on the next shot’s keyframe (first and last frame)</label></div>
- <label class="f" for="f_dia">Dialogue, one line per speaker (<code>AIKO: line</code>)</label><textarea id="f_dia" style="min-height:48px">${esc(s.dialogue)}</textarea>
- ${id?`<label class="f">Audio for each line. Change the dialogue above, then save to update this list.</label><div id="f_lines"></div>`:''}
+ <label class="f" for="f_dia">Dialogue (<code>AIKO: line</code>, or plain words for a single-character shot)</label><textarea id="f_dia" style="min-height:48px">${esc(s.dialogue)}</textarea>
+ <p>Save the dialogue above, then choose the speaking character and generate its voice.</p><button class="btn" id="f_voice_save" type="button">Save shot & choose character voices</button>
  <label class="f" for="f_audio">Or one audio file for the whole shot (replaces the line audio)</label><div class="toolbar" style="margin:0"><input type="file" id="f_audio" accept="audio/*" style="width:auto">${s.audio_mode==='file'&&s.audio_url?`<button class="play" type="button" onclick="playA(this,'${s.audio_url}')">▶</button><label class="check"><input type="checkbox" id="f_clr"> Remove it and use line audio</label>`:''}</div>
  <label class="f" for="f_notes">Notes</label><input id="f_notes" value="${esc(s.notes)}"></div>
  <div class="dlg-f"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn pri" id="f_save">${id?'Save shot':'Add shot'}</button></div>`);
  $('#f_kind').value=s.kind;$('#f_rt').value=s.retime||'hold';if(id)lineTable(id);
- $('#f_save').onclick=async()=>{const b={id:id||undefined,scene:$('#f_scene').value,kind:$('#f_kind').value,duration:+$('#f_dur').value,keyframe_prompt:$('#f_kp').value,
+ const saveShot=async(openVoices=false)=>{const b={id:id||undefined,scene:$('#f_scene').value,kind:$('#f_kind').value,duration:+$('#f_dur').value,keyframe_prompt:$('#f_kp').value,
   motion_prompt:$('#f_mp').value,camera:$('#f_cam').value,dialogue:$('#f_dia').value,retime:$('#f_rt').value,ref_prev:$('#f_prev').checked,end_next:$('#f_next').checked,
   notes:$('#f_notes').value,asset_ids:[...document.querySelectorAll('.picks input:checked')].map(x=>+x.value)};
   if(after!=null)b.after_seq=after;const af=$('#f_audio').files[0];if(af)b.audio_file=await readFile(af);if($('#f_clr')&&$('#f_clr').checked)b.clear_audio=true;
-  await post('/api/shot/save',b);closeModal()}}
+  const result=await post('/api/shot/save',b);if(result.ok===false)return;closeModal();if(openVoices)editShotVoices(result.id)};
+ $('#f_save').onclick=()=>saveShot(false);$('#f_voice_save').onclick=()=>saveShot(true)}
 function lineTable(sid){const box=$('#f_lines');if(!box)return;const s=S.shots.find(x=>x.id===sid);if(!s)return;
  if(s.audio_mode==='file'){box.innerHTML='<div class="muted" style="font-size:13px">This shot uses one audio file for the whole shot. Remove it below to set audio per line.</div>';return}
  if(!(s.lines||[]).length){box.innerHTML='<div class="muted" style="font-size:13px">No dialogue lines yet.</div>';return}
  const byName=Object.fromEntries(S.assets.map(a=>[a.name.trim().toLowerCase(),a]));
- box.innerHTML=`<div class="tbl"><table class="linetbl"><tbody>${s.lines.map(l=>{const a=byName[(l.speaker||'').toLowerCase()];const cl=a?a.clips:S.assets.flatMap(x=>x.clips);
+ box.innerHTML=`<div class="tbl"><table class="linetbl"><tbody>${s.lines.map(l=>{const a=S.assets.find(a=>a.id===l.character_id);const cl=a?a.clips:[];
   const cur=l.src==='clip'?'clip:'+l.clip_id:l.audio?'keep':'none';
   return `<tr><td style="width:28px">${l.url?`<button class="play" type="button" onclick="playA(this,'${l.url}')">▶</button>`:'<span class="play off">•</span>'}</td>
   <td><b style="font-size:12px;color:var(--red)">${esc(l.speaker||'')}</b><div style="font-size:13px">${esc(l.text)}</div></td>
@@ -771,16 +772,17 @@ function renderVoicesContent(){
  if(same('voices',[S.voice_recovery_count,S.shots,S.assets,S.workflows,S.instances.map(i=>[i.enabled,i.roles]),VFILTER,[...VSEL],SCENEPLAY&&SCENEPLAY.g]))return;
  const lines=allLines(),byName=Object.fromEntries(S.assets.map(a=>[a.name.trim().toLowerCase(),a]));
  const speakers=[...new Set(lines.map(x=>(x.l.speaker||'').toLowerCase()).filter(Boolean))];
- const noRef=speakers.filter(n=>{const a=byName[n];if(!a)return true;const clips=a.clips||[],reference=clips.find(c=>c.is_ref)||clips[0];return !reference||reference.available===false});
+ const speakerAssets=Object.fromEntries(speakers.map(name=>[name,S.assets.find(a=>a.id===lines.find(x=>(x.l.speaker||'').toLowerCase()===name).l.character_id)]));
+ const noRef=speakers.filter(n=>{const a=speakerAssets[n];if(!a)return true;const clips=a.clips||[],reference=clips.find(c=>c.is_ref)||clips[0];return !reference||reference.available===false});
  const wf=S.workflows.voice,takers=S.instances.filter(i=>i.enabled&&i.roles.split(',').includes('voice'));
  let warn='';
  if(S.voice_recovery_count)warn+=`<div class="warnbox"><b>${S.voice_recovery_count} shots have spoken dialogue stored as visual prompts.</b> Click “Recover dialogue from shot prompts” above to review them before generating voices.</div>`;
- if(noRef.length)warn+=`<div class="warnbox"><b>No reference voice yet:</b>${noRef.map(n=>byName[n]?`<button class="btn sm" onclick="editAsset(${byName[n].id})">${esc(byName[n].name)}</button>`:`<span class="flag">${esc(n)}</span>`).join('')}<span class="muted">Add or design a reference voice in Cast before generating their lines. Missing reference files must be replaced.</span></div>`;
+ if(noRef.length)warn+=`<div class="warnbox"><b>No reference voice yet:</b>${noRef.map(n=>speakerAssets[n]?`<button class="btn sm" onclick="editAsset(${speakerAssets[n].id})">${esc(speakerAssets[n].name)}</button>`:`<span class="flag">${esc(n)}</span>`).join('')}<span class="muted">Add or design a reference voice in Cast before generating their lines. Missing reference files must be replaced.</span></div>`;
  if(!wf||(wf.problems||[]).length)warn+=`<div class="warnbox">The voice workflow isn’t ready. See Settings › Workflows.</div>`;
  if(!takers.length)warn+=`<div class="warnbox">No ComfyUI server is set to take voice jobs. Tick “voice” under Settings › ComfyUI servers.</div>`;
  $('#vwarn').innerHTML=warn;
  const miss=lines.filter(x=>!x.l.audio).length;
- $('#vfilters').innerHTML=[['missing','Needs audio',miss],['all','All lines',lines.length],...speakers.map(n=>[n,byName[n]?byName[n].name:n,lines.filter(x=>(x.l.speaker||'').toLowerCase()===n).length])]
+ $('#vfilters').innerHTML=[['missing','Needs audio',miss],['all','All lines',lines.length],...speakers.map(n=>[n,speakerAssets[n]?speakerAssets[n].name:n,lines.filter(x=>(x.l.speaker||'').toLowerCase()===n).length])]
   .map(([k,l,n])=>`<button class="chip ${VFILTER===k?'on':''}" onclick="VFILTER=${jsq(k)};VSEL.clear();$('#vselall').checked=false;renderVoices()">${esc(l)}<b>${n}</b></button>`).join('');
  $('#vselinfo').textContent=VSEL.size?`${VSEL.size} selected`:'Selected lines';
  if(!lines.length){$('#vlist').innerHTML=`<div class="empty-state"><h2>No dialogue yet</h2><p>Lines come from the shots’ dialogue (<code>AIKO: line</code>). Create shots from the script, or add dialogue to a shot.</p><button class="btn pri" onclick="go('script')">Open the script</button></div>`;return}
@@ -790,7 +792,7 @@ function renderVoicesContent(){
  $('#vlist').innerHTML=groups.map((g,gi)=>{const shotsIn=[...new Set(g.items.map(x=>x.s.seq|0))];
   return `<section class="scene"><div class="scene-h"><h2>${esc(g.scene)}</h2><span class="muted" style="font-size:12.5px">Shot${shotsIn.length>1?'s':''} ${pad(shotsIn[0])}${shotsIn.length>1?'–'+pad(shotsIn[shotsIn.length-1]):''}, ${g.items.length} line${g.items.length>1?'s':''}</span>
   <button class="btn sm" onclick="playScene(this,${gi})">${SCENEPLAY&&SCENEPLAY.g===gi?'Stop':'Play scene'}</button></div>
-  ${g.items.map(({s,l})=>{const a=byName[(l.speaker||'').toLowerCase()];const k=vkey(s.id,l.index);
+  ${g.items.map(({s,l})=>{const a=S.assets.find(a=>a.id===l.character_id);const k=vkey(s.id,l.index);
    const takes=(l.takes||[]).map((t,i)=>`<span class="vt ${l.audio===t.path?'sel':''}" title="Take ${i+1}, ${(+t.seconds).toFixed(1)} s. Click the number to use it."><button class="play" onclick="event.stopPropagation();playA(this,'${t.url}')" aria-label="Play take">▶</button><span onclick="vUse(${s.id},${l.index},${t.id})">${i+1}</span><span class="x" onclick="event.stopPropagation();vDelTake(${t.id})" title="Delete this take" aria-label="Delete take">×</span></span>`).join('');
    const pend=(l.pending||[]).length?`<span class="pending"><span class="dot"></span>${l.pending.length} ${l.pending.includes('running')?'rendering':'waiting'}</span>`:'';
    return `<div class="vl ${l.audio?'':'missing'}"><input type="checkbox" ${VSEL.has(k)?'checked':''} onchange="vTog('${k}',this.checked)" aria-label="Select line">
@@ -798,7 +800,7 @@ function renderVoicesContent(){
     <span class="who">${a&&a.url?`<img src="${a.url}" alt="">`:'<span class="ph"></span>'}<b>${esc(a?a.name:l.speaker||'No speaker')}</b></span>
     <div><div class="txt">${esc(l.text)}</div><input class="dir" value="${esc(l.direction||'')}" placeholder="Delivery note (optional): whispering, angry, out of breath…" onchange="post('/api/line/direction',{shot_id:${s.id},index:${l.index},direction:this.value})" aria-label="Delivery note"></div>
     <div><div class="vtakes">${takes||'<span class="vsrc">No takes yet</span>'}${pend}</div>${l.audio&&l.src!=='tts'?`<div class="vsrc" style="margin-top:6px">Using: ${SRC[l.src]||'audio'} <button class="play" style="display:inline-grid;vertical-align:middle;width:18px;height:18px;font-size:8px" onclick="playA(this,'${l.url}')" aria-label="Play">▶</button></div>`:''}</div>
-    <div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap"><button class="btn sm" onclick="vGen([[${s.id},${l.index}]])">${(l.takes||[]).length?'More takes':'Generate'}</button>
+    <div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap"><button class="btn sm" onclick="editShotVoices(${s.id})">Character / dialogue</button><button class="btn sm" onclick="vGen([[${s.id},${l.index}]])">${(l.takes||[]).length?'More takes':'Generate'}</button>
      <select style="width:auto;padding:3px 6px;font-size:12px" onchange="vOther(${s.id},${l.index},this)" aria-label="Other audio"><option value="">Other audio…</option>${(a?a.clips:[]).map(c=>`<option value="clip:${c.id}">Clip: ${esc((c.transcript||c.name).slice(0,40))}</option>`).join('')}<option value="temp">Temp voice (macOS)</option><option value="upload">Upload a file…</option>${l.audio?'<option value="none">Remove audio</option>':''}</select></div></div>`}).join('')}</section>`}).join('')}
 function vTog(k,on){on?VSEL.add(k):VSEL.delete(k);$('#vselinfo').textContent=VSEL.size?`${VSEL.size} selected`:'Selected lines'}
 function vSelAll(on){VSEL=new Set(on?allLines().filter(vMatch).map(x=>vkey(x.s.id,x.l.index)):[]);renderVoices()}
@@ -926,5 +928,5 @@ function renderSettings(){
 function saveInst(id){post('/api/instance/save',{id,name:$('#in_n'+id).value,url:$('#in_u'+id).value,enabled:$('#in_e'+id).checked,roles:[...document.querySelectorAll('.in_r'+id+':checked')].map(x=>x.value)}).then(()=>toast('Server saved'))}
 function addInst(){post('/api/instance/save',{name:'RTX 3060 #2',url:'http://172.16.2.70:8189',roles:['keyframe','animate','continue','lipsync','sheet']})}
 function saveSettings(){const o={};document.querySelectorAll('#setform [data-k]').forEach(e=>o[e.dataset.k]=e.value);post('/api/settings',{settings:o}).then(()=>toast('Settings saved'))}
-window.addEventListener('DOMContentLoaded',()=>{load();setInterval(()=>{if(!$('#modal').classList.contains('on')||$('#a_designed'))load()},4000)});   // the cast dialog follows its voice takes
-</script><script src="/editor.js"></script><script src="/production.js"></script></body></html>
+window.addEventListener('DOMContentLoaded',()=>{load();setInterval(()=>{if(!$('#modal').classList.contains('on')||$('#a_designed')||$('#sv-rows'))load()},4000)});   // the cast dialog follows its voice takes
+</script><script src="/shot_voices.js"></script><script src="/editor.js"></script><script src="/production.js"></script></body></html>
