@@ -18,6 +18,7 @@ The app talks to ComfyUI over its HTTP API. Every workflow uses **nodes built in
 | `mac/` | macOS bundle parts: launcher, Swift/WebKit window, `Info.plist`, icon. |
 | `build_app.sh` | Builds `Anime Studio.app` from the files above. |
 | `server/download_models.sh` | Model downloads for the ComfyUI server (`wget -c` into `~/ComfyUI/models`). |
+| `server/install_tts.sh` | Installs local text-to-speech (Qwen3-TTS) into ComfyUI for the Voices tab. |
 | `workflows/` | The built-in ComfyUI workflows in API format, for reference or to open in ComfyUI. |
 | `examples/shotlist_template.csv` | Shot-list spreadsheet format. |
 | `tests/` | Fake ComfyUI server and an end-to-end test. |
@@ -28,6 +29,13 @@ The app talks to ComfyUI over its HTTP API. Every workflow uses **nodes built in
 1. Start ComfyUI so other machines can reach it, e.g. `python main.py --listen 0.0.0.0 --port 8188`.
 2. Copy `server/download_models.sh` to the server and run it. It downloads about 45 GB into `~/ComfyUI/models` and skips files that are already there.
 3. Press **R** in the ComfyUI page, or restart ComfyUI.
+
+**Voices (optional, local TTS).** The Voices tab needs one custom node pack on the server. Copy `server/install_tts.sh` to the server, run `bash install_tts.sh`, then restart ComfyUI. The script:
+- saves your current Python package list, so you can roll back
+- installs [ComfyUI-Qwen-TTS](https://github.com/flybirdxx/ComfyUI-Qwen-TTS) and its requirements; this upgrades `transformers` to 4.57 or newer in ComfyUI's Python
+- downloads the Qwen3-TTS voice-cloning models (1.7B and 0.6B) into `models/qwen-tts`
+
+Everything runs locally on your GPU; no cloud service or API key is used.
 
 The server needs **32 GB of system RAM or more**. The Wan 14B fp8 models are 14.3 GB each, bigger than a 12 GB card, so ComfyUI keeps part of them in RAM.
 
@@ -63,13 +71,18 @@ Add each copy under **Settings → ComfyUI servers** and tick which jobs it take
    - **End on the next shot's keyframe** uses first-last-frame mode on the final part, so the cut into the next shot is smooth.
    - **Draft** renders at 512×288 and at most 49 frames, for quick motion tests. **Render full quality** re-renders a draft take with the same seed.
 5. **24 fps.** Set per shot and applied at assembly: hold frames (classic anime timing), blend (ffmpeg interpolation), or RIFE.
-6. **Voices and lip sync.** Video models make picture only, no sound. Dialogue audio is set **per line** and joined into each shot's dialogue track, with a short pause between lines (adjustable in Settings). The shot also gets longer if its dialogue needs more time.
-   - **Reference voice (Cast → Add or Edit).** Upload 5–15 seconds of clean speech for a character and type exactly what is said. This is the voice the TTS step copies. Voice-copying TTS models need the transcript to match the recording.
-   - **Voice clips per character (Cast).** Upload any number of recorded lines at once. The file name becomes the clip's transcript, for example `aiko_03_you_came_after_all.wav` becomes "you came after all"; you can edit it. Clips are matched automatically to dialogue lines with the same words, when you upload them or with **Match clips**.
-   - **Per line in the shot editor.** For each line, pick one of the speaker's clips, a temporary voice, an uploaded file, or no audio. A line without audio keeps its place as silence, so the timing stays right.
-   - **Temp voices** use the macOS voices assigned to each character, for lines that have no audio yet.
-   - **Voice (TTS), optional.** Upload a text-to-speech workflow with a `LoadAudio` node titled `AUDIO_IN`, a text node titled `PROMPT`, an optional text node titled `REF_TEXT` and a `SaveAudio` node. The app sends each line together with the character's reference voice and its transcript, so the result is in that character's voice. ComfyUI has no free voice-copying TTS built in: its Fish Audio and ElevenLabs partner nodes work (paid), as does a custom TTS node if you install one.
-   - You can still use one audio file for a whole shot instead of per-line audio.
+6. **Voices (the Voices tab), then lip sync.** Video models make picture only, no sound. Make the voices **before** animating, so line lengths set shot lengths before you spend GPU time on video.
+   - **Reference voice (Cast → Add or Edit).** Upload 5–15 seconds of clean speech for each character and type exactly what is said. Qwen3-TTS copies this voice.
+   - **The Voices tab** lists every dialogue line in script order, grouped by scene.
+     - **Generate all missing lines** (or selected lines) makes 1–4 takes per line in the speaker's voice on the ComfyUI server.
+     - Play a take with ▶ and click its number to use it. The chosen take is circled in red.
+     - **Play scene** plays the chosen takes back to back, with the pause between lines.
+     - An optional **delivery note** (for example "whispering" or "angry") is passed to the model as a style hint. How much it changes the delivery varies.
+     - Filters: lines that need audio, all lines, or one character's lines.
+   - Each line can also use a recorded voice clip (Cast → Voice clips, matched to lines by their words), a temporary macOS voice, or an uploaded file.
+   - The chosen audio for each line is joined into the shot's dialogue track, with a pause between lines (adjustable in Settings). The shot gets longer if the dialogue needs more time. You can still use one audio file for a whole shot instead.
+   - Settings → Project: voice model size (0.6B faster, 1.7B better) and voice language (Auto, English, Japanese, Chinese, Korean, …).
+   - You can upload any other voice-copying TTS workflow under Settings → Workflows. The app fills a `LoadAudio` node titled `AUDIO_IN`, the text node titled `PROMPT`, and any `ref_text`, `language` or `instruct` inputs.
    - The shot preview plays the dialogue in sync with the video.
    - Lip sync is optional: export ComfyUI's Wan2.2 S2V template in API format and upload it under Settings → Workflows. It uses the shot's dialogue track.
 7. **Upscale and assemble.**
@@ -92,7 +105,7 @@ The app fills nodes by title: `PROMPT`, `NEGATIVE`, `REF1`–`REF3`, `START_IMAG
 ```bash
 python3 tests/test_pipeline.py      # needs ffmpeg and Pillow
 ```
-The test starts two fake ComfyUI servers and runs the whole pipeline: script, cast and sheets, keyframes on two servers, drafts, full-quality re-render, Continue chains, first-last-frame, voice clips and line matching, per-line audio, TTS, upscale, music and assembly. It checks the exact output lengths.
+The test starts two fake ComfyUI servers and runs the whole pipeline: script, cast and sheets, keyframes on two servers, drafts, full-quality re-render, Continue chains, first-last-frame, voice clips and line matching, reference voices, per-line audio, TTS takes, upscale, music and assembly. It checks the exact output lengths.
 
 ## Troubleshooting
 - **Red server dot:** check that ComfyUI was started with `--listen` and that `http://<server>:8188` opens from the Mac.

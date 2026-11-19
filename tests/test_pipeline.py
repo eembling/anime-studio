@@ -195,6 +195,35 @@ def main():
     refs = [c for c in m["clips"] if c["is_ref"]]
     check(len(refs) == 1 and refs[0]["transcript"] == "New words." and len(m["clips"]) == 2, "replacing the reference keeps one reference")
 
+    # ---------- Voices tab: the built-in Qwen3-TTS workflow, takes per line
+    post("/api/workflow", {"stage": "voice", "starter": "qwen3_tts_clone"})
+    post("/api/settings", {"settings": {"tts_model": "0.6B", "tts_language": "Japanese"}})
+    three = post("/api/shot/save", {"scene": "Pier", "kind": "still", "keyframe_prompt": "Mina at the pier",
+                                    "dialogue": "Mina: The tide is turning.\nMina: We should go."})["id"]
+    post("/api/line/direction", {"shot_id": three, "index": 0, "direction": "softly"})
+    r = post("/api/generate", {"stage": "voice", "lines": [{"shot_id": three, "index": 0}], "takes": 2})
+    check(r["queued"] == 2, "two takes queued for one line")
+    wait_jobs()
+    l0 = shot(three)["lines"][0]
+    check(len(l0["takes"]) == 2 and l0["src"] == "tts" and l0["audio"] == l0["takes"][0]["path"],
+          "both takes kept, the first is chosen automatically")
+    sent = [json.loads(p.read_text()) for p in list((RUN / "m1").glob("last_*.json")) + list((RUN / "m2").glob("last_*.json"))
+            if "FB_Qwen3TTSVoiceClone" in p.read_text() and "The tide is turning." in p.read_text()]
+    node = sent[-1]["2"]["inputs"] if sent else {}
+    check(node.get("target_text") == "The tide is turning." and node.get("ref_text") == "New words."
+          and node.get("language") == "Japanese" and node.get("model_choice") == "0.6B" and node.get("instruct") == "softly",
+          "Qwen3-TTS node gets the line, reference transcript, language, model size and delivery note")
+    post("/api/line/set", {"shot_id": three, "index": 0, "src": "take", "take_id": l0["takes"][1]["id"]})
+    check(shot(three)["lines"][0]["audio"] == l0["takes"][1]["path"], "choosing another take uses it")
+    post("/api/voice_take/delete", {"id": l0["takes"][1]["id"]})
+    l0 = shot(three)["lines"][0]
+    check(len(l0["takes"]) == 1 and not l0["audio"], "deleting the chosen take removes it from the line")
+    r = post("/api/generate", {"stage": "voice", "shot_ids": [three], "takes": 1})
+    check(r["queued"] == 2, "Generate all missing covers every line without audio")
+    wait_jobs()
+    sh = shot(three)
+    check(all(l["audio"] for l in sh["lines"]) and sh["lines"][0]["direction"] == "softly", "all lines voiced; delivery note kept")
+
     post("/api/shot/save", {"id": dia["id"], "audio_file": tone("whole.wav", 4)})
     check(shot(dia["id"])["audio_mode"] == "file" and shot(dia["id"])["duration"] >= 4.4, "one file for the whole shot still works")
     post("/api/shot/save", {"id": dia["id"], "clear_audio": True})

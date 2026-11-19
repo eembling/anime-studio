@@ -39,7 +39,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "2.3"
+VERSION = "2.4"
 for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebrew/bin")):
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
@@ -143,10 +143,19 @@ STARTERS = {
         "6": _n("SaveImage", {"images": ["5", 0], "filename_prefix": "anime/upscale"}, "SAVE"),
     }}},
     "lipsync": {},   # export ComfyUI's built-in "Wan2.2 S2V" template in API format and upload it
-    "voice": {},     # any text-to-speech workflow: reference clip in (AUDIO_IN), line text in (PROMPT), Save Audio out
+    # Local voice-copying TTS: ComfyUI-Qwen-TTS (github.com/flybirdxx/ComfyUI-Qwen-TTS) + built-in Load/Save Audio
+    "voice": {"qwen3_tts_clone": {"fps": 0, "max_frames": 0, "wf": {
+        "1": _n("LoadAudio", {"audio": "example.wav"}, "AUDIO_IN"),
+        "2": _n("FB_Qwen3TTSVoiceClone", {"target_text": "", "model_choice": "1.7B", "device": "auto", "precision": "bf16",
+                                          "language": "Auto", "ref_audio": ["1", 0], "ref_text": "", "seed": 0,
+                                          "max_new_tokens": 2048, "top_p": 1.0, "top_k": 50, "temperature": 0.9,
+                                          "repetition_penalty": 1.05, "x_vector_only": False, "instruct": "",
+                                          "attention": "auto", "unload_model_after_generate": False, "custom_model_path": ""}, "PROMPT"),
+        "3": _n("SaveAudio", {"audio": ["2", 0], "filename_prefix": "anime/voice"}, "SAVE"),
+    }}},
 }
 DEFAULT_STARTER = {"keyframe": "qwen_edit_2509", "animate": "wan22_14b_fp8", "animate_flf": "wan22_14b_fp8_flf",
-                   "upscale": "realesrgan_anime_1080p"}
+                   "upscale": "realesrgan_anime_1080p", "voice": "qwen3_tts_clone"}
 
 WAN_NEGATIVE = ("色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，"
                 "残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，"
@@ -171,6 +180,7 @@ DEFAULT_SETTINGS = {
     "out_width": "1920", "out_height": "1080", "out_fps": "24",
     "default_voice": "",
     "line_gap": "0.3",
+    "tts_model": "1.7B", "tts_language": "Auto",
     "job_timeout": "3600",
     "music": "",
 }
@@ -187,6 +197,8 @@ CREATE TABLE IF NOT EXISTS shots(id INTEGER PRIMARY KEY, seq REAL, scene TEXT DE
     dialogue TEXT DEFAULT '', duration REAL DEFAULT 4, retime TEXT DEFAULT 'hold', ref_prev INTEGER DEFAULT 0,
     end_next INTEGER DEFAULT 0, audio TEXT, keyframe_take INTEGER, clip_take INTEGER, final_take INTEGER, notes TEXT DEFAULT '',
     cont_takes TEXT DEFAULT '[]', line_audio TEXT DEFAULT '[]', audio_mode TEXT DEFAULT 'lines');
+CREATE TABLE IF NOT EXISTS voice_takes(id INTEGER PRIMARY KEY, shot_id INTEGER, text TEXT, speaker TEXT, path TEXT, seed INTEGER,
+    job_id INTEGER, seconds REAL DEFAULT 0, created REAL);
 CREATE TABLE IF NOT EXISTS voice_clips(id INTEGER PRIMARY KEY, asset_id INTEGER, path TEXT, name TEXT, transcript TEXT DEFAULT '',
     seconds REAL DEFAULT 0, is_ref INTEGER DEFAULT 0, created REAL);
 CREATE TABLE IF NOT EXISTS takes(id INTEGER PRIMARY KEY, shot_id INTEGER, asset_id INTEGER, stage TEXT, path TEXT, fps REAL DEFAULT 0,
@@ -315,6 +327,7 @@ class Studio:
         self.db.x("UPDATE jobs SET status='pending', instance_id=NULL, prompt_id=NULL, progress='requeued after restart' "
                   "WHERE status='running'")
         self.health = {}
+        self.frame_lock = threading.Lock()
         self.assembly = {"running": False, "log": [], "output": None, "folder": None}
         self.tools_cache = None
 
@@ -423,19 +436,20 @@ class Studio:
         lines = parse_lines(shot["dialogue"], next((c["name"] for c in cast if c), ""))
         saved, used = json.loads(shot.get("line_audio") or "[]"), set()
         for i, l in enumerate(lines):
-            l.update(index=i, audio=None, src=None, clip_id=None)
+            l.update(index=i, audio=None, src=None, clip_id=None, direction="")
             hits = [j for j, e in enumerate(saved) if j not in used and norm_text(e.get("text")) == norm_text(l["text"])]
             if hits:
                 j = i if i in hits else hits[0]
                 used.add(j)
                 e = saved[j]
+                l["direction"] = e.get("direction") or ""
                 if e.get("path") and self.abs(e["path"]).exists():
                     l.update(audio=e["path"], src=e.get("src"), clip_id=e.get("clip_id"))
         return lines
 
     def save_lines(self, shot_id, lines):
         data = [{"speaker": l["speaker"], "text": l["text"], "path": l.get("audio"), "src": l.get("src"),
-                 "clip_id": l.get("clip_id")} for l in lines]
+                 "clip_id": l.get("clip_id"), "direction": l.get("direction") or ""} for l in lines]
         self.db.x("UPDATE shots SET line_audio=? WHERE id=?", (json.dumps(data), shot_id))
 
     def rebuild_audio(self, shot_id, fit=True):
@@ -486,9 +500,13 @@ class Studio:
         return self.rel(Path(str(base) + ".wav"))
 
     def last_frame(self, path):
+        """Last frame of a clip as PNG. Locked and written atomically: parallel Continue jobs share it."""
         out = self.data / "cache" / f"last_{Path(path).stem}.png"
-        if not out.exists() or out.stat().st_mtime < Path(path).stat().st_mtime:
-            ffmpeg(["-sseof", "-1", "-i", str(path), "-update", "1", "-q:v", "1", str(out)])
+        with self.frame_lock:
+            if not out.exists() or out.stat().st_mtime < Path(path).stat().st_mtime:
+                tmp = out.with_name(f".{out.stem}_{uuid.uuid4().hex[:6]}.png")
+                ffmpeg(["-sseof", "-1", "-i", str(path), "-update", "1", "-q:v", "1", str(tmp)])
+                os.replace(tmp, out)
         return out
 
     def neighbor(self, shot, direction):
@@ -622,7 +640,7 @@ def _remove_node(wf, key):
 
 def _set_text(node, text):
     inp = node["inputs"]
-    for f in ("prompt", "text", "text_g"):
+    for f in ("prompt", "text", "text_g", "target_text"):
         if f in inp and not isinstance(inp[f], list):
             inp[f] = text
             return
@@ -675,6 +693,13 @@ def build_workflow(template, key, p):
         wf[k]["inputs"]["audio"] = imgs["audio"]
     for k in m.get("ref_text", []):
         _set_text(wf[k], p.get("ref_text", ""))
+    if key == "voice":   # fill well-known TTS inputs wherever a node has them
+        for n in wf.values():
+            inp = n.get("inputs", {})
+            for field, val in (("ref_text", p.get("ref_text")), ("instruct", p.get("direction")),
+                               ("language", p.get("language")), ("model_choice", p.get("tts_model"))):
+                if val is not None and field in inp and isinstance(inp[field], str):
+                    inp[field] = val
     for k in m["video_in"]:
         wf[k]["inputs"][VIDEO_LOADERS.get(wf[k]["class_type"], "file")] = imgs["video"]
     for k, f in m["seeds"]:
@@ -869,6 +894,10 @@ class Worker(threading.Thread):
                 raise RuntimeError(f"{line['speaker'] or 'The speaker'} has no voice clip to copy. Add one in Cast.")
             p["files"] = {"audio": st.abs(ref["path"])}
             p["prompt"], p["negative"], p["ref_text"] = line["text"], None, ref["transcript"] or ""
+            S = st.settings()
+            p["direction"] = line.get("direction") or ""
+            p["language"] = S.get("tts_language") or None
+            p["tts_model"] = S.get("tts_model") or None
             return "voice", p
         if stage == "keyframe":
             ids = json.loads(shot["asset_ids"] or "[]")
@@ -1046,13 +1075,17 @@ class Worker(threading.Thread):
             dest = st.data / "voices" / "lines" / f"tts_j{job['id']}.wav"
             ffmpeg(["-i", str(auds[0]), "-ar", "48000", str(dest)])
             shot = st.db.one("SELECT * FROM shots WHERE id=?", (job["shot_id"],))
+            if not shot:
+                return
             lines = st.shot_lines(shot)
-            for l in lines:
-                if norm_text(l["text"]) == norm_text(job.get("note")):
-                    l.update(audio=st.rel(dest), src="tts", clip_id=None)
-                    break
-            st.save_lines(shot["id"], lines)
-            st.rebuild_audio(shot["id"])
+            line = next((l for l in lines if norm_text(l["text"]) == norm_text(job.get("note"))), None)
+            st.db.x("INSERT INTO voice_takes(shot_id,text,speaker,path,seed,job_id,seconds,created) VALUES(?,?,?,?,?,?,?,?)",
+                    (shot["id"], job.get("note"), (line or {}).get("speaker", ""), st.rel(dest), job["seed"], job["id"],
+                     round(media_seconds(dest), 2), time.time()))
+            if line and not line["audio"]:
+                line.update(audio=st.rel(dest), src="tts", clip_id=None)
+                st.save_lines(shot["id"], lines)
+                st.rebuild_audio(shot["id"])
             return
         if stage == "sheet":
             folder = st.data / "cast" / f"{job['asset_id']:04d}"
@@ -1224,11 +1257,20 @@ class API:
                 asset_active.setdefault(j["asset_id"], []).append(j["status"])
             else:
                 active.setdefault(j["shot_id"], {}).setdefault(j["stage"], []).append(j["status"])
+        vtakes, vjobs = {}, {}
+        for t in db.q("SELECT * FROM voice_takes ORDER BY id"):
+            t["url"] = self.media(t["path"])
+            vtakes.setdefault((t["shot_id"], norm_text(t["text"])), []).append(t)
+        for j in db.q("SELECT shot_id, note, status FROM jobs WHERE stage='voice' AND status IN ('pending','running')"):
+            vjobs.setdefault((j["shot_id"], norm_text(j["note"])), []).append(j["status"])
         shots = []
         for s in st.ordered_shots():
             lines = st.shot_lines(s)
             for l in lines:
                 l["url"] = self.media(l["audio"])
+                key = (s["id"], norm_text(l["text"]))
+                l["takes"] = vtakes.get(key, [])
+                l["pending"] = vjobs.get(key, [])
             s["lines"] = lines
             chain = st.chain(s)
             covered = st.chain_seconds(chain) if chain else 0.0
@@ -1591,6 +1633,9 @@ class API:
         elif src == "clip":
             c = st.db.one("SELECT * FROM voice_clips WHERE id=?", (b["clip_id"],))
             l.update(audio=c["path"], src="clip", clip_id=c["id"])
+        elif src == "take":
+            t = st.db.one("SELECT * FROM voice_takes WHERE id=?", (b["take_id"],))
+            l.update(audio=t["path"], src="tts", clip_id=None)
         elif src == "upload":
             l.update(audio=st.save_upload(b["file"], "voices/lines"), src="upload", clip_id=None)
         elif src == "temp":
@@ -1599,6 +1644,35 @@ class API:
                      src="temp", clip_id=None)
         st.save_lines(shot["id"], lines)
         st.rebuild_audio(shot["id"])
+        return {"ok": True}
+
+    def line_direction(self, b):
+        st = self.st
+        shot = st.db.one("SELECT * FROM shots WHERE id=?", (b["shot_id"],))
+        lines = st.shot_lines(shot)
+        lines[int(b["index"])]["direction"] = (b.get("direction") or "").strip()
+        st.save_lines(shot["id"], lines)
+        return {"ok": True}
+
+    def voice_take_delete(self, b):
+        st = self.st
+        t = st.db.one("SELECT * FROM voice_takes WHERE id=?", (b["id"],))
+        if not t:
+            return {"ok": True}
+        st.db.x("DELETE FROM voice_takes WHERE id=?", (t["id"],))
+        shot = st.db.one("SELECT * FROM shots WHERE id=?", (t["shot_id"],))
+        if shot and t["path"] in (shot.get("line_audio") or ""):
+            lines = st.shot_lines(shot)
+            for l in lines:
+                if l["audio"] == t["path"]:
+                    l.update(audio=None, src=None, clip_id=None)
+            st.save_lines(shot["id"], lines)
+        try:
+            st.abs(t["path"]).unlink()
+        except OSError:
+            pass
+        if shot:
+            st.rebuild_audio(shot["id"])
         return {"ok": True}
 
     def voice(self, b):
@@ -1649,20 +1723,32 @@ class API:
                     made += 1
             return {"ok": True, "queued": made, "skipped": []}
         if stage == "voice":
-            for sid in b["shot_ids"]:
+            # targets: explicit lines [{shot_id, index}] (always generate) or whole shots (lines without audio,
+            # or every line with replace=true)
+            targets = []
+            for t in b.get("lines") or []:
+                targets.append((int(t["shot_id"]), int(t["index"]), True))
+            for sid in b.get("shot_ids") or []:
+                targets.append((int(sid), None, bool(b.get("replace"))))
+            no_voice = set()
+            for sid, idx, force in targets:
                 s = st.db.one("SELECT * FROM shots WHERE id=?", (sid,))
                 if not s or s["audio_mode"] == "file":
                     continue
                 for l in st.shot_lines(s):
-                    if l["audio"] and not b.get("replace"):
+                    if idx is not None and l["index"] != idx:
+                        continue
+                    if l["audio"] and not force:
                         continue
                     sp = st.speaker_asset(l["speaker"])
                     if not sp or not st.ref_clip(sp["id"]):
-                        skipped.append(f"shot {int(s['seq'])}: {l['speaker'] or 'speaker'} has no voice clip")
+                        no_voice.add(l["speaker"] or "A speaker")
                         continue
-                    st.db.x("INSERT INTO jobs(shot_id,stage,status,seed,created,progress,segment,note) VALUES(?,?,'pending',?,?,'waiting',?,?)",
-                            (sid, "voice", random.randint(1, 2**48), time.time(), l["index"], l["text"]))
-                    made += 1
+                    for _ in range(takes):
+                        st.db.x("INSERT INTO jobs(shot_id,stage,status,seed,created,progress,segment,note) VALUES(?,?,'pending',?,?,'waiting',?,?)",
+                                (sid, "voice", random.randint(1, 2**48), time.time(), l["index"], l["text"]))
+                        made += 1
+            skipped += [f"{n} has no reference voice (add one in Cast)" for n in sorted(no_voice)]
             return {"ok": True, "queued": made, "skipped": skipped}
         for sid in b["shot_ids"]:
             s = st.db.one("SELECT * FROM shots WHERE id=?", (sid,))
@@ -1778,7 +1864,7 @@ ROUTES = {
     "/api/asset/save": "asset_save", "/api/asset/delete": "asset_delete", "/api/asset/use_sheet": "asset_use_sheet",
     "/api/shot/save": "shot_save", "/api/shot/delete": "shot_delete", "/api/shot/move": "shot_move",
     "/api/csv/import": "csv_import", "/api/voice": "voice", "/api/clips/upload": "clips_upload", "/api/clip/update": "clip_update",
-    "/api/clip/delete": "clip_delete", "/api/lines/match": "match", "/api/line/set": "line_set", "/api/generate": "generate", "/api/approve": "approve",
+    "/api/clip/delete": "clip_delete", "/api/lines/match": "match", "/api/line/set": "line_set", "/api/voice_take/delete": "voice_take_delete", "/api/line/direction": "line_direction", "/api/generate": "generate", "/api/approve": "approve",
     "/api/take/delete": "take_delete", "/api/jobs": "job_action", "/api/music": "music", "/api/assemble": "assemble",
 }
 

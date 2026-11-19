@@ -15,7 +15,8 @@ REQUIRED = {
     "KSampler": ["model", "positive", "negative", "latent_image", "seed", "steps", "cfg", "sampler_name", "scheduler", "denoise"],
     "RIFE VFI": ["ckpt_name", "frames", "clear_cache_after_n_frames", "multiplier", "fast_mode", "ensemble", "scale_factor", "dtype", "torch_compile", "batch_size"],
     "LoadImage": ["image"], "LoadVideo": ["file"], "LoadAudio": ["audio"], "WanFirstLastFrameToVideo": ["positive", "negative", "vae", "width", "height", "length", "batch_size"],
-    "ImageScale": ["image", "upscale_method", "width", "height", "crop"], "UpscaleModelLoader": ["model_name"], "LoraLoaderModelOnly": ["model", "lora_name", "strength_model"], "SaveImage": ["images", "filename_prefix"],
+    "ImageScale": ["image", "upscale_method", "width", "height", "crop"],
+    "FB_Qwen3TTSVoiceClone": ["target_text", "model_choice", "device", "precision", "language"], "SaveAudio": ["audio", "filename_prefix"], "UpscaleModelLoader": ["model_name"], "LoraLoaderModelOnly": ["model", "lora_name", "strength_model"], "SaveImage": ["images", "filename_prefix"],
 }
 
 def validate(wf):
@@ -40,7 +41,8 @@ def render(pid, wf):
     cls = {n["class_type"]: (k, n) for k, n in wf.items()}
     if "SaveAudio" in cls:   # fake text-to-speech: a tone whose length follows the text
         save_k, save = cls["SaveAudio"]
-        text = next((n["inputs"]["text"] for n in wf.values() if (n.get("_meta") or {}).get("title") == "PROMPT"), "x")
+        text = next((n["inputs"].get("target_text") or n["inputs"].get("text") for n in wf.values()
+                     if (n.get("_meta") or {}).get("title") == "PROMPT"), "x")
         sub = "audio"; (out / sub).mkdir(parents=True, exist_ok=True)
         fn = f"tts_{pid[:8]}.flac"
         subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"sine=f=330:d={max(0.5, len(text) / 15):.2f}", str(out / sub / fn)])
@@ -70,6 +72,14 @@ def render(pid, wf):
         fn = f"{base}_{i + 1:05d}_.png"; im.save(out / sub / fn); imgs.append({"filename": fn, "subfolder": sub, "type": "output"})
     history[pid] = {"prompt": [0, pid, wf, {}, []], "outputs": {save_k: {"images": imgs}},
                     "status": {"status_str": "success", "completed": True, "messages": []}}
+
+def safe_render(pid, wf):
+    try:
+        render(pid, wf)
+    except Exception as e:   # report like ComfyUI does instead of leaving the job hanging
+        history[pid] = {"outputs": {}, "status": {"status_str": "error", "completed": False,
+                                                  "messages": [["execution_error", {"exception_message": repr(e)}]]}}
+
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -101,7 +111,7 @@ class H(BaseHTTPRequestHandler):
             errs = validate(wf)
             if errs:
                 return self.j(400, {"error": "invalid prompt", "node_errors": errs})
-            pid = str(uuid.uuid4()); threading.Thread(target=render, args=(pid, wf), daemon=True).start()
+            pid = str(uuid.uuid4()); threading.Thread(target=safe_render, args=(pid, wf), daemon=True).start()
             return self.j(200, {"prompt_id": pid, "number": len(prompts_seen), "node_errors": {}})
         self.j(200, {})
 
