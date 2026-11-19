@@ -385,7 +385,7 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
 <script>
 const $=s=>document.querySelector(s);
 let S=null,sel=new Set(),tab='shots',VOICES=null,FILTER='all',VIEW={},prevApproved={};
-const STAGES=['sheet','keyframe','animate','continue','lipsync','upscale','voice'];
+const STAGES=['sheet','keyframe','animate','continue','lipsync','upscale','voice','voice_design'];
 const TITLES={script:['Script','Write or paste the episode, then turn it into shots.'],cast:['Cast','Characters and locations with their reference sheets.'],voices:['Voices','Generate every line in its character’s voice, choose the best take, and play scenes back.'],shots:['Shots','Keyframe, animate and finish each shot.'],queue:['Render queue','Everything sent to ComfyUI, newest first.'],assemble:['Assemble','Put the episode together and export it for Resolve.'],settings:['Settings','Servers, workflows and project defaults.']};
 const jsq=s=>esc(JSON.stringify((s??'').toString()));   // JS string literal, safe inside an onclick="…" attribute
 const esc=s=>(s??'').toString().replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -422,7 +422,7 @@ function render(force){if(!S)return;if(force)for(const k in SIG)delete SIG[k];
  $('#servers').innerHTML=S.instances.map(i=>`<div class="srv" title="${esc(i.health?i.health.info:'Checking')}"><span class="dot ${i.health?(i.health.ok?'ok':'bad'):''}"></span>${esc(i.name)}</div>`).join('')+(S.tools.ffmpeg?'':'<div class="srv err"><span class="dot bad"></span>ffmpeg missing</div>');
  $('#stats').innerHTML=tab==='shots'||tab==='assemble'?`<div class="stat"><b>${fmtT(total)}</b><span>runtime</span></div><div class="stat"><b>${S.shots.length}</b><span>shots</span></div><div class="stat"><b class="ok-t">${cn.done}</b><span>ready</span></div>`:'';
  if(tab==='script'&&(force||document.activeElement!==$('#script')))$('#script').value=S.settings.script||'';
- if(tab==='cast')renderCast();if(tab==='voices'&&(force||!document.activeElement.closest('#t-voices input')))renderVoices();if(tab==='shots')renderShots();if(tab==='queue')renderQueue();if(tab==='assemble')renderAssemble();
+ renderDesigned();if(tab==='cast')renderCast();if(tab==='voices'&&(force||!document.activeElement.closest('#t-voices input')))renderVoices();if(tab==='shots')renderShots();if(tab==='queue')renderQueue();if(tab==='assemble')renderAssemble();
  if(tab==='settings'&&(force||!document.activeElement.closest('#t-settings')))renderSettings()}
 
 /* ---------- script ---------- */
@@ -438,6 +438,7 @@ function renderCast(){if(same('cast',[S.assets]))return;$('#cast').innerHTML=S.a
   <div class="meta">${a.voice?`<span class="flag">Voice: ${esc(a.voice)}</span>`:''}${a.lora?`<span class="flag" title="${esc(a.lora)}">LoRA ${a.lora_strength}</span>`:''}</div>
   ${a.sheets.length?`<div class="muted" style="font-size:12px">Turnaround sheets. Click one to make it the reference.</div><div class="sheets">${a.sheets.map(t=>`<button class="th ${t.path===a.image?'sel':''}" style="background-image:url('${t.url}');width:84px;height:47px" onclick="post('/api/asset/use_sheet',{take_id:${t.id}})" ondblclick="lb('${t.url}')" aria-label="Use this sheet"></button>`).join('')}</div>`:''}
   ${a.active.length?`<div class="pending" style="margin-bottom:8px"><span class="dot"></span>${a.active.length} sheet${a.active.length>1?'s':''} ${a.active.includes('running')?'rendering':'waiting'}</div>`:''}
+  ${(a.voice_active||[]).length?`<div class="pending" style="margin-bottom:8px"><span class="dot"></span>Designing ${a.voice_active.length} voice take${a.voice_active.length>1?'s':''}</div>`:''}
   ${a.kind==='character'?`<div class="vclips"><div class="row"><b style="font:600 14px var(--f-display)">Voice clips</b><span class="muted t">${a.clips.length?a.clips.length+' clip'+(a.clips.length>1?'s':''):'None yet'}</span>
    <button class="btn sm" onclick="addClips(${a.id})">Add clips</button>${a.clips.length?`<button class="btn sm ghost" onclick="manageClips(${a.id})">Manage</button>`:''}</div>
    ${a.clips.slice(0,3).map(c=>`<div class="row"><button class="play" onclick="playA(this,'${c.url}')">▶</button><span class="t" title="${esc(c.transcript)}">${esc(c.transcript||c.name)}</span>${c.is_ref?'<span class="flag" title="Used as the voice to copy for TTS">reference</span>':''}</div>`).join('')}
@@ -458,8 +459,25 @@ function manageClips(aid){const a=S.assets.find(x=>x.id===aid);if(!a)return;
   <td><input type="radio" name="ref" ${c.is_ref?'checked':''} onchange="post('/api/clip/update',{id:${c.id},is_ref:true})" aria-label="Reference" style="accent-color:var(--blue)"></td>
   <td><button class="btn sm danger" onclick="if(confirm('Delete this clip? Lines using it lose their audio.'))post('/api/clip/delete',{id:${c.id}}).then(()=>manageClips(${aid}))">Delete</button></td></tr>`).join('')}</tbody></table></div>`:'<div class="muted">No clips yet.</div>'}</div>
  <div class="dlg-f"><button class="btn" onclick="post('/api/lines/match',{asset_id:${aid}}).then(r=>toast(r.matched?'Matched '+r.matched+' line'+(r.matched>1?'s':''):'No new matches'))">Match to dialogue</button><button class="btn pri" onclick="closeModal()">Done</button></div>`)}
-async function editAsset(id){const a=id?S.assets.find(x=>x.id===id):{kind:'character',name:'',description:'',voice:'',lora:'',lora_strength:1,clips:[]};
- const ref=(a.clips||[]).find(c=>c.is_ref)||(a.clips||[])[0];
+let DLG_AID=null,DREF=null;
+const refOf=a=>a?((a.clips||[]).find(c=>c.is_ref)||(a.clips||[])[0]||null):null;
+const isDesigned=c=>(c.name||'').startsWith('Designed');
+function refLine(ref){return ref?`<button class="play" type="button" onclick="playA(this,'${ref.url}')" aria-label="Play reference voice">▶</button><span style="font-size:13px">${esc(ref.name||'Reference clip')}, ${(+ref.seconds).toFixed(1)} s</span>`:'<span class="muted" style="font-size:13px">No reference voice yet.</span>'}
+function renderDesigned(){const el=$('#a_designed');if(!el||!$('#modal').classList.contains('on'))return;const a=S.assets.find(x=>x.id===DLG_AID);
+ if(!a){el.innerHTML='';return}
+ const ref=refOf(a);if((ref?ref.id:null)!==DREF){DREF=ref?ref.id:null;const rl=$('#a_refline');if(rl)rl.innerHTML=refLine(ref);const vt=$('#a_vtext');if(vt)vt.value=ref?ref.transcript||'':''}
+ const ds=a.clips.filter(isDesigned),n=(a.voice_active||[]).length;
+ if(same('designed',[DLG_AID,ds,n,DREF]))return;
+ el.innerHTML=(n?`<div class="pending" style="margin:8px 0"><span class="dot"></span>${n} take${n>1?'s':''} ${a.voice_active.includes('running')?'rendering':'waiting'} on ComfyUI</div>`:'')
+  +(ds.length?`<div class="tbl" style="margin-top:8px"><table class="cliptbl"><tbody>${ds.map((c,i)=>`<tr>
+  <td style="width:34px"><button class="play" type="button" onclick="playA(this,'${c.url}')" aria-label="Play designed take ${i+1}">▶</button></td>
+  <td><b style="font:600 13px var(--f-display)">Take ${i+1}</b> <span class="muted" style="font-size:12px">${(+c.seconds).toFixed(1)} s</span></td>
+  <td style="text-align:right;white-space:nowrap">${c.id===DREF?'<span class="flag">reference</span>':`<button class="btn sm" type="button" onclick="post('/api/clip/update',{id:${c.id},is_ref:true})">Use as reference</button>`}
+  <button class="btn sm ghost" type="button" onclick="post('/api/reveal',{path:${jsq(c.path)}})" title="${esc(c.path)}">Show file</button>
+  <button class="btn sm danger" type="button" onclick="if(confirm('Delete this take?'))post('/api/clip/delete',{id:${c.id}})">Delete</button></td></tr>`).join('')}</tbody></table></div>`:'')}
+async function editAsset(id){const a=id?S.assets.find(x=>x.id===id):{kind:'character',name:'',description:'',voice:'',lora:'',lora_strength:1,clips:[],voice_desc:'',voice_sample:''};
+ const ref=refOf(a);DLG_AID=id||null;DREF=ref?ref.id:null;delete SIG.designed;
+ const dReady=wfOK('voice_design'),dTakers=S.instances.some(i=>i.enabled&&i.roles.split(',').includes('voice_design'));
  if(VOICES===null){try{VOICES=(await (await fetch('/api/voices',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json()).voices||[]}catch(e){VOICES=[]}}
  modal(`<div class="dlg-h"><h2>${id?esc(a.name):'New cast entry'}</h2></div><div class="dlg-b">
  <div class="g2"><div><label class="f" for="a_name">Name, as written in the script</label><input id="a_name" value="${esc(a.name)}"></div>
@@ -471,9 +489,16 @@ async function editAsset(id){const a=id?S.assets.find(x=>x.id===id):{kind:'chara
  <label class="f" for="a_img">Reference image${a.url?' (leave empty to keep the current one)':''}</label><input type="file" id="a_img" accept="image/*">
  ${a.kind==='location'||a.kind==='prop'?'':`<div id="a_voicebox"><h3 style="font:600 16px var(--f-display);margin:18px 0 2px">Reference voice</h3>
  <p class="muted" style="font-size:12.5px;margin:0 0 4px">The voice that text-to-speech copies for this character. Use 5–15 seconds of clean speech by this character alone, with no music or effects, and type exactly what is said.</p>
- ${ref?`<div class="toolbar" style="margin:6px 0"><button class="play" type="button" onclick="playA(this,'${ref.url}')" aria-label="Play reference voice">▶</button><span style="font-size:13px">${esc(ref.name||'Reference clip')}, ${(+ref.seconds).toFixed(1)} s</span></div>`:''}
+ <div class="toolbar" id="a_refline" style="margin:6px 0">${refLine(ref)}</div>
  <div class="g2"><div><label class="f" for="a_vfile">${ref?'Replace with a new recording':'Voice recording'} (wav, mp3, m4a…)</label><input type="file" id="a_vfile" accept="audio/*"></div>
- <div><label class="f" for="a_vtext">What is said in the recording</label><input id="a_vtext" value="${esc(ref?ref.transcript:'')}" placeholder="Exactly the words in the clip"></div></div></div>`}</div>
+ <div><label class="f" for="a_vtext">What is said in the recording</label><input id="a_vtext" value="${esc(ref?ref.transcript:'')}" placeholder="Exactly the words in the clip"></div></div>
+ <h3 style="font:600 16px var(--f-display);margin:20px 0 2px">Design a voice from a description</h3>
+ <p class="muted" style="font-size:12.5px;margin:0 0 4px">No recording? Describe the voice and ComfyUI creates one with the local Qwen3-TTS Voice Design model. Listen to the takes and pick one as the reference voice. Each take is saved as a .wav in AnimeStudio Data/voices/reference.</p>
+ ${dReady?'':'<div class="err" style="font-size:12.5px">The voice design workflow isn’t set. Choose it under Settings, Workflows.</div>'}${dTakers?'':'<div class="err" style="font-size:12.5px">No server takes voice_design jobs yet. Tick it under Settings, ComfyUI servers.</div>'}
+ <label class="f" for="a_vdesc">Voice description: age, gender, pitch, pace, tone, accent, personality</label><textarea id="a_vdesc" style="min-height:60px" placeholder="Young woman in her late teens, bright and energetic, slightly husky mid-range voice, talks fast when excited, confident and a little teasing">${esc(a.voice_desc||'')}</textarea>
+ <label class="f" for="a_vsample">Sample line the voice reads. It becomes the reference transcript.</label><input id="a_vsample" value="${esc(a.voice_sample||'')}" placeholder="${esc(S.voice_sample||'')}">
+ <div class="toolbar" style="margin-top:8px"><span class="group"><span class="lbl">Takes</span><select id="a_vn"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></span><button class="btn sm pri" type="button" id="a_vgen">Generate voice</button></div>
+ <div id="a_designed"></div></div>`}</div>
  <div class="dlg-f"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn pri" id="a_save">Save</button></div>`);
  $('#a_kind').value=a.kind;$('#a_voice').value=a.voice||'';
  $('#a_kind').onchange=()=>{const vb=$('#a_voicebox');if(vb)vb.style.display=$('#a_kind').value==='character'?'':'none'};
@@ -481,10 +506,20 @@ async function editAsset(id){const a=id?S.assets.find(x=>x.id===id):{kind:'chara
   const f=$('#a_img').files[0];if(f)b.file=await readFile(f);
   const vf=$('#a_vfile')&&$('#a_vfile').files[0],vt=$('#a_vtext')?$('#a_vtext').value.trim():'';
   if(vf&&!vt&&!confirm('Save the voice without saying what is said in it? Voice-copying TTS needs the exact words to work well.'))return;
+  if($('#a_vdesc')){b.voice_desc=$('#a_vdesc').value;b.voice_sample=$('#a_vsample').value}
+  const cur=refOf(S.assets.find(x=>x.id===id));
   const r=await post('/api/asset/save',b);if(r.ok===false)return;const aid=r.id||id;
   if(vf)await post('/api/clips/upload',{asset_id:aid,files:[await readFile(vf)],as_ref:true,transcript:vt,auto_match:true});
-  else if(ref&&$('#a_vtext')&&vt!==(ref.transcript||''))await post('/api/clip/update',{id:ref.id,transcript:vt});
-  closeModal()}}
+  else if(cur&&$('#a_vtext')&&vt!==(cur.transcript||''))await post('/api/clip/update',{id:cur.id,transcript:vt});
+  DLG_AID=null;closeModal()};
+ const vg=$('#a_vgen');if(vg)vg.onclick=async()=>{const desc=$('#a_vdesc').value.trim();if(!desc){toast('Describe the voice first.',1);$('#a_vdesc').focus();return}
+  const name=$('#a_name').value.trim();if(!name){toast('Give the character a name first.',1);$('#a_name').focus();return}
+  const b={id:id||undefined,name,kind:$('#a_kind').value,description:$('#a_desc').value,voice:$('#a_voice').value,lora:$('#a_lora').value.trim(),lora_strength:+$('#a_ls').value,voice_desc:desc,voice_sample:$('#a_vsample').value};
+  const r=await post('/api/asset/save',b);if(r.ok===false)return;id=r.id||id;DLG_AID=id;
+  const g=await post('/api/generate',{stage:'voice_design',asset_ids:[id],takes:+$('#a_vn').value});
+  if(g.ok!==false)toast(g.queued?`Queued ${g.queued} voice take${g.queued>1?'s':''}`+(g.skipped&&g.skipped.length?`. ${g.skipped.join(' ')}`:''):(g.skipped||[]).join(' ')||'Nothing queued',!g.queued);
+  renderDesigned()};
+ renderDesigned()}
 
 /* ---------- shots ---------- */
 function stripHTML(){const total=S.shots.reduce((a,s)=>a+(+s.duration||0),0);if(!total)return '';
@@ -698,7 +733,7 @@ function renderAssemble(){const total=S.shots.reduce((a,s)=>a+(+s.duration||0),0
  else if(!$('#theater').dataset.u)$('#theater').innerHTML='<div>Your episode plays here after the first build.</div>'}
 
 /* ---------- settings ---------- */
-const WFLAB={keyframe:'Keyframes and turnaround sheets',animate:'Animate',animate_flf:'Animate to the next shot (first and last frame)',lipsync:'Lip sync (optional)',upscale:'Upscale (optional)',voice:'Voices: text to speech (Qwen3-TTS)'};
+const WFLAB={keyframe:'Keyframes and turnaround sheets',animate:'Animate',animate_flf:'Animate to the next shot (first and last frame)',lipsync:'Lip sync (optional)',upscale:'Upscale (optional)',voice:'Voices: text to speech (Qwen3-TTS)',voice_design:'Voice design: a new voice from a description (Qwen3-TTS)'};
 function renderSettings(){
  $('#instrows').innerHTML=S.instances.map(i=>`<tr><td><input value="${esc(i.name)}" id="in_n${i.id}" aria-label="Name"></td><td><input value="${esc(i.url)}" id="in_u${i.id}" aria-label="Address" style="min-width:200px"></td>
   <td><div class="roles">${STAGES.map(r=>`<label class="check"><input type="checkbox" class="in_r${i.id}" value="${r}" ${i.roles.split(',').includes(r)?'checked':''}>${r}</label>`).join('')}</div></td>
@@ -711,6 +746,7 @@ function renderSettings(){
   ${w&&vid?`<span class="meta" style="margin-left:auto">Model fps <input id="fps_${k}" value="${w.fps}"> Max frames <input id="mf_${k}" value="${w.max_frames}"><button class="btn sm" onclick="post('/api/workflow/meta',{stage:'${k}',fps:$('#fps_${k}').value,max_frames:$('#mf_${k}').value}).then(()=>toast('Saved'))">Save</button></span>`:''}</div>
   ${w?`<div class="slots">Fills: ${esc(show)}</div>`:''}${w?(w.problems||[]).map(p=>`<div class="err" style="font-size:12.5px">${esc(p)}</div>`).join(''):''}
   ${k==='lipsync'&&!w?'<div class="slots">In ComfyUI open Templates › Wan2.2 S2V, check that it runs, then Workflow › Export (API) and upload it here.</div>':''}
+  ${k==='voice_design'?'<div class="slots">Used by Design a voice in the Cast dialog. Needs the ComfyUI-Qwen-TTS node pack and the Qwen3-TTS-12Hz-1.7B-VoiceDesign model on the server (server/install_tts.sh downloads both). A text node titled PROMPT gets the sample line, and the node’s instruct field gets the voice description.</div>':''}
   ${k==='voice'?'<div class="slots">Needs the ComfyUI-Qwen-TTS node pack on the server (see server/install_tts.sh). You can also upload any other text-to-speech workflow that copies a voice: a Load Audio node titled AUDIO_IN gets the character’s reference voice, a text node titled PROMPT gets the line, an optional text node titled REF_TEXT gets what the reference voice says, and a Save Audio node writes the result. </div>':''}
   <div class="acts"><button class="btn sm" onclick="pick('.json',f=>post('/api/workflow',{stage:'${k}',file:f,fps:${vid?16:0},max_frames:81}).then(r=>r.ok?toast('Workflow saved'):toast((r.problems||[]).join(' '),1)))">Upload API workflow</button>
   ${w?`<a class="btn sm ghost" href="/api/workflow/${k}">Download</a>`:''}${starters}${w&&(k==='lipsync'||k==='upscale')?`<button class="btn sm danger" onclick="post('/api/workflow',{stage:'${k}',remove:true})">Remove</button>`:''}</div></div>`}).join('');
@@ -726,5 +762,5 @@ function renderSettings(){
 function saveInst(id){post('/api/instance/save',{id,name:$('#in_n'+id).value,url:$('#in_u'+id).value,enabled:$('#in_e'+id).checked,roles:[...document.querySelectorAll('.in_r'+id+':checked')].map(x=>x.value)}).then(()=>toast('Server saved'))}
 function addInst(){post('/api/instance/save',{name:'RTX 3060 #2',url:'http://172.16.2.70:8189',roles:['keyframe','animate','continue','lipsync','sheet']})}
 function saveSettings(){const o={};document.querySelectorAll('#setform [data-k]').forEach(e=>o[e.dataset.k]=e.value);post('/api/settings',{settings:o}).then(()=>toast('Settings saved'))}
-load();setInterval(()=>{if(!$('#modal').classList.contains('on'))load()},4000);
+load();setInterval(()=>{if(!$('#modal').classList.contains('on')||$('#a_designed'))load()},4000);   // the cast dialog follows its voice takes
 </script></body></html>

@@ -39,13 +39,15 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "2.5"
+VERSION = "2.6"
 for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebrew/bin")):
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
 
-JOB_STAGES = ("sheet", "keyframe", "animate", "continue", "lipsync", "upscale", "voice")
-WF_KEYS = ("keyframe", "animate", "animate_flf", "lipsync", "upscale", "voice")
+JOB_STAGES = ("sheet", "keyframe", "animate", "continue", "lipsync", "upscale", "voice", "voice_design")
+WF_KEYS = ("keyframe", "animate", "animate_flf", "lipsync", "upscale", "voice", "voice_design")
+ASSET_STAGES = ("sheet", "voice_design")   # jobs that belong to a cast member, not a shot
+_ASSET_SQL = "('sheet','voice_design')"
 TAKE_FIELD = {"keyframe": "keyframe_take", "animate": "clip_take", "lipsync": "clip_take", "upscale": "final_take"}
 IMG_EXT = {".png", ".jpg", ".jpeg", ".webp"}
 VID_EXT = {".mp4", ".webm", ".mkv", ".mov", ".gif"}
@@ -153,9 +155,19 @@ STARTERS = {
                                           "attention": "auto", "unload_model_after_generate": False, "custom_model_path": ""}, "PROMPT"),
         "3": _n("SaveAudio", {"audio": ["2", 0], "filename_prefix": "anime/voice"}, "SAVE"),
     }}},
+    # New voice from a written description (Qwen3-TTS VoiceDesign, 1.7B only); the result becomes a reference clip
+    "voice_design": {"qwen3_tts_design": {"fps": 0, "max_frames": 0, "wf": {
+        "1": _n("FB_Qwen3TTSVoiceDesign", {"text": "", "instruct": "", "model_choice": "1.7B", "device": "auto", "precision": "bf16",
+                                           "language": "Auto", "seed": 0, "max_new_tokens": 2048, "top_p": 1.0, "top_k": 50,
+                                           "temperature": 0.9, "repetition_penalty": 1.05, "attention": "auto",
+                                           "unload_model_after_generate": False}, "PROMPT"),
+        "2": _n("SaveAudio", {"audio": ["1", 0], "filename_prefix": "anime/voice_design"}, "SAVE"),
+    }}},
 }
 DEFAULT_STARTER = {"keyframe": "qwen_edit_2509", "animate": "wan22_14b_fp8", "animate_flf": "wan22_14b_fp8_flf",
-                   "upscale": "realesrgan_anime_1080p", "voice": "qwen3_tts_clone"}
+                   "upscale": "realesrgan_anime_1080p", "voice": "qwen3_tts_clone",
+                   "voice_design": "qwen3_tts_design"}
+VOICE_SAMPLE = "Hello there. It's good to finally meet you. I've been waiting a long time for this, and I won't let you down."
 
 WAN_NEGATIVE = ("色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，"
                 "残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，"
@@ -191,7 +203,8 @@ CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS instances(id INTEGER PRIMARY KEY, name TEXT, url TEXT, roles TEXT, enabled INTEGER DEFAULT 1);
 CREATE TABLE IF NOT EXISTS workflows(stage TEXT PRIMARY KEY, json TEXT, name TEXT, fps INTEGER DEFAULT 0, max_frames INTEGER DEFAULT 0, updated REAL);
 CREATE TABLE IF NOT EXISTS assets(id INTEGER PRIMARY KEY, kind TEXT DEFAULT 'character', name TEXT, description TEXT DEFAULT '',
-    image TEXT, voice TEXT DEFAULT '', lora TEXT DEFAULT '', lora_strength REAL DEFAULT 1.0);
+    image TEXT, voice TEXT DEFAULT '', lora TEXT DEFAULT '', lora_strength REAL DEFAULT 1.0, voice_desc TEXT DEFAULT '',
+    voice_sample TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS shots(id INTEGER PRIMARY KEY, seq REAL, scene TEXT DEFAULT '', kind TEXT DEFAULT 'motion',
     asset_ids TEXT DEFAULT '[]', keyframe_prompt TEXT DEFAULT '', motion_prompt TEXT DEFAULT '', camera TEXT DEFAULT '',
     dialogue TEXT DEFAULT '', duration REAL DEFAULT 4, retime TEXT DEFAULT 'hold', ref_prev INTEGER DEFAULT 0,
@@ -213,6 +226,7 @@ MIGRATIONS = [  # columns added after v2.0 - existing projects get them on start
     ("shots", "cont_takes", "TEXT DEFAULT '[]'"), ("takes", "frames", "INTEGER"), ("takes", "segment", "INTEGER"),
     ("takes", "draft", "INTEGER DEFAULT 0"), ("jobs", "segment", "INTEGER"), ("jobs", "draft", "INTEGER DEFAULT 0"),
     ("shots", "line_audio", "TEXT DEFAULT '[]'"), ("shots", "audio_mode", "TEXT DEFAULT 'lines'"), ("jobs", "note", "TEXT"),
+    ("assets", "voice_desc", "TEXT DEFAULT ''"), ("assets", "voice_sample", "TEXT DEFAULT ''"),
 ]
 
 # ======================================================================================
@@ -330,15 +344,17 @@ class Studio:
             roles = [r for r in (inst["roles"] or "").split(",") if r]
             add = (["continue"] if "animate" in roles and "continue" not in roles else []) + \
                   (["voice"] if "keyframe" in roles and "voice" not in roles else [])
+            if ("voice" in roles or "voice" in add) and "voice_design" not in roles:
+                add.append("voice_design")
             if add:   # job types added in later versions go to servers that already take the related work
                 self.db.x("UPDATE instances SET roles=? WHERE id=?", (",".join(roles + add), inst["id"]))
         # Takes of deleted shots / cast must not reattach to new ones that reuse the id
-        self.db.x("DELETE FROM takes WHERE stage<>'sheet' AND shot_id NOT IN (SELECT id FROM shots)")
+        self.db.x(f"DELETE FROM takes WHERE stage NOT IN {_ASSET_SQL} AND shot_id NOT IN (SELECT id FROM shots)")
         self.db.x("DELETE FROM takes WHERE stage='sheet' AND asset_id NOT IN (SELECT id FROM assets)")
         self.db.x("DELETE FROM voice_takes WHERE shot_id NOT IN (SELECT id FROM shots)")
         self.db.x("DELETE FROM voice_clips WHERE asset_id NOT IN (SELECT id FROM assets)")
         self.db.x("UPDATE jobs SET status='cancelled' WHERE status IN ('pending','running') AND "
-                  "((stage<>'sheet' AND shot_id NOT IN (SELECT id FROM shots)) OR (stage='sheet' AND asset_id NOT IN (SELECT id FROM assets)))")
+                  f"((stage NOT IN {_ASSET_SQL} AND shot_id NOT IN (SELECT id FROM shots)) OR (stage IN {_ASSET_SQL} AND asset_id NOT IN (SELECT id FROM assets)))")
         self.db.x("UPDATE jobs SET status='pending', instance_id=NULL, prompt_id=NULL, progress='requeued after restart' "
                   "WHERE status='running'")
         self.health = {}
@@ -544,6 +560,24 @@ def http(method, url, data=None, headers=None, timeout=30):
         raise RuntimeError(f"HTTP {e.code} from {url}: {e.read().decode('utf-8', 'replace')[:3000]}") from None
 
 
+NODE_PACKS = {"FB_Qwen3TTS": ("ComfyUI-Qwen-TTS", "Run install_tts.sh on the server")}
+
+
+def explain_missing_nodes(text, base=""):
+    """Turn ComfyUI's missing_node_type error into steps the user can follow; None for other errors."""
+    if "missing_node_type" not in text:
+        return None
+    m = re.search(r'"class_type":\s*"([^"]+)"', text)
+    cls = m.group(1) if m else "a node in this workflow"
+    for prefix, (pack, fix) in NODE_PACKS.items():
+        if cls.startswith(prefix):
+            return (f"The ComfyUI server {base} doesn't have the {cls} node, so the {pack} node pack isn't loaded. "
+                    f"{fix}, then restart ComfyUI. If you already did, look in the ComfyUI startup log for "
+                    f"'IMPORT FAILED' next to {pack}; the lines above it say why.")
+    return (f"The ComfyUI server {base} doesn't have the {cls} node. Install the custom node pack that provides it "
+            f"(ComfyUI Manager > Install Missing Custom Nodes), then restart ComfyUI.")
+
+
 def http_json(method, url, obj=None, timeout=30):
     data = json.dumps(obj).encode() if obj is not None else None
     raw = http(method, url, data, {"Content-Type": "application/json"} if data else {}, timeout)
@@ -609,6 +643,9 @@ def detect_slots(wf, key):
         m["size"] = _tagged(wf, "SIZE") or [k for k in keys if {"width", "height", "length"} <= set(ins(k))][:1]
     elif key == "upscale":
         m["video_in"] = (_tagged(wf, "VIDEO_IN") or [k for k in keys if cls(k) in VIDEO_LOADERS])[:1]
+    elif key == "voice_design":
+        if not m["prompt"]:
+            m["prompt"] = [k for k in keys if isinstance(ins(k).get("text"), str)][:1]
     elif key == "voice":
         m["audio_in"] = (_tagged(wf, "AUDIO_IN") or [k for k in keys if cls(k) == "LoadAudio"])[:1]
         m["ref_text"] = _tagged(wf, "REF_TEXT")[:1]
@@ -635,6 +672,10 @@ def check_workflow(wf, key):
         p.append("No audio input (Load Audio node, title AUDIO_IN).")
     if key == "voice" and not m["prompt"]:
         p.append("No text input for the line (title the text node PROMPT).")
+    if key == "voice_design" and not m["prompt"]:
+        p.append("No text input for the sample line (title the voice design node PROMPT).")
+    if key == "voice_design" and not any("instruct" in n.get("inputs", {}) for n in wf.values()):
+        p.append("No voice description input (a node with an 'instruct' field, such as Qwen3-TTS Voice Design).")
     if key == "voice" and not m["audio_in"]:
         p.append("No reference voice input (Load Audio node, title AUDIO_IN).")
     if key == "upscale" and not m["video_in"]:
@@ -708,7 +749,7 @@ def build_workflow(template, key, p):
         wf[k]["inputs"]["audio"] = imgs["audio"]
     for k in m.get("ref_text", []):
         _set_text(wf[k], p.get("ref_text", ""))
-    if key == "voice":   # fill well-known TTS inputs wherever a node has them
+    if key in ("voice", "voice_design"):   # fill well-known TTS inputs wherever a node has them
         for n in wf.values():
             inp = n.get("inputs", {})
             for field, val in (("ref_text", p.get("ref_text")), ("instruct", p.get("direction")),
@@ -896,6 +937,16 @@ class Worker(threading.Thread):
             p["loras"] = [(a["lora"], a["lora_strength"])]
             p["width"], p["height"] = S["sheet_width"], S["sheet_height"]
             return "keyframe", p
+        if stage == "voice_design":
+            a = st.db.one("SELECT * FROM assets WHERE id=?", (job["asset_id"],))
+            if not a:
+                raise RuntimeError("That cast member was deleted.")
+            if not (a.get("voice_desc") or "").strip():
+                raise RuntimeError(f"{a['name']} has no voice description. Write one in Cast.")
+            p["prompt"], p["negative"] = job.get("note") or VOICE_SAMPLE, None
+            p["direction"] = a["voice_desc"].strip()
+            p["language"] = norm_choice(S.get("tts_language"), TTS_LANGUAGES, "Auto")
+            return "voice_design", p
         shot = st.db.one("SELECT * FROM shots WHERE id=?", (job["shot_id"],))
         if not shot:
             raise RuntimeError("Shot was deleted.")
@@ -1016,7 +1067,10 @@ class Worker(threading.Thread):
             p["images"] = {slot: comfy_upload(base, path, f"anime_j{job_id}_{slot}{Path(path).suffix.lower()}")
                            for slot, path in p["files"].items()}
             wf = build_workflow(tpl, key, p)
-            res = http_json("POST", base + "/prompt", {"prompt": wf, "client_id": f"anime-studio-{job_id}"}, 60)
+            try:
+                res = http_json("POST", base + "/prompt", {"prompt": wf, "client_id": f"anime-studio-{job_id}"}, 60)
+            except RuntimeError as e:
+                raise RuntimeError(explain_missing_nodes(str(e), base) or str(e)) from None
             if res.get("node_errors"):
                 raise RuntimeError("ComfyUI rejected the workflow: " + json.dumps(res["node_errors"])[:2500])
             pid = res["prompt_id"]
@@ -1080,12 +1134,27 @@ class Worker(threading.Thread):
 
     def finish(self, job, key, local):
         st, stage = self.st, job["stage"]
-        owner = (st.db.one("SELECT id FROM assets WHERE id=?", (job["asset_id"],)) if stage == "sheet"
+        owner = (st.db.one("SELECT id FROM assets WHERE id=?", (job["asset_id"],)) if stage in ASSET_STAGES
                  else st.db.one("SELECT id FROM shots WHERE id=?", (job["shot_id"],)))
         if not owner:
             return   # deleted while rendering
         imgs = [f for f in local if f.suffix.lower() in IMG_EXT]
         vids = [f for f in local if f.suffix.lower() in VID_EXT]
+        if stage == "voice_design":
+            auds = [f for f in local if f.suffix.lower() in AUD_EXT]
+            if not auds:
+                raise RuntimeError("The voice design workflow saved no audio file.")
+            a = st.db.one("SELECT * FROM assets WHERE id=?", (job["asset_id"],))
+            folder = st.data / "voices" / "reference"
+            folder.mkdir(parents=True, exist_ok=True)
+            safe = re.sub(r"[^A-Za-z0-9_-]+", "_", a["name"]).strip("_") or f"cast{a['id']}"
+            dest = folder / f"{safe}_designed_{job['id']}.wav"
+            ffmpeg(["-i", str(auds[0]), "-ar", "48000", str(dest)])
+            has_ref = st.db.one("SELECT id FROM voice_clips WHERE asset_id=? AND is_ref=1", (a["id"],))
+            st.db.x("INSERT INTO voice_clips(asset_id,path,name,transcript,seconds,is_ref,created) VALUES(?,?,?,?,?,?,?)",
+                    (a["id"], st.rel(dest), "Designed: " + (a.get("voice_desc") or "")[:80], job.get("note") or "",
+                     round(media_seconds(dest), 2), 0 if has_ref else 1, time.time()))
+            return
         if stage == "voice":
             auds = [f for f in local if f.suffix.lower() in AUD_EXT]
             if not auds:
@@ -1275,8 +1344,11 @@ class API:
                 asset_takes.setdefault(t["asset_id"], []).append(t)
             else:
                 takes.setdefault(t["shot_id"], []).append(t)
+        voice_active = {}
         for j in db.q("SELECT shot_id, asset_id, stage, status FROM jobs WHERE status IN ('pending','running')"):
-            if j["stage"] == "sheet":
+            if j["stage"] == "voice_design":
+                voice_active.setdefault(j["asset_id"], []).append(j["status"])
+            elif j["stage"] == "sheet":
                 asset_active.setdefault(j["asset_id"], []).append(j["status"])
             else:
                 active.setdefault(j["shot_id"], {}).setdefault(j["stage"], []).append(j["status"])
@@ -1310,7 +1382,7 @@ class API:
         assets = db.q("SELECT * FROM assets ORDER BY kind, name")
         for a in assets:
             a.update(url=self.media(a["image"]), sheets=asset_takes.get(a["id"], []), active=asset_active.get(a["id"], []),
-                     clips=clips.get(a["id"], []))
+                     clips=clips.get(a["id"], []), voice_active=voice_active.get(a["id"], []))
         insts = db.q("SELECT * FROM instances ORDER BY id")
         for i in insts:
             h = st.health.get(i["id"])
@@ -1332,7 +1404,7 @@ class API:
         S = st.settings()
         starters = {k: list(v.keys()) for k, v in STARTERS.items()}
         S["max_clip_seconds"] = round((st.max_frames() - 1) / float(st.wf_fps()), 2)
-        return {"settings": S, "tts_languages": TTS_LANGUAGES, "shots": shots, "assets": assets, "instances": insts, "workflows": wfs, "starters": starters,
+        return {"settings": S, "tts_languages": TTS_LANGUAGES, "voice_sample": VOICE_SAMPLE, "shots": shots, "assets": assets, "instances": insts, "workflows": wfs, "starters": starters,
                 "jobs": jobs, "job_counts": counts, "assembly": A, "tools": st.tools(), "music_url": self.media(S.get("music")),
                 "version": VERSION, "platform": sys.platform}
 
@@ -1460,15 +1532,19 @@ class API:
             db.x("UPDATE assets SET kind=?, name=?, description=?, voice=?, lora=?, lora_strength=? WHERE id=?", vals + (b["id"],))
             if img:
                 db.x("UPDATE assets SET image=? WHERE id=?", (img, b["id"]))
-            return {"ok": True, "id": b["id"]}
-        aid = db.x("INSERT INTO assets(kind,name,description,voice,lora,lora_strength,image) VALUES(?,?,?,?,?,?,?)", vals + (img,))
+            aid = b["id"]
+        else:
+            aid = db.x("INSERT INTO assets(kind,name,description,voice,lora,lora_strength,image) VALUES(?,?,?,?,?,?,?)", vals + (img,))
+        for f in ("voice_desc", "voice_sample"):
+            if f in b:
+                db.x(f"UPDATE assets SET {f}=? WHERE id=?", ((b[f] or "").strip(), aid))
         return {"ok": True, "id": aid}
 
     def asset_delete(self, b):
         for c in self.st.db.q("SELECT id FROM voice_clips WHERE asset_id=?", (b["id"],)):
             self.clip_delete({"id": c["id"]})
         self.st.db.x("DELETE FROM takes WHERE asset_id=? AND stage='sheet'", (b["id"],))
-        self.st.db.x("UPDATE jobs SET status='cancelled', finished=? WHERE asset_id=? AND stage='sheet' AND status IN ('pending','running')",
+        self.st.db.x(f"UPDATE jobs SET status='cancelled', finished=? WHERE asset_id=? AND stage IN {_ASSET_SQL} AND status IN ('pending','running')",
                      (time.time(), b["id"]))
         self.st.db.x("DELETE FROM assets WHERE id=?", (b["id"],))
         return {"ok": True}
@@ -1516,9 +1592,9 @@ class API:
         db = self.st.db
         for sid in b["ids"]:
             db.x("DELETE FROM shots WHERE id=?", (sid,))
-            db.x("DELETE FROM takes WHERE shot_id=? AND stage<>'sheet'", (sid,))
+            db.x(f"DELETE FROM takes WHERE shot_id=? AND stage NOT IN {_ASSET_SQL}", (sid,))
             db.x("DELETE FROM voice_takes WHERE shot_id=?", (sid,))
-            db.x("UPDATE jobs SET status='cancelled', finished=? WHERE shot_id=? AND stage<>'sheet' AND status IN ('pending','running')",
+            db.x(f"UPDATE jobs SET status='cancelled', finished=? WHERE shot_id=? AND stage NOT IN {_ASSET_SQL} AND status IN ('pending','running')",
                  (time.time(), sid))
         self.st.renumber()
         return {"ok": True}
@@ -1760,6 +1836,19 @@ class API:
                             (aid, "sheet", random.randint(1, 2**48), time.time()))
                     made += 1
             return {"ok": True, "queued": made, "skipped": []}
+        if stage == "voice_design":
+            for aid in b["asset_ids"]:
+                a = st.db.one("SELECT * FROM assets WHERE id=?", (aid,))
+                if not a:
+                    continue
+                if not (a.get("voice_desc") or "").strip():
+                    skipped.append(f"{a['name']}: write a voice description first.")
+                    continue
+                for _ in range(takes):
+                    st.db.x("INSERT INTO jobs(asset_id,stage,status,seed,created,progress,note) VALUES(?,?,'pending',?,?,'waiting',?)",
+                            (aid, "voice_design", random.randint(1, 2**31), time.time(), (a.get("voice_sample") or "").strip() or VOICE_SAMPLE))
+                    made += 1
+            return {"ok": True, "queued": made, "skipped": skipped}
         if stage == "voice":
             # targets: explicit lines [{shot_id, index}] (always generate) or whole shots (lines without audio,
             # or every line with replace=true)
