@@ -1,10 +1,12 @@
 import base64
 import hashlib
 import json
+import ssl
 import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'app'))
 from comfy_events import ProgressEvents
 
@@ -22,6 +24,14 @@ class Socket:
     def close(self):self.closed=True
 
 class EventTests(unittest.TestCase):
+    def test_https_events_require_tls_12_or_newer(self):
+        transport=Socket();events=[]
+        context=SimpleNamespace(minimum_version=None,wrap_socket=lambda raw,server_hostname:raw)
+        with patch('comfy_events.socket.create_connection',return_value=transport), patch('comfy_events.ssl.create_default_context',return_value=context):
+            ProgressEvents('https://local:8188','client',events.append).run()
+        self.assertEqual(context.minimum_version,ssl.TLSVersion.TLSv1_2)
+        self.assertEqual(events[0]['data']['value'],3)
+
     def test_progress_event_is_received_and_connection_closed(self):
         transport=Socket();events=[]
         with patch('comfy_events.socket.create_connection',return_value=transport):

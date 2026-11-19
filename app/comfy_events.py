@@ -34,7 +34,12 @@ class ProgressEvents:
         try:
             url = urllib.parse.urlsplit(self.base)
             raw = socket.create_connection((url.hostname, url.port or (443 if url.scheme == 'https' else 80)), timeout=3)
-            self.socket = ssl.create_default_context().wrap_socket(raw, server_hostname=url.hostname) if url.scheme == 'https' else raw
+            if url.scheme == 'https':
+                context = ssl.create_default_context()
+                context.minimum_version = ssl.TLSVersion.TLSv1_2
+                self.socket = context.wrap_socket(raw, server_hostname=url.hostname)
+            else:
+                self.socket = raw
             ws = self.socket
             key = base64.b64encode(os.urandom(16)).decode()
             path = url.path.rstrip('/')+'/ws?'+urllib.parse.urlencode({'clientId': self.client_id})
