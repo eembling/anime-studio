@@ -158,7 +158,7 @@ label.f{display:block;font-size:12px;color:var(--graphite);margin:12px 0 4px}
 .vt .x{color:var(--graphite);font-weight:400;margin-left:2px;padding:0 2px}.vt .x:hover{color:var(--red)}
 .vsrc{font-size:12px;color:var(--graphite)}
 .warnbox{background:var(--amber-soft);border:1px solid #EBC98E;border-radius:6px;padding:10px 14px;margin-bottom:14px;font-size:13.5px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-@media (max-width:1300px){.vl{grid-template-columns:24px 1fr 1fr}.vl>*:nth-child(n+4){grid-column:2/-1}}
+@media (max-width:1300px){.vl{grid-template-columns:24px 74px minmax(0,1fr)}.vl>*:nth-child(n+4){grid-column:2/-1}}
 .flags{display:flex;gap:6px;flex-wrap:wrap;margin-top:auto;padding-top:6px}
 .flag{font-size:11.5px;color:var(--graphite);border:1px solid var(--line2);border-radius:4px;padding:1px 7px}
 .info .acts{display:flex;gap:4px;margin-top:8px}
@@ -244,7 +244,7 @@ code{font:12.5px var(--f-script);background:var(--paper);padding:1px 5px;border-
 .qs b{display:block;font:700 30px/1 var(--f-display);font-variant-numeric:tabular-nums}
 .qs span{font-size:12.5px;color:var(--graphite)}
 .qs.run b{color:var(--blue)}.qs.err b{color:var(--red)}
-.tbl{background:var(--sheet);border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.tbl{overflow-x:auto!important;background:var(--sheet);border:1px solid var(--line);border-radius:6px;overflow:hidden}
 table{width:100%;border-collapse:collapse}
 th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line2);font-size:13px;vertical-align:top}
 th{font-weight:600;color:var(--graphite);background:#F8FAFC;font-size:12.5px}
@@ -280,7 +280,7 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
 .wf .meta{display:inline-flex;gap:6px;align-items:center;font-size:12px;color:var(--graphite)}
 .wf .meta input{width:62px;padding:3px 6px}
 .form2{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}.form2 .wide{grid-column:1/-1}
-.inst td input{padding:5px 7px}
+.inst td input{padding:5px 7px}.inst{min-width:940px}.inst th:first-child{width:180px}.inst td:first-child input{min-width:160px}.inst .roles{min-width:230px}
 .roles{display:flex;gap:10px;flex-wrap:wrap}
 
 /* ---------- soundtrack ---------- */
@@ -312,18 +312,41 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
 @media (max-width:1000px){body{grid-template-columns:176px minmax(0,1fr)}main{padding-left:16px;padding-right:16px}.brand{padding-left:12px;padding-right:12px}nav{padding-left:6px;padding-right:6px}.cut{grid-template-columns:1fr}.cut-no{flex-direction:row;align-items:baseline;border-right:0}.stages{grid-column:auto;flex-direction:column}.script-wrap,.asm,.sec{grid-template-columns:1fr}}
 @media (max-width:600px){body{grid-template-columns:144px minmax(0,1fr)}main{padding-left:12px;padding-right:12px}.brand{gap:6px}.brand b{font-size:17px}nav button{padding-left:8px;padding-right:8px}nav button .jp{display:none}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+.vt.sel::after{display:none}.vt.sel{background:var(--blue-soft);border-color:var(--blue)}.vt-choice,.vt-delete{border:0;background:transparent;min-width:28px;min-height:28px;font:inherit;color:var(--ink);cursor:pointer}.vt-delete{color:var(--red)}.vt .play{min-width:28px;min-height:28px}.sv-sidebar{position:sticky;top:0;align-self:start;height:100%}[hidden]{display:none!important}
+.voice-utilities{margin-bottom:14px;font-size:13px;color:var(--graphite)}.voice-utilities summary{cursor:pointer;width:fit-content}.voice-utilities[open]{padding:12px;background:var(--sheet);border:1px solid var(--line);border-radius:6px}.group .action-menu>div{right:0;left:auto}.action-menu[open] summary{background:var(--blue-soft);border-color:var(--blue)}
+#edit-monitor{width:100%;height:clamp(220px,26vw,320px)!important;aspect-ratio:auto;margin-bottom:12px}#edit-playhead{width:100%;margin:8px 0;accent-color:var(--blue)}.timeline-shot.btn{display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:4px;white-space:normal;text-align:left;min-height:74px}.timeline-shot br{display:none}.tab>h2,.panel>h2{font:600 22px var(--f-display)}
+.nav-group{font-size:10px;font-weight:700;letter-spacing:1.3px;text-transform:uppercase;color:var(--graphite);padding:18px 14px 6px}
+/* Shared interaction standards: clear hierarchy, visible focus and contained scrolling. */
+.btn{min-height:36px;display:inline-flex;align-items:center;justify-content:center;gap:6px;line-height:1.3}
+.btn.sm{min-height:30px;padding:5px 10px}.btn:disabled{cursor:default;opacity:.5}
+button:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var(--blue);outline-offset:3px}
+.toolbar>.group{flex-wrap:wrap;max-width:100%}.info .acts{flex-wrap:wrap}
+.dlg{display:flex;flex-direction:column;overflow:hidden}.dlg-h,.dlg-f{position:relative;flex:none}.dlg-h{align-items:center;justify-content:space-between}.dlg-b{overflow:auto;min-height:0;overscroll-behavior:contain}.dlg-f{flex-wrap:wrap}
+.action-menu{position:relative}.action-menu summary{list-style:none;cursor:pointer}.action-menu summary::-webkit-details-marker{display:none}.action-menu>div{position:absolute;top:calc(100% + 6px);left:0;min-width:220px;display:grid;gap:6px;padding:10px;background:var(--sheet);border:1px solid var(--line);border-radius:6px;box-shadow:0 8px 24px #1e222922;z-index:5}
+.dialogue-dlg{width:min(1060px,96vw)}.dialogue-dlg .dlg-b{padding:0 22px 14px}.dialogue-dlg .dlg-h h2{margin-top:4px;font-size:28px}.eyebrow{color:var(--graphite);font-size:11px;font-weight:700;letter-spacing:1px}.sv-intro{color:var(--graphite);margin:16px 0;font-size:13px}
+.sv-workspace{display:grid;grid-template-columns:280px minmax(0,1fr);border:1px solid var(--line);border-radius:7px;overflow:hidden;min-height:430px}.sv-sidebar{background:var(--paper);border-right:1px solid var(--line);min-width:0}.sv-list-heading{display:flex;align-items:center;justify-content:space-between;padding:14px 12px;border-bottom:1px solid var(--line)}#sv-list{max-height:480px;overflow:auto;padding:8px}.sv-line{display:block;text-align:left;width:100%;padding:12px;margin-bottom:6px;border:1px solid transparent;border-radius:5px;background:transparent;color:var(--ink);cursor:pointer;font:inherit}.sv-line:hover{background:var(--sheet)}.sv-line.selected{background:var(--sheet);border-color:var(--blue);box-shadow:inset 3px 0 var(--blue)}.sv-line-head{display:flex;flex-direction:column;gap:4px;font-size:13px;font-weight:600}.sv-line-head small{font-size:11px;color:var(--graphite);font-weight:400}.sv-excerpt{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:13px;line-height:1.5;margin-top:8px}
+.sv-editor{padding:20px;min-width:0}.sv-editor-heading,.sv-take-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}.sv-editor h3{margin:0;font:600 18px var(--f-display)}.sv-editor .f{margin-top:16px}.sv-editor textarea{min-height:112px;resize:vertical;font-size:15px;line-height:1.6}.sv-reference{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12px;color:var(--graphite);margin-top:8px;min-height:30px}.sv-reference.needs-voice{color:var(--amber)}.sv-take-heading{margin-top:24px;padding-top:18px;border-top:1px solid var(--line2)}.sv-take-heading label{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--graphite)}.sv-take-heading select{width:auto;padding:5px}.sv-takes{margin-top:10px;display:grid;gap:6px}.sv-take{display:flex;align-items:center;gap:10px;padding:8px;border:1px solid var(--line2);border-radius:5px}.sv-take>span{flex:1;font-size:13px}.sv-take small{display:block;color:var(--graphite);font-size:11px;margin-top:3px}.sv-take.chosen{background:var(--blue-soft);border-color:var(--blue)}.sv-help,.sv-no-takes{font-size:12px;color:var(--graphite);line-height:1.6}.sv-no-takes{padding:16px;background:var(--paper);border-radius:5px}.sv-pending{padding:10px;background:var(--amber-soft);color:var(--amber);font-size:12px;border-radius:4px}.sv-empty{padding:70px 20px;text-align:center}.sv-empty p{color:var(--graphite);line-height:1.6}#sv-result:empty{display:none}#sv-result{font-size:13px;line-height:1.5;margin:12px 0 0}#sv-status{margin-right:auto;align-self:center;font-size:12px;color:var(--graphite)}
+.dialogue-dlg{height:min(820px,92dvh)}.dialogue-dlg .dlg-b{display:flex;flex-direction:column;overflow:hidden;flex:1}.dialogue-dlg .sv-intro{flex:none}#sv-rows{flex:1;min-height:0}.sv-workspace{height:100%;min-height:0}.sv-sidebar{position:static;height:auto;overflow:auto}#sv-list{max-height:none;overflow:visible}.sv-editor{overflow:auto;min-height:0;overscroll-behavior:contain}
+@media(max-width:900px){.sv-workspace{grid-template-columns:220px minmax(0,1fr)}.sv-editor{padding:16px}.sec{grid-template-columns:1fr;gap:12px}}
+@media(max-width:650px){.modal{padding:8px}.dlg{max-height:96dvh;width:100%}.dlg-h,.dlg-f{padding:14px}.dialogue-dlg .dlg-b{padding:0 12px 12px;display:block;overflow:auto}#sv-rows{height:auto}.sv-workspace{height:auto}.sv-editor{overflow:visible}.sv-workspace{grid-template-columns:1fr}.sv-sidebar{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}#sv-list{max-height:160px}.sv-editor{padding:14px}.g2,.g3,.form2{grid-template-columns:1fr}.dlg-f .btn{flex:1}#sv-status{width:100%;margin-bottom:4px}}
+
 </style></head><body>
 <aside>
  <div class="brand"><svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true"><rect x="1" y="1" width="28" height="28" rx="7" fill="#C8372D"/><rect x="7" y="9" width="16" height="12" rx="2" fill="none" stroke="#fff" stroke-width="2"/><path d="M13 12.2v5.6l4.6-2.8z" fill="#fff"/></svg><b>Anime Studio</b></div>
  <nav id="nav">
-  <button data-t="studio">Studio <span class="jp">編集</span></button>
+  <div class="nav-group">Plan</div>
  <button data-t="script"><span class="en">Script</span><span class="jp">脚本</span></button>
   <button data-t="cast"><span class="en">Cast</span><span class="jp">キャラ表</span><span class="n" id="n-cast"></span></button>
   <button data-t="voices"><span class="en">Voices</span><span class="jp">アフレコ</span><span class="n" id="n-voices"></span></button>
-  <button data-t="shots" class="on"><span class="en">Shots</span><span class="jp">カット</span><span class="n" id="n-shots"></span></button>
+  <div class="nav-group">Produce</div>
+  <button data-t="shots" class="on" aria-current="page"><span class="en">Shots</span><span class="jp">カット</span><span class="n" id="n-shots"></span></button>
   <button data-t="production"><span class="en">Production</span><span class="jp">制作</span></button>
   <button data-t="queue"><span class="en">Render queue</span><span class="jp">進行</span><span class="n" id="n-queue"></span></button>
+  <div class="nav-group">Finish</div>
+  <button data-t="studio"><span class="en">Studio</span><span class="jp">編集</span></button>
   <button data-t="assemble"><span class="en">Assemble</span><span class="jp">撮影</span></button>
+  <div class="nav-group">Workspace</div>
   <button data-t="settings"><span class="en">Settings</span><span class="jp">設定</span></button>
  </nav>
  <div class="side-foot" id="servers"></div>
@@ -331,6 +354,7 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
 <main>
 <div class="top"><div><h1 id="pagetitle">Shots</h1><div class="sub" id="pagesub"></div></div><div class="stats" id="stats"></div></div>
 
+<div id="connection-status" class="warnbox" role="status" hidden></div>
 <section class="tab" id="t-script">
  <div class="script-wrap">
   <div class="page"><textarea id="script" spellcheck="true" aria-label="Script" placeholder="# Rooftop at dusk&#10;&#10;Aiko leans on the fence while the wind moves her scarf. The city glows below.&#10;&#10;AIKO: You came after all.&#10;&#10;KENJI: I always do."></textarea>
@@ -353,7 +377,7 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
 </section>
 
 <section class="tab" id="t-voices">
- <div class="toolbar"><button class="btn" onclick="reviewVoiceRecovery()">Recover dialogue from shot prompts</button><span class="muted">Review spoken lines missed during script import. Existing dialogue and generated takes are preserved.</span></div><div id="vwarn"></div>
+ <details class="voice-utilities"><summary>Dialogue recovery</summary><p class="muted">Review spoken lines missed during script import. Existing dialogue and generated takes are preserved.</p><button class="btn" onclick="reviewVoiceRecovery()">Recover dialogue from shot prompts</button></details><div id="vwarn"></div>
  <div class="toolbar">
   <div class="chips" id="vfilters"></div>
   <span class="sp"></span>
@@ -371,9 +395,9 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
   <button class="btn pri" onclick="editShot()">Add shot</button>
   <div class="chips" id="filters"></div>
   <span class="sp"></span>
-  <span class="group"><label class="check" style="margin-right:2px"><input type="checkbox" id="selall" onchange="selAll(this.checked)"> All</label><span class="lbl" id="selinfo">Selected</span><select id="ntakes" aria-label="Takes per shot"><option value="1">1 take</option><option value="2" selected>2 takes</option><option value="3">3 takes</option><option value="4">4 takes</option></select>
+  <div class="group"><label class="check" style="margin-right:2px"><input type="checkbox" id="selall" onchange="selAll(this.checked)"> All</label><span class="lbl" id="selinfo">Selected</span><select id="ntakes" aria-label="Takes per shot"><option value="1">1 take</option><option value="2" selected>2 takes</option><option value="3">3 takes</option><option value="4">4 takes</option></select>
    <label class="draftbox check" title="Draft: lower resolution and at most 49 frames, for quick motion tests"><input type="checkbox" id="draft"> Draft</label>
-   <button class="btn sm" onclick="bulk('keyframe')">Keyframes</button><button class="btn sm" onclick="bulk('animate')">Animate</button><button class="btn sm" onclick="bulk('continue')">Continue</button><button class="btn sm" onclick="bulkMatch()" title="Use a recorded line only from its selected character, when its transcript matches">Use matching recordings</button><button class="btn sm" onclick="bulkVoice()" title="macOS voices for lines that have no audio yet">Temp voices</button><button class="btn sm" onclick="bulk('voice')" title="Text-to-speech in the character's voice (needs a Voice workflow)">Voice (TTS)</button><button class="btn sm" onclick="bulk('lipsync')">Lip sync</button><button class="btn sm" onclick="bulk('upscale')">Upscale</button><button class="btn sm danger" onclick="delSel()">Delete</button></span>
+   <button class="btn sm" onclick="bulk('keyframe')">Keyframes</button><button class="btn sm" onclick="bulk('animate')">Animate</button><button class="btn sm" onclick="bulk('continue')">Continue</button><details class="action-menu"><summary class="btn sm">More actions ▾</summary><div><button class="btn sm" onclick="bulkMatch()" title="Use a recorded line only from its selected character, when its transcript matches">Use matching recordings</button><button class="btn sm" onclick="bulkVoice()" title="macOS voices for lines that have no audio yet">Temp voices</button><button class="btn sm" onclick="bulk('voice')" title="Text-to-speech in the character's voice (needs a Voice workflow)">Voice (TTS)</button><button class="btn sm" onclick="bulk('lipsync')">Lip sync</button><button class="btn sm" onclick="bulk('upscale')">Upscale</button><button class="btn sm danger" onclick="delSel()">Delete selected shots…</button></div></details></div>
  </div>
  <div id="shotlist"></div>
 </section>
@@ -390,7 +414,7 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
  <div class="sec"><div><h2>Final delivery</h2><p>Inspect the current episode before exporting. Subtitles are editable. Audio stems and loudness analysis use the rendered episode chosen in Assemble and require its dialogue-only master.</p><div class="toolbar"><button class="btn" onclick="runQuality()">Check episode quality</button><button class="btn" onclick="editSubtitles()">Edit subtitles</button><button class="btn" id="stem-export" onclick="exportStems()">Export stems and loudness report</button></div><div id="stem-files" class="toolbar"></div></div><div id="delivery-qc" class="card">Run quality checks before final delivery.</div></div>
 </section>
 <section class="tab" id="t-production">
- <div class="toolbar"><button class="btn" onclick="editContinuity()">Scene continuity</button><button class="btn" onclick="compareSceneTakes()">Compare takes</button><button class="btn danger" onclick="sceneCleanup('clips')">Delete scene clips</button><button class="btn danger" onclick="sceneCleanup('reset')">Reset scene settings</button></div>
+ <div class="toolbar"><button class="btn" onclick="editContinuity()">Scene continuity</button><button class="btn" onclick="compareSceneTakes()">Compare takes</button><details class="action-menu"><summary class="btn">Scene actions ▾</summary><div><button class="btn danger" onclick="sceneCleanup('clips')">Delete scene clips…</button><button class="btn danger" onclick="sceneCleanup('reset')">Reset scene settings…</button></div></details></div>
  <div class="toolbar"><label for="prodscene">Scene</label><select id="prodscene" onchange="PROD_SCENE=this.value;renderProduction()"></select><span id="prodsummary" class="muted"></span></div>
  <div class="sec"><div><h2>Animatic</h2><p>Check the pacing with selected keyframes, dialogue and shot lengths before rendering animation. Static/hold camera notes hold the image; other camera notes use a slow push-in. Edit shot timing on the Shots page and rebuild the preview.</p><div class="toolbar"><button class="btn" onclick="previewAnimatic(false)">Preview scene</button><button class="btn" onclick="previewAnimatic(true)">Preview episode</button></div><p id="prodpreviewstatus" role="status"></p></div><div id="prodvideo" class="panel">Your animatic will appear here. Missing keyframes appear black.</div></div>
  <div class="sec"><div><h2>Server readiness</h2><p>Inspect the node packs and model choices required by each server’s enabled workflows. No jobs or downloads are submitted by this check.</p><button class="btn" id="prodcheck" onclick="checkProduction()">Check readiness</button></div><div class="card" id="prodready"></div></div>
@@ -400,7 +424,7 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
 
 <section class="tab" id="t-queue">
  <div class="qstats" id="qstats"></div>
- <div class="toolbar"><button class="btn" onclick="jobs('retry_errors')">Retry failed jobs</button><button class="btn" onclick="jobs('cancel_pending')">Cancel waiting jobs</button><button class="btn ghost" onclick="jobs('clear')">Clear finished</button></div>
+ <div class="toolbar"><button class="btn" onclick="jobs('retry_errors')">Retry failed jobs</button><details class="action-menu"><summary class="btn">Manage queue ▾</summary><div><button class="btn danger" onclick="jobs('cancel_pending')">Cancel waiting jobs</button><button class="btn" onclick="jobs('clear')">Clear finished</button></div></details></div>
  <p class="muted">Progress and finish times are approximate, based on similar successful renders. Server load and workflow changes can affect timing. A job reaches 100% only when its output is saved.</p>
  <section class="queue-section" aria-labelledby="queueactiveheading"><h2 id="queueactiveheading">Active renders</h2><div id="queueactive"></div></section>
  <section class="queue-section" aria-labelledby="queuequeuedheading"><h2 id="queuequeuedheading">Queued renders</h2><div id="queuequeued"></div></section>
@@ -473,18 +497,20 @@ function preserveMainScroll(update){
  }
 }
 function go(t){const main=$('main');TAB_SCROLL[tab]={top:main.scrollTop,left:main.scrollLeft};
- tab=t;document.querySelectorAll('#nav button').forEach(x=>x.classList.toggle('on',x.dataset.t===t));document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x.id==='t-'+t));render(true);
+ tab=t;document.querySelectorAll('#nav button').forEach(x=>{x.classList.toggle('on',x.dataset.t===t);if(x.dataset.t===t)x.setAttribute('aria-current','page');else x.removeAttribute('aria-current')});document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x.id==='t-'+t));render(true);
  const position=TAB_SCROLL[t]||{top:0,left:0};++SCROLL_PAINT;main.scrollTop=position.top;main.scrollLeft=position.left;
 }
 let LASTSTATE='';
-async function load(){try{const t=await (await fetch('/api/state')).text();if(t===LASTSTATE)return;LASTSTATE=t;S=JSON.parse(t);if(typeof refreshShotVoiceResults==='function')refreshShotVoiceResults();render()}catch(e){}}
+async function load(){try{const response=await fetch('/api/state');if(!response.ok)throw new Error('Server unavailable');const t=await response.text(),state=JSON.parse(t);const notice=$('#connection-status');if(notice)notice.hidden=true;if(t===LASTSTATE)return;LASTSTATE=t;S=state;if(typeof refreshShotVoiceResults==='function')refreshShotVoiceResults();render()}catch(e){const notice=$('#connection-status');if(notice){notice.hidden=false;notice.textContent='Connection interrupted. Reconnecting automatically… Your open dialogue edits are kept.'}}}
 const fmtT=sec=>{sec=Math.round(sec);return sec>=3600?`${Math.floor(sec/3600)}h ${String(Math.floor(sec%3600/60)).padStart(2,'0')}m`:`${Math.floor(sec/60)}:${String(sec%60).padStart(2,'0')}`};
 const pad=n=>String(n|0).padStart(3,'0');
 function lb(u){$('#lbimg').src=u;$('#lightbox').style.display='flex'}
-function modal(h){$('#dlg').innerHTML=h;$('#modal').classList.add('on');setTimeout(()=>{const f=$('#dlg input,#dlg textarea');f&&f.focus({preventScroll:true})},30)}
-function closeModal(){$('#modal').classList.remove('on')}
+let MODAL_OPTIONS={},MODAL_OPENER=null;
+function modal(h,options={}){MODAL_OPENER=document.activeElement;MODAL_OPTIONS=options;const dlg=$('#dlg');dlg.className='dlg '+(options.className||'');dlg.innerHTML=h;$('#modal').removeAttribute('aria-labelledby');$('#modal').removeAttribute('aria-label');const title=dlg.querySelector('h2');if(title){title.id=title.id||'dialog-title';$('#modal').setAttribute('aria-labelledby',title.id)}else $('#modal').setAttribute('aria-label','Anime Studio dialog');$('#modal').classList.add('on');setTimeout(()=>{if(!$('#modal').classList.contains('on'))return;const f=dlg.querySelector(options.initialFocus||'input:not([type=hidden]),textarea,select,button');f?.focus({preventScroll:true})},30)}
+function closeModal(){if(!$('#modal').classList.contains('on'))return true;if(MODAL_OPTIONS.beforeClose&&!MODAL_OPTIONS.beforeClose())return false;$('#modal').classList.remove('on');MODAL_OPTIONS.onClose?.();MODAL_OPTIONS={};if(MODAL_OPENER?.isConnected)MODAL_OPENER.focus({preventScroll:true});return true}
+document.addEventListener('click',e=>{for(const menu of document.querySelectorAll('.action-menu[open]'))if(!menu.contains(e.target)||e.target.closest('button'))menu.open=false});
 $('#modal').onclick=e=>{if(e.target.id==='modal')closeModal()};
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeModal();$('#lightbox').style.display='none'}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){for(const menu of document.querySelectorAll('.action-menu[open]'))menu.open=false;closeModal();$('#lightbox').style.display='none'}if(e.key==='Tab'&&$('#modal').classList.contains('on')){const items=[...$('#dlg').querySelectorAll('button:not(:disabled),input:not(:disabled):not([type=hidden]),textarea:not(:disabled),select:not(:disabled),a[href],[tabindex="0"]')].filter(el=>el.getClientRects().length);const first=items[0],last=items[items.length-1];if(e.shiftKey&&(document.activeElement===first||!$('#dlg').contains(document.activeElement))){e.preventDefault();last?.focus()}else if(!e.shiftKey&&(document.activeElement===last||!$('#dlg').contains(document.activeElement))){e.preventDefault();first?.focus()}}});
 const wfOK=k=>S.workflows[k]&&!(S.workflows[k].problems||[]).length;
 function needs(s){if(!s.keyframe_take)return 'kf';if(s.kind==='still')return 'done';if(!s.clip_take)return 'clip';return 'done'}
 const missingLines=s=>s.audio_mode==='file'?0:(s.lines||[]).filter(l=>!l.audio).length;
@@ -672,12 +698,12 @@ function renderShotsContent(){
    ${s.kind==='motion'&&s.motion_prompt&&s.motion_prompt!==s.keyframe_prompt?`<p class="mp"><b>Motion:</b> ${esc(s.motion_prompt)}</p>`:''}${s.camera?`<p class="cam"><b>Camera:</b> ${esc(s.camera)}</p>`:''}
    ${dia?`<div class="lines">${dia}${s.audio_mode!=='file'&&(s.lines||[]).length>1&&s.audio_url?`<div class="mixbar"><button class="play" onclick="playA(this,'${s.audio_url}')" aria-label="Play all lines">▶</button>All lines together</div>`:''}</div>`:''}
    <div class="flags">${s.draft_in_use?'<span class="flag" style="border-color:var(--amber);color:var(--amber)">Uses a draft clip</span>':''}${s.kind==='motion'?`<span class="flag">24 fps by ${s.retime==='hold'?'holding frames':s.retime==='blend'?'blending':'RIFE'}</span>`:''}${s.ref_prev?'<span class="flag">Matches previous shot</span>':''}${s.end_next?'<span class="flag">Ends on next shot</span>':''}${s.notes?`<span class="flag">${esc(s.notes)}</span>`:''}</div>
-   <div class="acts"><button class="btn sm pri" onclick="editShotVoices(${s.id})">Dialogue & character voices</button><button class="btn sm" onclick="editShot(${s.id})">Edit shot</button><button class="btn sm ghost" onclick="editShot(null,${s.seq})">Add shot after</button></div></div>
+   <div class="acts"><button class="btn sm pri" onclick="editShotVoices(${s.id})">Dialogue</button><button class="btn sm" onclick="editShot(${s.id})">Edit shot</button><button class="btn sm ghost" onclick="editShot(null,${s.seq})">Add shot after</button></div></div>
   <div class="stages">
    <div class="stage"><div class="st-h"><span class="dot ${stState(s.keyframe_take,s.active.keyframe)}"></span>Keyframe<span class="cnt">${kfs.length?kfs.length+' take'+(kfs.length>1?'s':''):''}</span><span class="btns"><button class="btn sm" onclick="gen('keyframe',[${s.id}])">${kfs.length?'More':'Generate'}</button></span></div>
     <div class="st-b">${kfs.map((t,i)=>`<span class="kf-take"><button class="th ${t.id===s.keyframe_take?'sel'+mark(t.id,'k'):''}" style="background-image:url('${t.url}')" onclick="approve(${t.id})" ondblclick="lb('${t.url}')" title="Click to use K${i+1}, double-click to enlarge" aria-label="Use keyframe K${i+1} for shot ${pad(s.seq)}"></button><span class="kf-actions"><span class="kf-label">K${i+1}</span><button type="button" class="kf-delete" onclick="deleteKeyframe(${s.id},${t.id},this)" title="Delete keyframe K${i+1}" aria-label="Delete keyframe K${i+1} from shot ${pad(s.seq)}">×</button></span></span>`).join('')}${pend('keyframe')}</div></div>
    <div class="stage"><div class="st-h"><span class="dot ${s.kind==='still'&&!clips.length?(s.keyframe_take?'ok':'hollow'):stState(s.clip_take,s.active.animate||s.active.lipsync)}"></span>${s.kind==='still'?'Push-in':'Clip'}<span class="cnt">${clips.length?clips.length+' take'+(clips.length>1?'s':''):''}</span>
-    <span class="btns">${s.kind==='motion'?`<button class="btn sm" ${s.keyframe_take?'':'disabled title="Choose a keyframe first"'} onclick="gen('animate',[${s.id}])">Animate</button>`:''}${s.kind==='motion'&&s.clip_take&&rem>0.25?`<button class="btn sm" onclick="gen('continue',[${s.id}])" title="Animate the next part from the last frame">Continue</button>`:''}${(s.lines||[]).length?`<button class="btn sm" onclick="editShotVoices(${s.id})">Character voices</button>`:''}${s.audio?`<button class="btn sm" ${wfOK('lipsync')&&s.keyframe_take?'':'disabled title="Needs a keyframe and a lip-sync workflow (Settings)"'} onclick="gen('lipsync',[${s.id}])">Lip sync</button>`:''}</span></div>
+    <span class="btns">${s.kind==='motion'?`<button class="btn sm" ${s.keyframe_take?'':'disabled title="Choose a keyframe first"'} onclick="gen('animate',[${s.id}])">Animate</button>`:''}${s.kind==='motion'&&s.clip_take&&rem>0.25?`<button class="btn sm" onclick="gen('continue',[${s.id}])" title="Animate the next part from the last frame">Continue</button>`:''}${s.audio?`<button class="btn sm" ${wfOK('lipsync')&&s.keyframe_take?'':'disabled title="Needs a keyframe and a lip-sync workflow (Settings)"'} onclick="gen('lipsync',[${s.id}])">Lip sync</button>`:''}</span></div>
     <div class="st-b">${clips.length?chips(clips,s.clip_take,'T','c'):s.kind==='still'?'<span class="none">Made from the keyframe when you assemble.</span>':''}${pend('animate')}${pend('lipsync')}</div>${contRow}${pend('continue')}${cover}</div>
    <div class="stage"><div class="st-h"><span class="dot ${stState(s.final_take,s.active.upscale)}"></span>Upscale<span class="cnt">optional</span><span class="btns"><button class="btn sm" ${s.clip_take?'':'disabled title="Choose a clip first"'} onclick="gen('upscale',[${s.id}])">Upscale</button></span></div>
     <div class="st-b">${chips(ups,s.final_take,'U','u')}${pend('upscale')}</div></div>
@@ -793,14 +819,14 @@ function renderVoicesContent(){
   return `<section class="scene"><div class="scene-h"><h2>${esc(g.scene)}</h2><span class="muted" style="font-size:12.5px">Shot${shotsIn.length>1?'s':''} ${pad(shotsIn[0])}${shotsIn.length>1?'–'+pad(shotsIn[shotsIn.length-1]):''}, ${g.items.length} line${g.items.length>1?'s':''}</span>
   <button class="btn sm" onclick="playScene(this,${gi})">${SCENEPLAY&&SCENEPLAY.g===gi?'Stop':'Play scene'}</button></div>
   ${g.items.map(({s,l})=>{const a=S.assets.find(a=>a.id===l.character_id);const k=vkey(s.id,l.index);
-   const takes=(l.takes||[]).map((t,i)=>`<span class="vt ${l.audio===t.path?'sel':''}" title="Take ${i+1}, ${(+t.seconds).toFixed(1)} s. Click the number to use it."><button class="play" onclick="event.stopPropagation();playA(this,'${t.url}')" aria-label="Play take">▶</button><span onclick="vUse(${s.id},${l.index},${t.id})">${i+1}</span><span class="x" onclick="event.stopPropagation();vDelTake(${t.id})" title="Delete this take" aria-label="Delete take">×</span></span>`).join('');
+   const takes=(l.takes||[]).map((t,i)=>`<span class="vt ${l.audio===t.path?'sel':''}" title="Take ${i+1}, ${(+t.seconds).toFixed(1)} s. Click the number to use it."><button class="play" onclick="event.stopPropagation();playA(this,'${t.url}')" aria-label="Play take">▶</button><button class="vt-choice" aria-pressed="${l.audio===t.path}" aria-label="Use take ${i+1} for shot ${pad(s.seq)}, line ${l.index+1}" onclick="vUse(${s.id},${l.index},${t.id})">${i+1}${l.audio===t.path?' ✓':''}</button><button class="vt-delete" onclick="vDelTake(${t.id})" aria-label="Delete take ${i+1}">×</button></span>`).join('');
    const pend=(l.pending||[]).length?`<span class="pending"><span class="dot"></span>${l.pending.length} ${l.pending.includes('running')?'rendering':'waiting'}</span>`:'';
    return `<div class="vl ${l.audio?'':'missing'}"><input type="checkbox" ${VSEL.has(k)?'checked':''} onchange="vTog('${k}',this.checked)" aria-label="Select line">
     <button class="shotno" onclick="jump(${s.id})" title="Open the shot">Shot ${pad(s.seq)}</button>
     <span class="who">${a&&a.url?`<img src="${a.url}" alt="">`:'<span class="ph"></span>'}<b>${esc(a?a.name:l.speaker||'No speaker')}</b></span>
-    <div><div class="txt">${esc(l.text)}</div><input class="dir" value="${esc(l.direction||'')}" placeholder="Delivery note (optional): whispering, angry, out of breath…" onchange="post('/api/line/direction',{shot_id:${s.id},index:${l.index},direction:this.value})" aria-label="Delivery note"></div>
+    <div><div class="txt">${esc(l.text)}</div>${l.direction?`<div class="vsrc" style="margin-top:6px">Delivery: ${esc(l.direction)}</div>`:''}</div>
     <div><div class="vtakes">${takes||'<span class="vsrc">No takes yet</span>'}${pend}</div>${l.audio&&l.src!=='tts'?`<div class="vsrc" style="margin-top:6px">Using: ${SRC[l.src]||'audio'} <button class="play" style="display:inline-grid;vertical-align:middle;width:18px;height:18px;font-size:8px" onclick="playA(this,'${l.url}')" aria-label="Play">▶</button></div>`:''}</div>
-    <div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap"><button class="btn sm" onclick="editShotVoices(${s.id})">Character / dialogue</button><button class="btn sm" onclick="vGen([[${s.id},${l.index}]])">${(l.takes||[]).length?'More takes':'Generate'}</button>
+    <div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap"><button class="btn sm" onclick="editShotVoices(${s.id},${l.index})">Edit dialogue</button><button class="btn sm" onclick="vGen([[${s.id},${l.index}]])">${(l.takes||[]).length?'More takes':'Generate'}</button>
      <select style="width:auto;padding:3px 6px;font-size:12px" onchange="vOther(${s.id},${l.index},this)" aria-label="Other audio"><option value="">Other audio…</option>${(a?a.clips:[]).map(c=>`<option value="clip:${c.id}">Clip: ${esc((c.transcript||c.name).slice(0,40))}</option>`).join('')}<option value="temp">Temp voice (macOS)</option><option value="upload">Upload a file…</option>${l.audio?'<option value="none">Remove audio</option>':''}</select></div></div>`}).join('')}</section>`}).join('')}
 function vTog(k,on){on?VSEL.add(k):VSEL.delete(k);$('#vselinfo').textContent=VSEL.size?`${VSEL.size} selected`:'Selected lines'}
 function vSelAll(on){VSEL=new Set(on?allLines().filter(vMatch).map(x=>vkey(x.s.id,x.l.index)):[]);renderVoices()}
