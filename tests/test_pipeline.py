@@ -253,6 +253,24 @@ def main():
     post("/api/generate", {"stage": "upscale", "shot_ids": [long_id]})
     wait_jobs()
 
+    # Native S2V preset: both files must be uploaded and the short shot padded for the model.
+    lip = post("/api/shot/save", {"scene": "Lip test", "kind": "still", "keyframe_prompt": "Aiko talks",
+                                  "duration": 2, "audio_file": tone("speech.wav", 1)})["id"]
+    post("/api/generate", {"stage": "keyframe", "shot_ids": [lip], "takes": 1})
+    wait_jobs()
+    r = post("/api/generate", {"stage": "lipsync", "shot_ids": [lip], "takes": 1})
+    check(r["queued"] == 1, "native S2V preset queues without importing a workflow")
+    wait_jobs()
+    sh = shot(lip)
+    check(sh["clip_take"] and not sh["outdated"], "S2V result becomes the current talking clip")
+    sent_lip = [json.loads(p.read_text()) for p in (RUN / "m1").glob("last_*.json")
+                if '"WanSoundImageToVideo"' in p.read_text()]
+    wf = sent_lip[-1] if sent_lip else {}
+    check(wf.get("22", {}).get("inputs", {}).get("length") == 73 and
+          wf.get("11", {}).get("inputs", {}).get("audio", "").startswith("anime_j"),
+          "S2V gets uploaded dialogue and at least 73 frames")
+    post("/api/shot/delete", {"ids": [lip]})
+
     # Guided scene preparation uses the real dispatcher and stops before expensive animation.
     guided = post("/api/shot/save", {"scene": "Guided test", "kind": "motion", "keyframe_prompt": "Empty pier",
                                       "motion_prompt": "gentle waves", "duration": 6})["id"]

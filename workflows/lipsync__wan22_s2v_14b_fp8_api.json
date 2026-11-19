@@ -1,0 +1,181 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "wan2.2_s2v_14B_fp8_scaled.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan",
+      "device": "default"
+    }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "wan_2.1_vae.safetensors"
+    }
+  },
+  "4": {
+    "class_type": "AudioEncoderLoader",
+    "inputs": {
+      "audio_encoder_name": "wav2vec2_large_english_fp16.safetensors"
+    }
+  },
+  "5": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "shift": 8.0
+    }
+  },
+  "10": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    },
+    "_meta": {
+      "title": "START_IMAGE"
+    }
+  },
+  "11": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": "example.wav"
+    },
+    "_meta": {
+      "title": "AUDIO_IN"
+    }
+  },
+  "12": {
+    "class_type": "AudioEncoderEncode",
+    "inputs": {
+      "audio_encoder": [
+        "4",
+        0
+      ],
+      "audio": [
+        "11",
+        0
+      ]
+    }
+  },
+  "20": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "2",
+        0
+      ],
+      "text": ""
+    },
+    "_meta": {
+      "title": "PROMPT"
+    }
+  },
+  "21": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "2",
+        0
+      ],
+      "text": ""
+    },
+    "_meta": {
+      "title": "NEGATIVE"
+    }
+  },
+  "22": {
+    "class_type": "WanSoundImageToVideo",
+    "inputs": {
+      "positive": [
+        "20",
+        0
+      ],
+      "negative": [
+        "21",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ],
+      "audio_encoder_output": [
+        "12",
+        0
+      ],
+      "ref_image": [
+        "10",
+        0
+      ],
+      "width": 848,
+      "height": 480,
+      "length": 77,
+      "batch_size": 1
+    },
+    "_meta": {
+      "title": "SIZE"
+    }
+  },
+  "30": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "5",
+        0
+      ],
+      "positive": [
+        "22",
+        0
+      ],
+      "negative": [
+        "22",
+        1
+      ],
+      "latent_image": [
+        "22",
+        2
+      ],
+      "seed": 1,
+      "steps": 20,
+      "cfg": 6.0,
+      "sampler_name": "uni_pc",
+      "scheduler": "simple",
+      "denoise": 1.0
+    }
+  },
+  "40": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "30",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    }
+  },
+  "50": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "40",
+        0
+      ],
+      "filename_prefix": "anime/lipsync"
+    },
+    "_meta": {
+      "title": "SAVE"
+    }
+  }
+}

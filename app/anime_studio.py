@@ -39,7 +39,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "2.7"
+VERSION = "2.8"
 for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebrew/bin")):
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
@@ -144,7 +144,27 @@ STARTERS = {
         "5": _n("ImageScale", {"image": ["4", 0], "upscale_method": "lanczos", "width": 1920, "height": 1080, "crop": "center"}),
         "6": _n("SaveImage", {"images": ["5", 0], "filename_prefix": "anime/upscale"}, "SAVE"),
     }}},
-    "lipsync": {},   # export ComfyUI's built-in "Wan2.2 S2V" template in API format and upload it
+    # Single-chunk S2V, adapted from Comfy-Org's native Wan2.2 S2V template.
+    # Save frames rather than muxing audio: the Mac stitches at 16 fps and mixes the shot's dialogue.
+    "lipsync": {"wan22_s2v_14b_fp8": {"fps": 16, "max_frames": 77, "wf": {
+        "1": _n("UNETLoader", {"unet_name": "wan2.2_s2v_14B_fp8_scaled.safetensors", "weight_dtype": "default"}),
+        "2": _n("CLIPLoader", {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan", "device": "default"}),
+        "3": _n("VAELoader", {"vae_name": "wan_2.1_vae.safetensors"}),
+        "4": _n("AudioEncoderLoader", {"audio_encoder_name": "wav2vec2_large_english_fp16.safetensors"}),
+        "5": _n("ModelSamplingSD3", {"model": ["1", 0], "shift": 8.0}),
+        "10": _n("LoadImage", {"image": "example.png"}, "START_IMAGE"),
+        "11": _n("LoadAudio", {"audio": "example.wav"}, "AUDIO_IN"),
+        "12": _n("AudioEncoderEncode", {"audio_encoder": ["4", 0], "audio": ["11", 0]}),
+        "20": _n("CLIPTextEncode", {"clip": ["2", 0], "text": ""}, "PROMPT"),
+        "21": _n("CLIPTextEncode", {"clip": ["2", 0], "text": ""}, "NEGATIVE"),
+        "22": _n("WanSoundImageToVideo", {"positive": ["20", 0], "negative": ["21", 0], "vae": ["3", 0],
+                                            "audio_encoder_output": ["12", 0], "ref_image": ["10", 0],
+                                            "width": 848, "height": 480, "length": 77, "batch_size": 1}, "SIZE"),
+        "30": _n("KSampler", {"model": ["5", 0], "positive": ["22", 0], "negative": ["22", 1], "latent_image": ["22", 2],
+                               "seed": 1, "steps": 20, "cfg": 6.0, "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1.0}),
+        "40": _n("VAEDecode", {"samples": ["30", 0], "vae": ["3", 0]}),
+        "50": _n("SaveImage", {"images": ["40", 0], "filename_prefix": "anime/lipsync"}, "SAVE"),
+    }}},
     # Local voice-copying TTS: ComfyUI-Qwen-TTS (github.com/flybirdxx/ComfyUI-Qwen-TTS) + built-in Load/Save Audio
     "voice": {"qwen3_tts_clone": {"fps": 0, "max_frames": 0, "wf": {
         "1": _n("LoadAudio", {"audio": "example.wav"}, "AUDIO_IN"),
@@ -166,7 +186,7 @@ STARTERS = {
 }
 DEFAULT_STARTER = {"keyframe": "qwen_edit_2509", "animate": "wan22_14b_fp8", "animate_flf": "wan22_14b_fp8_flf",
                    "upscale": "realesrgan_anime_1080p", "voice": "qwen3_tts_clone",
-                   "voice_design": "qwen3_tts_design"}
+                   "voice_design": "qwen3_tts_design", "lipsync": "wan22_s2v_14b_fp8"}
 VOICE_SAMPLE = "Hello there. It's good to finally meet you. I've been waiting a long time for this, and I won't let you down."
 
 WAN_NEGATIVE = ("色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，"
@@ -771,6 +791,10 @@ def build_workflow(template, key, p):
             if p.get(f) and f in inp and not isinstance(inp[f], list):
                 v = int(p[f])
                 inp[f] = max(step, int(round(v / step)) * step) if f != "length" else v
+    if key == 'lipsync':
+        for n in wf.values():
+            if n.get('class_type') == 'WanSoundImageToVideo' and isinstance(n['inputs'].get('length'), (int, float)):
+                n['inputs']['length'] = max(73, int(n['inputs']['length']))
     for k in m["save"]:
         if "filename_prefix" in wf[k]["inputs"]:
             wf[k]["inputs"]["filename_prefix"] = p["prefix"]
@@ -1935,6 +1959,12 @@ class API:
             if stage in ("animate", "lipsync") and not st.take_path(s["keyframe_take"]):
                 skipped.append(f"{label}: no approved keyframe")
                 continue
+            if stage == 'lipsync':
+                row = st.wf_row('lipsync')
+                native_s2v = row and any(n.get('class_type') == 'WanSoundImageToVideo' for n in json.loads(row['json']).values())
+                if native_s2v and float(s['duration']) > st.max_frames('lipsync') / st.wf_fps('lipsync'):
+                    skipped.append(f"{label}: S2V preset supports at most {st.max_frames('lipsync') / st.wf_fps('lipsync'):.2f}s. Split the shot or upload a longer S2V workflow.")
+                    continue
             if stage == "lipsync" and not s["audio"]:
                 skipped.append(f"{label}: no dialogue audio")
                 continue

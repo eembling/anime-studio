@@ -118,7 +118,7 @@ class Production:
                                 for field, value in node.get('inputs', {}).items():
                                     spec = specs.get(field, [])
                                     # Runtime inputs are filled later; only validate concrete model names here.
-                                    if ('model' in field or field in ('ckpt_name', 'vae_name', 'clip_name', 'lora_name')) and spec and isinstance(spec[0], list) and isinstance(value, str) and value not in spec[0]:
+                                    if ('model' in field or field in ('ckpt_name', 'unet_name', 'audio_encoder_name', 'vae_name', 'clip_name', 'lora_name')) and spec and isinstance(spec[0], list) and isinstance(value, str) and value not in spec[0]:
                                         problems.append('Missing/unsupported ' + field + ': ' + value + '. Check model downloads and refresh ComfyUI.')
                         stages[stage] = {'ready': not problems, 'problems': sorted(set(problems))}
                 except Exception as exc:
