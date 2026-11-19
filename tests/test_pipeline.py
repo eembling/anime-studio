@@ -8,7 +8,7 @@ Covers: script -> shots, cast + turnaround sheet + LoRA, keyframes on two server
 full-quality re-render with the same seed, Continue chains (incl. swapping a part), first-last-frame
 on the final part, upscale, uploaded dialogue audio, music, and assembly to exact lengths.
 """
-import base64, io, json, os, shutil, subprocess, sys, time, urllib.request
+import base64, io, json, shutil, subprocess, sys, time, urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -76,7 +76,7 @@ def main():
 
     s = state()
     iid = s["instances"][0]["id"]
-    roles = ["sheet", "keyframe", "animate", "continue", "lipsync", "upscale"]
+    roles = ["sheet", "keyframe", "animate", "continue", "lipsync", "upscale", "voice"]
     post("/api/instance/save", {"id": iid, "name": "GPU0", "url": f"127.0.0.1:{M1}", "roles": roles, "enabled": True})
     post("/api/instance/save", {"name": "GPU1", "url": f"http://127.0.0.1:{M2}", "roles": ["keyframe", "animate", "continue"]})
     post("/api/instance/check", {})
@@ -96,7 +96,7 @@ def main():
     wait_jobs()
     long_id = post("/api/shot/save", {"scene": "Chase", "kind": "motion", "keyframe_prompt": "Aiko runs",
                                       "duration": 10, "end_next": True, "asset_ids": [aiko["id"]]})["id"]
-    next_id = post("/api/shot/save", {"scene": "Chase", "kind": "motion", "keyframe_prompt": "Street corner"})["id"]
+    post("/api/shot/save", {"scene": "Chase", "kind": "motion", "keyframe_prompt": "Street corner"})
     ids = [x["id"] for x in state()["shots"]]
     post("/api/generate", {"stage": "keyframe", "shot_ids": ids, "takes": 2})
     wait_jobs()
@@ -133,12 +133,129 @@ def main():
     check(loras and all(any(n["inputs"].get("lora_name") == "aiko.safetensors" for n in wf.values()) for wf in loras),
           "character LoRA injected into Aiko's keyframes")
 
-    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=4", "-ar", "48000", str(RUN / "line.wav")])
-    dia = state()["shots"][1]
-    post("/api/shot/save", {"id": dia["id"], "audio_file": b64("line.wav", (RUN / "line.wav").read_bytes())})
-    check(shot(dia["id"])["duration"] >= 4.4, "shot lengthens to fit its dialogue audio")
+    # ---------- dialogue audio
+    def tone(name, secs, hz=440):
+        path = RUN / name
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"sine=f={hz}:d={secs}", "-ar", "44100", str(path)])
+        return b64(name, path.read_bytes())
+
+    dia = state()["shots"][1]                      # "AIKO: You came after all."
+    r = post("/api/clips/upload", {"asset_id": aiko["id"], "files": [tone("aiko_01_you_came_after_all.wav", 2.0),
+                                                                      tone("aiko_see_you_tomorrow.mp3", 1.5)]})
+    clips = [a for a in state()["assets"] if a["id"] == aiko["id"]][0]["clips"]
+    check(r["added"] == 2 and [c["transcript"] for c in clips] == ["you came after all", "see you tomorrow"],
+          "clip transcripts come from file names")
+    check(sum(c["is_ref"] for c in clips) == 1, "first clip becomes the reference voice")
+    check(r["matched"] == 1, "uploading clips matches them to dialogue lines")
+    l0 = shot(dia["id"])["lines"][0]
+    check(l0["src"] == "clip" and shot(dia["id"])["audio"], "matched line has audio and the shot gets a dialogue track")
+
+    two = post("/api/shot/save", {"scene": "Rooftop", "kind": "still", "keyframe_prompt": "both",
+                                  "dialogue": "Aiko: You came after all!\nKenji: I always do."})["id"]
+    post("/api/lines/match", {"shot_ids": [two]})
+    sh = shot(two)
+    check(sh["lines"][0]["src"] == "clip" and not sh["lines"][1]["audio"], "match tolerates punctuation; Kenji has no clips")
+    post("/api/line/set", {"shot_id": two, "index": 1, "src": "upload", "file": tone("kenji.wav", 1.2, 600)})
+    sh = shot(two)
+    track = duration(RUN / "data" / sh["audio"])
+    check(abs(track - (2.0 + 0.3 + 1.2)) < 0.15, f"shot track = line 1 + pause + line 2 ({track:.2f} s)")
+    check(sh["duration"] >= round(track + 0.4, 1) - 0.01, "shot lengthens to fit its dialogue")
+    post("/api/line/set", {"shot_id": two, "index": 1, "src": "none"})
+    check(abs(duration(RUN / "data" / shot(two)["audio"]) - (2.0 + 0.3 + 1.0)) < 0.2, "a line without audio keeps its place as silence")
+
+    tts = {"1": {"class_type": "LoadAudio", "inputs": {"audio": "x.wav"}, "_meta": {"title": "AUDIO_IN"}},
+           "2": {"class_type": "FakeTTS", "inputs": {"text": "", "voice": ["1", 0], "ref": ["4", 0], "seed": 1}, "_meta": {"title": "PROMPT"}},
+           "3": {"class_type": "SaveAudio", "inputs": {"audio": ["2", 0], "filename_prefix": "x"}},
+           "4": {"class_type": "FakeText", "inputs": {"text": ""}, "_meta": {"title": "REF_TEXT"}}}
+    r = post("/api/workflow", {"stage": "voice", "file": b64("tts.json", json.dumps(tts).encode())})
+    check(r.get("ok"), "voice workflow accepted")
+    r = post("/api/generate", {"stage": "voice", "shot_ids": [two]})
+    check(r["queued"] == 0 and r["skipped"], "TTS skips speakers without a voice clip")
+    post("/api/shot/save", {"id": two, "dialogue": "Aiko: You came after all!\nAiko: Let's go home."})
+    r = post("/api/generate", {"stage": "voice", "shot_ids": [two]})
+    check(r["queued"] == 1, "TTS queues only the line without audio")
+    wait_jobs()
+    sh = shot(two)
+    check(sh["lines"][1]["src"] == "tts" and sh["lines"][0]["src"] == "clip", "TTS line lands on the right line; edited dialogue keeps matched audio")
+
+    sent = [json.loads(p.read_text()) for p in list((RUN / "m1").glob("last_*.json")) + list((RUN / "m2").glob("last_*.json"))
+            if '"FakeTTS"' in p.read_text()]
+    check(sent and sent[-1]["4"]["inputs"]["text"] == "you came after all", "TTS gets the reference clip's transcript (REF_TEXT)")
+
+    # reference voice from the cast dialog: new character + recording + what is said
+    mina = post("/api/asset/save", {"name": "Mina", "kind": "character", "description": "calm"})
+    check(isinstance(mina.get("id"), int), "creating a cast member returns its id")
+    post("/api/clips/upload", {"asset_id": mina["id"], "files": [tone("random_name.wav", 6, 520)], "as_ref": True,
+                               "transcript": "The sea is quiet tonight."})
+    m = [a for a in state()["assets"] if a["id"] == mina["id"]][0]
+    check(len(m["clips"]) == 1 and m["clips"][0]["is_ref"] and m["clips"][0]["transcript"] == "The sea is quiet tonight.",
+          "reference voice saved with the typed transcript")
+    post("/api/clips/upload", {"asset_id": mina["id"], "files": [tone("better.wav", 8, 520)], "as_ref": True, "transcript": "New words."})
+    m = [a for a in state()["assets"] if a["id"] == mina["id"]][0]
+    refs = [c for c in m["clips"] if c["is_ref"]]
+    check(len(refs) == 1 and refs[0]["transcript"] == "New words." and len(m["clips"]) == 2, "replacing the reference keeps one reference")
+
+    # ---------- Voices tab: the built-in Qwen3-TTS workflow, takes per line
+    post("/api/workflow", {"stage": "voice", "starter": "qwen3_tts_clone"})
+    post("/api/settings", {"settings": {"tts_model": "0.6B", "tts_language": "Japanese"}})
+    three = post("/api/shot/save", {"scene": "Pier", "kind": "still", "keyframe_prompt": "Mina at the pier",
+                                    "dialogue": "Mina: The tide is turning.\nMina: We should go."})["id"]
+    post("/api/line/direction", {"shot_id": three, "index": 0, "direction": "softly"})
+    r = post("/api/generate", {"stage": "voice", "lines": [{"shot_id": three, "index": 0}], "takes": 2})
+    check(r["queued"] == 2, "two takes queued for one line")
+    wait_jobs()
+    l0 = shot(three)["lines"][0]
+    check(len(l0["takes"]) == 2 and l0["src"] == "tts" and l0["audio"] == l0["takes"][0]["path"],
+          "both takes kept, the first is chosen automatically")
+    sent = [json.loads(p.read_text()) for p in list((RUN / "m1").glob("last_*.json")) + list((RUN / "m2").glob("last_*.json"))
+            if "FB_Qwen3TTSVoiceClone" in p.read_text() and "The tide is turning." in p.read_text()]
+    node = sent[-1]["2"]["inputs"] if sent else {}
+    check(node.get("target_text") == "The tide is turning." and node.get("ref_text") == "New words."
+          and node.get("language") == "Japanese" and node.get("model_choice") == "0.6B" and node.get("instruct") == "softly",
+          "Qwen3-TTS node gets the line, reference transcript, language, model size and delivery note")
+    post("/api/line/set", {"shot_id": three, "index": 0, "src": "take", "take_id": l0["takes"][1]["id"]})
+    check(shot(three)["lines"][0]["audio"] == l0["takes"][1]["path"], "choosing another take uses it")
+    post("/api/voice_take/delete", {"id": l0["takes"][1]["id"]})
+    l0 = shot(three)["lines"][0]
+    check(len(l0["takes"]) == 1 and not l0["audio"], "deleting the chosen take removes it from the line")
+    r = post("/api/generate", {"stage": "voice", "shot_ids": [three], "takes": 1})
+    check(r["queued"] == 2, "Generate all missing covers every line without audio")
+    wait_jobs()
+    sh = shot(three)
+    check(all(l["audio"] for l in sh["lines"]) and sh["lines"][0]["direction"] == "softly", "all lines voiced; delivery note kept")
+
+    post("/api/shot/save", {"id": dia["id"], "audio_file": tone("whole.wav", 4)})
+    check(shot(dia["id"])["audio_mode"] == "file" and shot(dia["id"])["duration"] >= 4.4, "one file for the whole shot still works")
+    post("/api/shot/save", {"id": dia["id"], "clear_audio": True})
+    check(shot(dia["id"])["audio_mode"] == "lines" and shot(dia["id"])["lines"][0]["src"] == "clip", "removing it goes back to line audio")
     post("/api/generate", {"stage": "upscale", "shot_ids": [long_id]})
     wait_jobs()
+
+    # ---------- review fixes (v2.5)
+    r = post("/api/settings", {"settings": {"tts_language": "english", "tts_model": "1.7b"}})
+    st_ = state()["settings"]
+    check(st_["tts_language"] == "English" and st_["tts_model"] == "1.7B", "TTS settings normalized to the node's options")
+    post("/api/settings", {"settings": {"tts_language": "Klingon"}})
+    check(state()["settings"]["tts_language"] == "Auto", "unknown TTS language falls back to Auto")
+    r = post("/api/reveal", {"path": "../../etc"})
+    check(r.get("ok") is False, "Show in Finder refuses paths outside the project")
+
+    # a deleted shot's takes must not reappear on a new shot that reuses its id
+    gone = post("/api/shot/save", {"scene": "Temp", "kind": "motion", "keyframe_prompt": "x", "dialogue": "Aiko: You came after all."})["id"]
+    post("/api/generate", {"stage": "keyframe", "shot_ids": [gone], "takes": 1})
+    wait_jobs()
+    post("/api/generate", {"stage": "voice", "shot_ids": [gone], "takes": 1, "replace": True})
+    wait_jobs()
+    check(shot(gone)["takes"] and shot(gone)["lines"][0]["takes"], "throwaway shot has a keyframe and a voice take")
+    post("/api/shot/delete", {"ids": [gone]})
+    fresh = post("/api/shot/save", {"scene": "Fresh", "kind": "motion", "keyframe_prompt": "y", "dialogue": "Aiko: You came after all."})["id"]
+    fs = shot(fresh)
+    check(fresh == gone and not fs["takes"] and not fs["lines"][0]["takes"], f"new shot reusing id {fresh} starts clean")
+
+    # warning when a shot is shorter than its dialogue
+    short = post("/api/shot/save", {"scene": "Short", "kind": "still", "keyframe_prompt": "z", "dialogue": "Kenji: I always do."})["id"]
+    post("/api/line/set", {"shot_id": short, "index": 0, "src": "upload", "file": tone("long.wav", 3.0, 500)})
+    post("/api/shot/save", {"id": short, "duration": 1.5})
 
     subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=f=220:d=3", str(RUN / "music.mp3")])
     post("/api/music", {"file": b64("music.mp3", (RUN / "music.mp3").read_bytes())})
@@ -149,6 +266,7 @@ def main():
             break
         time.sleep(1)
     check(not any("ERROR" in l for l in A["log"]), "assembly finished")
+    check(any("WARNING" in l and "cut off" in l for l in A["log"]), "assembly warns when dialogue is longer than its shot")
     out = RUN / "data" / A["folder"]
     total = sum(x["duration"] for x in state()["shots"])
     check(abs(duration(out / Path(A["output"]).name) - total) < 0.3, f"episode length matches the shot list ({total:.1f} s)")

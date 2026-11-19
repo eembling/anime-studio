@@ -4,7 +4,20 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 RES="$(cd "$HERE/../Resources" && pwd)"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 APPDIR="$(cd "$HERE/../../.." && pwd)"
-export AS_DATA="${ANIME_STUDIO_DATA:-$APPDIR/AnimeStudio Data}"
+# The project folder is remembered, so moving the app (e.g. into Applications) keeps the same project.
+CONF_DIR="$HOME/Library/Application Support/AnimeStudio"
+CONF="$CONF_DIR/data-folder"
+if [ -n "${ANIME_STUDIO_DATA:-}" ]; then
+  AS_DATA="$ANIME_STUDIO_DATA"
+elif [ -f "$CONF" ] && [ -d "$(cat "$CONF")" ]; then
+  AS_DATA="$(cat "$CONF")"
+elif [ -w "$APPDIR" ] && [ "$APPDIR" != "/Applications" ]; then
+  AS_DATA="$APPDIR/AnimeStudio Data"
+else
+  AS_DATA="$HOME/Documents/AnimeStudio Data"
+fi
+export AS_DATA
+mkdir -p "$CONF_DIR" && printf '%s' "$AS_DATA" > "$CONF"
 export AS_PORT="${ANIME_STUDIO_PORT:-8700}"
 export AS_SCRIPT="$RES/anime_studio.py"
 mkdir -p "$AS_DATA"
