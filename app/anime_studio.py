@@ -39,7 +39,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "2.7"
+VERSION = "2.10"
 for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebrew/bin")):
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
@@ -144,7 +144,27 @@ STARTERS = {
         "5": _n("ImageScale", {"image": ["4", 0], "upscale_method": "lanczos", "width": 1920, "height": 1080, "crop": "center"}),
         "6": _n("SaveImage", {"images": ["5", 0], "filename_prefix": "anime/upscale"}, "SAVE"),
     }}},
-    "lipsync": {},   # export ComfyUI's built-in "Wan2.2 S2V" template in API format and upload it
+    # Single-chunk S2V, adapted from Comfy-Org's native Wan2.2 S2V template.
+    # Save frames rather than muxing audio: the Mac stitches at 16 fps and mixes the shot's dialogue.
+    "lipsync": {"wan22_s2v_14b_fp8": {"fps": 16, "max_frames": 77, "wf": {
+        "1": _n("UNETLoader", {"unet_name": "wan2.2_s2v_14B_fp8_scaled.safetensors", "weight_dtype": "default"}),
+        "2": _n("CLIPLoader", {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan", "device": "default"}),
+        "3": _n("VAELoader", {"vae_name": "wan_2.1_vae.safetensors"}),
+        "4": _n("AudioEncoderLoader", {"audio_encoder_name": "wav2vec2_large_english_fp16.safetensors"}),
+        "5": _n("ModelSamplingSD3", {"model": ["1", 0], "shift": 8.0}),
+        "10": _n("LoadImage", {"image": "example.png"}, "START_IMAGE"),
+        "11": _n("LoadAudio", {"audio": "example.wav"}, "AUDIO_IN"),
+        "12": _n("AudioEncoderEncode", {"audio_encoder": ["4", 0], "audio": ["11", 0]}),
+        "20": _n("CLIPTextEncode", {"clip": ["2", 0], "text": ""}, "PROMPT"),
+        "21": _n("CLIPTextEncode", {"clip": ["2", 0], "text": ""}, "NEGATIVE"),
+        "22": _n("WanSoundImageToVideo", {"positive": ["20", 0], "negative": ["21", 0], "vae": ["3", 0],
+                                            "audio_encoder_output": ["12", 0], "ref_image": ["10", 0],
+                                            "width": 848, "height": 480, "length": 77, "batch_size": 1}, "SIZE"),
+        "30": _n("KSampler", {"model": ["5", 0], "positive": ["22", 0], "negative": ["22", 1], "latent_image": ["22", 2],
+                               "seed": 1, "steps": 20, "cfg": 6.0, "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1.0}),
+        "40": _n("VAEDecode", {"samples": ["30", 0], "vae": ["3", 0]}),
+        "50": _n("SaveImage", {"images": ["40", 0], "filename_prefix": "anime/lipsync"}, "SAVE"),
+    }}},
     # Local voice-copying TTS: ComfyUI-Qwen-TTS (github.com/flybirdxx/ComfyUI-Qwen-TTS) + built-in Load/Save Audio
     "voice": {"qwen3_tts_clone": {"fps": 0, "max_frames": 0, "wf": {
         "1": _n("LoadAudio", {"audio": "example.wav"}, "AUDIO_IN"),
@@ -166,7 +186,7 @@ STARTERS = {
 }
 DEFAULT_STARTER = {"keyframe": "qwen_edit_2509", "animate": "wan22_14b_fp8", "animate_flf": "wan22_14b_fp8_flf",
                    "upscale": "realesrgan_anime_1080p", "voice": "qwen3_tts_clone",
-                   "voice_design": "qwen3_tts_design"}
+                   "voice_design": "qwen3_tts_design", "lipsync": "wan22_s2v_14b_fp8"}
 VOICE_SAMPLE = "Hello there. It's good to finally meet you. I've been waiting a long time for this, and I won't let you down."
 
 WAN_NEGATIVE = ("色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，"
@@ -362,6 +382,10 @@ class Studio:
         self.health = {}
         from production import Production
         self.production = Production(self, API, http_json)
+        from soundtrack import Soundtrack
+        self.soundtrack = Soundtrack(self, ffmpeg)
+        from render_queue import remember_timings
+        remember_timings(self.db)
         self.frame_lock = threading.Lock()
         self.assembly = {"running": False, "log": [], "output": None, "folder": None}
         self.tools_cache = None
@@ -771,6 +795,10 @@ def build_workflow(template, key, p):
             if p.get(f) and f in inp and not isinstance(inp[f], list):
                 v = int(p[f])
                 inp[f] = max(step, int(round(v / step)) * step) if f != "length" else v
+    if key == 'lipsync':
+        for n in wf.values():
+            if n.get('class_type') == 'WanSoundImageToVideo' and isinstance(n['inputs'].get('length'), (int, float)):
+                n['inputs']['length'] = max(73, int(n['inputs']['length']))
     for k in m["save"]:
         if "filename_prefix" in wf[k]["inputs"]:
             wf[k]["inputs"]["filename_prefix"] = p["prefix"]
@@ -1134,6 +1162,8 @@ class Worker(threading.Thread):
                 local.append(dest)
             self.finish(job, key, local)
             db.x("UPDATE jobs SET status='done', finished=?, progress='done' WHERE id=? AND status='running'", (time.time(), job_id))
+            from render_queue import remember_timings
+            remember_timings(db)
             shutil.rmtree(out_dir, ignore_errors=True)
         except Exception as e:
             traceback.print_exc()
@@ -1246,10 +1276,11 @@ def tc(frames, fps, hour=0):
     return f"{hour + f // (fps * 3600):02d}:{f // (fps * 60) % 60:02d}:{f // fps % 60:02d}:{f % fps:02d}"
 
 
-def assemble(st, use_music, music_volume, preview=False, scene=None):
+def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=True):
     A = st.assembly
     A.update(running=True, log=[], output=None, folder=None, kind='animatic' if preview else 'episode')
     log = A["log"]
+    cues = st.soundtrack.cues() if use_timed and not preview and scene is None else []
     try:
         if not st.tools(refresh=True)["ffmpeg"]:
             raise RuntimeError("ffmpeg not found. Install it with: brew install ffmpeg")
@@ -1262,7 +1293,7 @@ def assemble(st, use_music, music_volume, preview=False, scene=None):
             raise RuntimeError("No shots yet.")
         name = re.sub(r"[^A-Za-z0-9_-]+", "_", S.get("title") or "episode").strip("_") or "episode"
         name += "_animatic" if preview else ""
-        out = st.data / "exports" / f"{name}_{time.strftime('%Y%m%d_%H%M%S')}"
+        out = st.data / "exports" / f"{name}_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         (out / "shots").mkdir(parents=True)
         venc = ["-c:v", "libx264", "-crf", "16", "-preset", "medium", "-pix_fmt", "yuv420p", "-r", str(FPS)]
         aenc = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
@@ -1325,15 +1356,12 @@ def assemble(st, use_music, music_volume, preview=False, scene=None):
         (out / "concat.txt").write_text("".join(f"file 'shots/{p.name}'\n" for p in segs))
         joined, final = out / "_joined.mp4", out / f"{name}.mp4"
         ffmpeg(["-f", "concat", "-safe", "0", "-i", str(out / "concat.txt"), "-c", "copy", str(joined)])
-        music = S.get("music")
-        if use_music and music and st.abs(music).exists():
-            log.append("Mixing music...")
-            ffmpeg(["-i", str(joined), "-stream_loop", "-1", "-i", str(st.abs(music)), "-filter_complex",
-                    f"[1:a]volume={float(music_volume):.3f}[m];[0:a][m]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]",
-                    "-map", "0:v", "-map", "[a]", "-c:v", "copy"] + aenc + [str(final)])
-            joined.unlink()
-        else:
-            joined.rename(final)
+        master = out / '_dialogue_master.mp4'
+        joined.rename(master)
+        log.append('Mixing episode audio...' if cues or use_music else 'Saving dialogue-only episode...')
+        st.soundtrack.mix(master, final, cues, S.get('music', '') if use_music else '', float(music_volume), log)
+        if not preview and scene is None:
+            st.soundtrack.register(master, final, rec / FPS)
         (out / "concat.txt").unlink()
         (out / "shotlist.csv").write_text(API(st).csv_export())
         A["output"], A["folder"] = st.rel(final), st.rel(out)
@@ -1423,9 +1451,17 @@ class API:
                             "slots": detect_slots(wf, key), "problems": check_workflow(wf, key)}
             else:
                 wfs[key] = None
-        jobs = db.q("SELECT * FROM jobs WHERE status IN ('pending','running') OR id IN (SELECT id FROM jobs ORDER BY id DESC LIMIT 300) "
-                    "ORDER BY id DESC")
+        jobs = db.q("SELECT * FROM jobs WHERE status IN ('pending','running') "
+                    "OR id IN (SELECT id FROM jobs WHERE status='done' ORDER BY finished DESC,id DESC LIMIT 100) "
+                    "OR id IN (SELECT id FROM jobs WHERE status IN ('error','cancelled') ORDER BY finished DESC,id DESC LIMIT 100) ORDER BY id DESC")
         counts = {r["status"]: r["n"] for r in db.q("SELECT status, COUNT(*) n FROM jobs GROUP BY status")}
+        from render_queue import queue_snapshot
+        history = db.q("SELECT stage,draft,instance_id,'done' AS status,started,finished FROM render_timing_history ORDER BY finished DESC LIMIT 1000")
+        readiness = {server['id']: server['stages'] for server in st.production.readiness.get('servers', [])}
+        end_next = {shot['id'] for shot in shots if shot['end_next']}
+        for job in jobs:
+            job['requires_flf'] = job['stage'] in ('animate','continue') and job['shot_id'] in end_next
+        queue = queue_snapshot(jobs, history, insts, st.health, readiness)
         production = st.production.snapshot(shots)
         A = dict(st.assembly, log=list(st.assembly["log"]))
         A["output_url"] = self.media(A.get("output"))
@@ -1434,7 +1470,9 @@ class API:
         S["max_clip_seconds"] = round((st.max_frames() - 1) / float(st.wf_fps()), 2)
         return {"settings": S, "tts_languages": TTS_LANGUAGES, "voice_sample": VOICE_SAMPLE, "shots": shots, "assets": assets, "instances": insts, "workflows": wfs, "starters": starters,
                 "jobs": jobs, "job_counts": counts, "assembly": A, "tools": st.tools(), "music_url": self.media(S.get("music")),
-                "version": VERSION, "platform": sys.platform, "production": production}
+                "version": VERSION, "platform": sys.platform, "production": production, "render_queue": queue,
+                "audio_cues": [dict(c, url=self.media(c['path'])) for c in st.soundtrack.cues()],
+                "audio_exports": [dict(e, url=self.media(e['output'])) for e in st.soundtrack.exports()]}
 
     # ---- settings / servers / workflows / tools
     def settings(self, b):
@@ -1935,6 +1973,12 @@ class API:
             if stage in ("animate", "lipsync") and not st.take_path(s["keyframe_take"]):
                 skipped.append(f"{label}: no approved keyframe")
                 continue
+            if stage == 'lipsync':
+                row = st.wf_row('lipsync')
+                native_s2v = row and any(n.get('class_type') == 'WanSoundImageToVideo' for n in json.loads(row['json']).values())
+                if native_s2v and float(s['duration']) > st.max_frames('lipsync') / st.wf_fps('lipsync'):
+                    skipped.append(f"{label}: S2V preset supports at most {st.max_frames('lipsync') / st.wf_fps('lipsync'):.2f}s. Split the shot or upload a longer S2V workflow.")
+                    continue
             if stage == "lipsync" and not s["audio"]:
                 skipped.append(f"{label}: no dialogue audio")
                 continue
@@ -2001,13 +2045,15 @@ class API:
                 db.x("UPDATE jobs SET status='cancelled', finished=? WHERE id=? AND status IN ('pending','running')", (now, jid))
         elif act == "retry":
             for jid in b["ids"]:
-                db.x("UPDATE jobs SET status='pending', instance_id=NULL, prompt_id=NULL, error=NULL, progress='waiting' "
+                db.x("UPDATE jobs SET status='pending', instance_id=NULL, prompt_id=NULL, started=NULL, finished=NULL, error=NULL, progress='waiting' "
                      "WHERE id=? AND status IN ('error','cancelled')", (jid,))
         elif act == "retry_errors":
-            db.x("UPDATE jobs SET status='pending', instance_id=NULL, prompt_id=NULL, error=NULL, progress='waiting' WHERE status='error'")
+            db.x("UPDATE jobs SET status='pending', instance_id=NULL, prompt_id=NULL, started=NULL, finished=NULL, error=NULL, progress='waiting' WHERE status='error'")
         elif act == "cancel_pending":
             db.x("UPDATE jobs SET status='cancelled', finished=? WHERE status='pending'", (now,))
         elif act == "clear":
+            from render_queue import remember_timings
+            remember_timings(db)
             db.x("DELETE FROM jobs WHERE status IN ('done','cancelled')")
         return {"ok": True}
 
@@ -2015,6 +2061,18 @@ class API:
         val = "" if b.get("clear") else self.st.save_upload(b["file"])
         self.st.db.x("INSERT OR REPLACE INTO settings(key,value) VALUES('music',?)", (val,))
         return {"ok": True}
+
+    def audio_cue_save(self, b):
+        return self.st.soundtrack.save(b)
+
+    def audio_cue_delete(self, b):
+        return self.st.soundtrack.delete(b)
+
+    def audio_discover(self, b):
+        return self.st.soundtrack.discover()
+
+    def audio_remix(self, b):
+        return self.st.soundtrack.remix(b)
 
     def production_check(self, b):
         return dict(self.st.production.inspect(refresh=True), ok=True)
@@ -2049,11 +2107,13 @@ class API:
             if self.st.assembly['running']:
                 return {'ok': False, 'error': 'Already assembling.'}
             self.st.assembly['running'] = True
-            threading.Thread(target=assemble, args=(self.st, b.get("use_music"), b.get("music_volume", 0.25), bool(b.get('preview')), b.get('scene')), daemon=True).start()
+            threading.Thread(target=assemble, args=(self.st, b.get("use_music"), b.get("music_volume", 0.25), bool(b.get('preview')), b.get('scene'), bool(b.get('use_timed', True))), daemon=True).start()
         return {"ok": True}
 
 
 ROUTES = {
+    '/api/audio/cue/save': 'audio_cue_save', '/api/audio/cue/delete': 'audio_cue_delete',
+    '/api/audio/discover': 'audio_discover', '/api/audio/remix': 'audio_remix',
     '/api/production/check': 'production_check', '/api/production/plan': 'production_plan',
     '/api/script/revision': 'script_revision', '/api/regenerate': 'regenerate',
     "/api/settings": "settings", "/api/instance/save": "instance_save", "/api/instance/delete": "instance_delete",

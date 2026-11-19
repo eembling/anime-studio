@@ -34,9 +34,9 @@ wget -c -P upscale_models https://github.com/xinntao/Real-ESRGAN/releases/downlo
 # wget -c -P diffusion_models https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors
 # wget -c -P vae https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan2.2_vae.safetensors
 
-# ===== OPTIONAL: Wan 2.2 S2V lip sync (16.4 GB, slow on a 3060) - see README, Lip sync =====
-# wget -c -P diffusion_models https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_s2v_14B_fp8_scaled.safetensors
-# wget -c -P audio_encoders https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/audio_encoders/wav2vec2_large_english_fp16.safetensors
+# ===== OPTIONAL: Wan 2.2 S2V lip sync =====
+# Run the dedicated server/install_lipsync.sh helper after manually updating ComfyUI.
+# It downloads the S2V model, wav2vec2 audio encoder, shared UMT5 encoder and Wan VAE.
 
 echo
 echo "Check sizes - a file of only a few KB is an error page, not a model:"

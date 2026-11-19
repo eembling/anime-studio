@@ -84,7 +84,7 @@ Add each copy under **Settings → ComfyUI servers** and tick which jobs it take
    - Settings → Project: voice model size (0.6B faster, 1.7B better) and voice language (Auto, English, Japanese, Chinese, Korean, …).
    - You can upload any other voice-copying TTS workflow under Settings → Workflows. The app fills a `LoadAudio` node titled `AUDIO_IN`, the text node titled `PROMPT`, and any `ref_text`, `language` or `instruct` inputs.
    - The shot preview plays the dialogue in sync with the video.
-   - Lip sync is optional: export ComfyUI's Wan2.2 S2V template in API format and upload it under Settings → Workflows. It uses the shot's dialogue track.
+   - Lip sync is optional: use the built-in `wan22_s2v_14b_fp8` starter under Settings → Workflows. Update ComfyUI and download the S2V models first (see **Lip sync setup** below). It creates a talking clip from the chosen keyframe and dialogue audio.
 7. **Upscale and assemble.**
    - Upscaling is optional (RealESRGAN anime → 1080p).
    - **Assemble** makes a 1920×1080 / 24 fps episode with dialogue and music.
@@ -155,3 +155,68 @@ Build the Mac app with `bash build_app.sh`. The bundle includes `production.py` 
 python3 tests/test_production.py
 python3 tests/test_pipeline.py
 ```
+
+## Lip sync setup (v2.8)
+
+The app now supplies a native Wan2.2 S2V API workflow automatically for projects without a lip-sync workflow. Existing custom workflows are preserved. You can select **Settings → Workflows → Lip sync → Use wan22_s2v_14b_fp8**, or upload `workflows/lipsync__wan22_s2v_14b_fp8_api.json`. The Mac submits that workflow directly to ComfyUI; you do not need to save a workflow on the server.
+
+### Manual server update
+
+Stop queued/running renders before maintenance. On the server:
+
+```bash
+cd ~/ComfyUI
+git pull --ff-only
+# Use the SAME Python environment that runs ComfyUI. For a venv named venv:
+./venv/bin/python -m pip install -r requirements.txt
+# If yours is named .venv, use ./.venv/bin/python instead.
+```
+
+If Git reports local changes, preserve them and resolve the update normally. Do not reset the checkout. If ComfyUI runs with another environment, use that environment's Python for the requirements update.
+
+Get Anime Studio's helper from the feature branch containing this change (until it merges):
+
+```bash
+curl -fL --retry 3 https://raw.githubusercontent.com/eembling/anime-studio/codex/native-lipsync/server/install_lipsync.sh -o /tmp/anime-install-lipsync.sh
+COMFY="$HOME/ComfyUI" bash /tmp/anime-install-lipsync.sh
+```
+
+The helper only downloads/resumes model files. It does not update ComfyUI, Python packages, custom nodes or services. Set `COMFY` differently if your checkout is elsewhere. It downloads:
+
+- `models/diffusion_models/wan2.2_s2v_14B_fp8_scaled.safetensors`
+- `models/audio_encoders/wav2vec2_large_english_fp16.safetensors`
+- `models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors` (shared with animation)
+- `models/vae/wan_2.1_vae.safetensors` (shared with animation)
+
+Restart **every** ComfyUI instance assigned lip-sync jobs using your usual launch commands or service manager. No extra custom-node pack is needed for this preset. The native `WanSoundImageToVideo`, `AudioEncoderLoader` and `AudioEncoderEncode` nodes must appear in `/object_info`; an older server missing those nodes needs updating.
+
+### Use it in Anime Studio
+
+1. Reopen the rebuilt app. In Settings → Workflows select the `wan22_s2v_14b_fp8` lip-sync starter if it is not already selected.
+2. In Settings → ComfyUI servers enable `lipsync` on the intended server.
+3. Run Production → Check readiness. Resolve missing model/node messages before queuing.
+4. Choose a keyframe and generate or upload dialogue audio. Start with a short, front-facing character shot, then click **Lip sync**.
+
+This is a 20-step, single-chunk preset at 16 fps and at most 77 frames (4.81 seconds). Short shots render at least 73 frames, then trim to the shot duration at assembly. Longer shots are rejected with instructions to split them or provide a custom extended S2V workflow. S2V creates a new talking video from the reference image; it replaces the selected clip rather than modifying an existing animation. A 14B model is demanding on a 12 GB GPU; render one short test before batching.
+
+Source: [Comfy-Org's S2V template](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/video_wan2_2_14B_s2v.json) and [native S2V node implementation](https://github.com/Comfy-Org/ComfyUI/blob/master/comfy_extras/nodes_wan.py). This preset uses the core single-chunk path with frame output for the app's existing stitching/audio assembly. GPU inference still requires acceptance testing on your server.
+
+## Timed music and sound effects (v2.9)
+
+The Assemble page supports a whole-episode music bed plus individually timed music and sound-effect cues. Add an audio file with **Add music / sound effect**, then set its episode start, source offset, play duration, volume, fades and optional looping. Times accept seconds, `MM:SS` or `HH:MM:SS` with milliseconds. **Use episode playhead** places the cue at the preview player's current time. Cues can overlap; enable/disable them or remove them without changing an existing export. Their timing is absolute and does not move with later shot edits.
+
+Enabled cues are included in new episode builds when **Include enabled cues** is selected. Music and effects are mixed over the dialogue with a peak limiter; cues extending past the episode end are trimmed, and cues starting after the end are skipped. Animatic/scene previews do not apply episode-wide cues.
+
+After rendering, choose a source under **Rendered episode**, click **Preview selected episode**, add/edit cues, then **Export new soundtrack**. This creates a separate MP4 and copies the encoded video stream without rendering shots or using ComfyUI. A companion `.audio.json` records the mix timing/settings. New episode builds retain `_dialogue_master.mp4` beside the output, so repeat exports start from dialogue-only audio and do not accumulate music/effects. Keeping that master uses additional local storage; do not delete it if you want clean soundtrack revisions.
+
+For episodes rendered before this feature, click **Find rendered episodes**. Discovery only scans the current project's `exports` folders. Older files without a clean master retain whatever soundtrack was already embedded; rebuild the episode once to create a dialogue-only master if you need to replace that audio. Existing exports are never overwritten. Audio cue source files remain on disk when removing a cue, preserving in-flight mixes and export references.
+
+No ComfyUI server changes are required. Validation: `python3 tests/test_soundtrack.py` uses FFmpeg to check audible cue placement, looping, dialogue retention, unchanged video packets, clean remixing and duration.
+
+## Render queue (v2.10)
+
+Render queue separates **Active renders**, **Queued renders**, and **Completed renders**, with failed/cancelled jobs in their own section. Active jobs show a progress bar, elapsed time, and estimated remaining time. Queued jobs show their priority/order and estimated start/finish when sufficient history is available. Completed jobs reach 100% only after finishing; the latest 100 are listed. Existing cancel, retry and priority controls remain available.
+
+Progress percentages are estimates from elapsed time and the median of up to 20 recent successful runs of the same stage and draft/full-quality mode, preferring the same server. They are not measured ComfyUI sampler progress. Jobs without history show an indeterminate bar. Overdue jobs stay below 100% and report an uncertain finish time; work waiting behind an unknown/overdue render does not receive a fabricated ETA. Estimates account for enabled compatible servers and parallel work but cannot predict external ComfyUI workloads. Learned timings survive clearing completed jobs.
+
+Focused validation: `python3 tests/test_render_queue.py` and `node --test tests/test_render_queue_ui.cjs`.

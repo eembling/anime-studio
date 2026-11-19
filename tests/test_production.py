@@ -44,6 +44,36 @@ class ProductionTests(unittest.TestCase):
         self.assertTrue(any('model_name' in p for p in checked['problems']))
         self.assertFalse(self.api.generate({'stage': 'voice_design', 'asset_ids': []})['ok'])
 
+    def test_lipsync_preset_populates_inputs_and_pads_short_chunks(self):
+        tpl = app.STARTERS['lipsync']['wan22_s2v_14b_fp8']['wf']
+        self.assertEqual(app.check_workflow(tpl, 'lipsync'), [])
+        wf = app.build_workflow(tpl, 'lipsync', {'prompt': 'Aiko speaks', 'negative': 'blur', 'seed': 42,
+                'width': 848, 'height': 480, 'length': 33, 'prefix': 'test/lipsync',
+                'images': {'start': 'uploaded.png', 'audio': 'spoken.wav'}})
+        self.assertEqual(wf['10']['inputs']['image'], 'uploaded.png')
+        self.assertEqual(wf['11']['inputs']['audio'], 'spoken.wav')
+        self.assertEqual(wf['22']['inputs']['length'], 73)
+        self.assertEqual(wf['22']['inputs']['ref_image'], ['10', 0])
+        self.assertEqual(wf['30']['inputs']['seed'], 42)
+        self.assertEqual(wf['20']['inputs']['text'], 'Aiko speaks')
+
+    def test_lipsync_checks_diffusion_and_audio_encoder_files(self):
+        self.nodes['UNETLoader']['input']['required']['unet_name'] = [['other.safetensors']]
+        self.nodes['AudioEncoderLoader']['input']['required']['audio_encoder_name'] = [['other.safetensors']]
+        r = self.prod.inspect(True)['servers'][0]['stages']['lipsync']
+        self.assertFalse(r['ready'])
+        self.assertTrue(any('wan2.2_s2v' in p for p in r['problems']))
+        self.assertTrue(any('wav2vec2' in p for p in r['problems']))
+
+    def test_lipsync_rejects_long_shots_without_queuing(self):
+        sid = self.shot(duration=8)
+        (Path(self.tmp.name) / 'keyframe.png').write_bytes(b'test')
+        tid = self.st.db.x("INSERT INTO takes(shot_id,stage,path) VALUES(?,'keyframe','keyframe.png')", (sid,))
+        self.api.approve({'take_id': tid})
+        r = self.api.generate({'stage': 'lipsync', 'shot_ids': [sid]})
+        self.assertEqual(r['queued'], 0)
+        self.assertTrue(any('Split the shot' in p for p in r['skipped']))
+
     def test_dispatch_skips_incompatible_first_last_frame_jobs(self):
         sid = self.shot(end_next=True)
         del self.nodes['WanFirstLastFrameToVideo']
