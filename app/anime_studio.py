@@ -1,0 +1,1628 @@
+#!/usr/bin/env python3
+"""
+Anime Studio - produce long-form anime with ComfyUI from one Mac app.
+
+Runs on your Mac (Python 3.9+ standard library only). Talks to ComfyUI over its HTTP API and uses only
+nodes built into ComfyUI, so nothing needs installing on the server - just model files.
+
+  ComfyUI server : character sheets, keyframes (Qwen-Image-Edit 2509), animation (Wan 2.2 I2V,
+                   first/last-frame mode), optional lip sync (Wan S2V) and upscaling
+  This Mac       : script -> shot list, temporary voices (macOS `say`), 16 -> 24 fps conversion,
+                   assembly, DaVinci Resolve export (EDL + per-shot clips)
+
+    python3 anime_studio.py --port 8700 --data ~/Documents/AnimeStudio
+"""
+import argparse
+import base64
+import copy
+import csv
+import glob
+import io
+import json
+import mimetypes
+import os
+import random
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import threading
+import time
+import traceback
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+import wave
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+VERSION = "2.1"
+for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebrew/bin")):
+    if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
+
+JOB_STAGES = ("sheet", "keyframe", "animate", "continue", "lipsync", "upscale")
+WF_KEYS = ("keyframe", "animate", "animate_flf", "lipsync", "upscale")
+TAKE_FIELD = {"keyframe": "keyframe_take", "animate": "clip_take", "lipsync": "clip_take", "upscale": "final_take"}
+IMG_EXT = {".png", ".jpg", ".jpeg", ".webp"}
+VID_EXT = {".mp4", ".webm", ".mkv", ".mov", ".gif"}
+
+
+# ======================================================================================
+# Starter workflows - ComfyUI API format, core nodes only.
+# Node titles mark the slots the app fills: PROMPT NEGATIVE REF1-3 START_IMAGE END_IMAGE
+# VIDEO_IN AUDIO_IN SIZE SAVE. Every seed / noise_seed is randomised per take.
+# ======================================================================================
+def _n(cls, inputs, title=None):
+    d = {"class_type": cls, "inputs": inputs}
+    if title:
+        d["_meta"] = {"title": title}
+    return d
+
+
+def _wan14b(flf=False):
+    wf = {
+        "1": _n("UNETLoader", {"unet_name": "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors", "weight_dtype": "default"}),
+        "2": _n("UNETLoader", {"unet_name": "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors", "weight_dtype": "default"}),
+        "3": _n("CLIPLoader", {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan", "device": "default"}),
+        "4": _n("VAELoader", {"vae_name": "wan_2.1_vae.safetensors"}),
+        "5": _n("LoraLoaderModelOnly", {"model": ["1", 0], "lora_name": "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors", "strength_model": 1.0}),
+        "6": _n("LoraLoaderModelOnly", {"model": ["2", 0], "lora_name": "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors", "strength_model": 1.0}),
+        "7": _n("ModelSamplingSD3", {"model": ["5", 0], "shift": 5.0}),
+        "8": _n("ModelSamplingSD3", {"model": ["6", 0], "shift": 5.0}),
+        "10": _n("LoadImage", {"image": "example.png"}, "START_IMAGE"),
+        "11": _n("CLIPTextEncode", {"clip": ["3", 0], "text": ""}, "PROMPT"),
+        "12": _n("CLIPTextEncode", {"clip": ["3", 0], "text": ""}, "NEGATIVE"),
+        "20": _n("KSamplerAdvanced", {"model": ["7", 0], "positive": ["13", 0], "negative": ["13", 1], "latent_image": ["13", 2],
+                                      "add_noise": "enable", "noise_seed": 1, "steps": 4, "cfg": 1.0, "sampler_name": "euler",
+                                      "scheduler": "simple", "start_at_step": 0, "end_at_step": 2, "return_with_leftover_noise": "enable"}),
+        "21": _n("KSamplerAdvanced", {"model": ["8", 0], "positive": ["13", 0], "negative": ["13", 1], "latent_image": ["20", 0],
+                                      "add_noise": "disable", "noise_seed": 1, "steps": 4, "cfg": 1.0, "sampler_name": "euler",
+                                      "scheduler": "simple", "start_at_step": 2, "end_at_step": 10000, "return_with_leftover_noise": "disable"}),
+        "30": _n("VAEDecode", {"samples": ["21", 0], "vae": ["4", 0]}),
+        "40": _n("SaveImage", {"images": ["30", 0], "filename_prefix": "anime/clip"}, "SAVE"),
+    }
+    common = {"positive": ["11", 0], "negative": ["12", 0], "vae": ["4", 0], "start_image": ["10", 0],
+              "width": 848, "height": 480, "length": 81, "batch_size": 1}
+    if flf:
+        wf["14"] = _n("LoadImage", {"image": "example.png"}, "END_IMAGE")
+        wf["13"] = _n("WanFirstLastFrameToVideo", dict(common, end_image=["14", 0]), "SIZE")
+    else:
+        wf["13"] = _n("WanImageToVideo", common, "SIZE")
+    return wf
+
+
+STARTERS = {
+    "keyframe": {"qwen_edit_2509": {"fps": 0, "max_frames": 0, "wf": {
+        "1": _n("UNETLoader", {"unet_name": "qwen_image_edit_2509_fp8_e4m3fn.safetensors", "weight_dtype": "default"}),
+        "2": _n("CLIPLoader", {"clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "type": "qwen_image", "device": "default"}),
+        "3": _n("VAELoader", {"vae_name": "qwen_image_vae.safetensors"}),
+        "4": _n("LoraLoaderModelOnly", {"model": ["1", 0], "lora_name": "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors", "strength_model": 1.0}),
+        "5": _n("ModelSamplingAuraFlow", {"model": ["4", 0], "shift": 3.0}),
+        "10": _n("LoadImage", {"image": "example.png"}, "REF1"),
+        "11": _n("LoadImage", {"image": "example.png"}, "REF2"),
+        "12": _n("LoadImage", {"image": "example.png"}, "REF3"),
+        "20": _n("TextEncodeQwenImageEditPlus", {"clip": ["2", 0], "vae": ["3", 0], "prompt": "",
+                                                 "image1": ["10", 0], "image2": ["11", 0], "image3": ["12", 0]}, "PROMPT"),
+        "21": _n("TextEncodeQwenImageEditPlus", {"clip": ["2", 0], "vae": ["3", 0], "prompt": ""}, "NEGATIVE"),
+        "30": _n("EmptySD3LatentImage", {"width": 1280, "height": 720, "batch_size": 1}, "SIZE"),
+        "40": _n("KSampler", {"model": ["5", 0], "positive": ["20", 0], "negative": ["21", 0], "latent_image": ["30", 0],
+                              "seed": 1, "steps": 4, "cfg": 1.0, "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}),
+        "50": _n("VAEDecode", {"samples": ["40", 0], "vae": ["3", 0]}),
+        "60": _n("SaveImage", {"images": ["50", 0], "filename_prefix": "anime/keyframe"}, "SAVE"),
+    }}},
+    "animate": {
+        "wan22_14b_fp8": {"fps": 16, "max_frames": 81, "wf": _wan14b()},
+        "wan22_5b_24fps": {"fps": 24, "max_frames": 121, "wf": {
+            "1": _n("UNETLoader", {"unet_name": "wan2.2_ti2v_5B_fp16.safetensors", "weight_dtype": "default"}),
+            "2": _n("CLIPLoader", {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan", "device": "default"}),
+            "3": _n("VAELoader", {"vae_name": "wan2.2_vae.safetensors"}),
+            "4": _n("ModelSamplingSD3", {"model": ["1", 0], "shift": 8.0}),
+            "10": _n("LoadImage", {"image": "example.png"}, "START_IMAGE"),
+            "11": _n("CLIPTextEncode", {"clip": ["2", 0], "text": ""}, "PROMPT"),
+            "12": _n("CLIPTextEncode", {"clip": ["2", 0], "text": ""}, "NEGATIVE"),
+            "13": _n("Wan22ImageToVideoLatent", {"vae": ["3", 0], "start_image": ["10", 0], "width": 832, "height": 480,
+                                                 "length": 121, "batch_size": 1}, "SIZE"),
+            "20": _n("KSampler", {"model": ["4", 0], "positive": ["11", 0], "negative": ["12", 0], "latent_image": ["13", 0],
+                                  "seed": 1, "steps": 20, "cfg": 5.0, "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1.0}),
+            "30": _n("VAEDecode", {"samples": ["20", 0], "vae": ["3", 0]}),
+            "40": _n("SaveImage", {"images": ["30", 0], "filename_prefix": "anime/clip"}, "SAVE"),
+        }},
+    },
+    "animate_flf": {"wan22_14b_fp8_flf": {"fps": 16, "max_frames": 81, "wf": _wan14b(flf=True)}},
+    "upscale": {"realesrgan_anime_1080p": {"fps": 0, "max_frames": 0, "wf": {
+        "1": _n("LoadVideo", {"file": "example.mp4"}, "VIDEO_IN"),
+        "2": _n("GetVideoComponents", {"video": ["1", 0]}),
+        "3": _n("UpscaleModelLoader", {"model_name": "RealESRGAN_x4plus_anime_6B.pth"}),
+        "4": _n("ImageUpscaleWithModel", {"upscale_model": ["3", 0], "image": ["2", 0]}),
+        "5": _n("ImageScale", {"image": ["4", 0], "upscale_method": "lanczos", "width": 1920, "height": 1080, "crop": "center"}),
+        "6": _n("SaveImage", {"images": ["5", 0], "filename_prefix": "anime/upscale"}, "SAVE"),
+    }}},
+    "lipsync": {},   # export ComfyUI's built-in "Wan2.2 S2V" template in API format and upload it
+}
+DEFAULT_STARTER = {"keyframe": "qwen_edit_2509", "animate": "wan22_14b_fp8", "animate_flf": "wan22_14b_fp8_flf",
+                   "upscale": "realesrgan_anime_1080p"}
+
+WAN_NEGATIVE = ("色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，"
+                "残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，"
+                "三条腿，背景人很多，倒着走")
+
+SHEET_PROMPT = ("Character design reference sheet of the character in Picture 1: full-body front view, side view and back view "
+                "standing side by side, plus a row of four facial expressions (neutral, happy, angry, surprised). "
+                "Plain white background, identical outfit, colors and proportions in every view")
+
+DEFAULT_SETTINGS = {
+    "title": "My Anime Episode",
+    "script": "",
+    "style_prompt": "anime style, 2D cel-shaded animation, clean line art, vibrant colors, detailed painted background, cinematic lighting",
+    "keyframe_negative": "",
+    "motion_suffix": "2D anime animation, smooth natural motion, consistent character design",
+    "video_negative": WAN_NEGATIVE,
+    "default_duration": "4",
+    "draft_width": "512", "draft_height": "288", "draft_max_frames": "49",
+    "kf_width": "1280", "kf_height": "720",
+    "sheet_width": "1536", "sheet_height": "864",
+    "vid_width": "848", "vid_height": "480",
+    "out_width": "1920", "out_height": "1080", "out_fps": "24",
+    "default_voice": "",
+    "job_timeout": "3600",
+    "music": "",
+}
+DEFAULT_INSTANCES = [("ComfyUI 172.16.2.70", "http://172.16.2.70:8188", ",".join(JOB_STAGES))]
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS instances(id INTEGER PRIMARY KEY, name TEXT, url TEXT, roles TEXT, enabled INTEGER DEFAULT 1);
+CREATE TABLE IF NOT EXISTS workflows(stage TEXT PRIMARY KEY, json TEXT, name TEXT, fps INTEGER DEFAULT 0, max_frames INTEGER DEFAULT 0, updated REAL);
+CREATE TABLE IF NOT EXISTS assets(id INTEGER PRIMARY KEY, kind TEXT DEFAULT 'character', name TEXT, description TEXT DEFAULT '',
+    image TEXT, voice TEXT DEFAULT '', lora TEXT DEFAULT '', lora_strength REAL DEFAULT 1.0);
+CREATE TABLE IF NOT EXISTS shots(id INTEGER PRIMARY KEY, seq REAL, scene TEXT DEFAULT '', kind TEXT DEFAULT 'motion',
+    asset_ids TEXT DEFAULT '[]', keyframe_prompt TEXT DEFAULT '', motion_prompt TEXT DEFAULT '', camera TEXT DEFAULT '',
+    dialogue TEXT DEFAULT '', duration REAL DEFAULT 4, retime TEXT DEFAULT 'hold', ref_prev INTEGER DEFAULT 0,
+    end_next INTEGER DEFAULT 0, audio TEXT, keyframe_take INTEGER, clip_take INTEGER, final_take INTEGER, notes TEXT DEFAULT '',
+    cont_takes TEXT DEFAULT '[]');
+CREATE TABLE IF NOT EXISTS takes(id INTEGER PRIMARY KEY, shot_id INTEGER, asset_id INTEGER, stage TEXT, path TEXT, fps REAL DEFAULT 0,
+    seed INTEGER, job_id INTEGER, created REAL, frames INTEGER, segment INTEGER, draft INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY, shot_id INTEGER, asset_id INTEGER, stage TEXT, status TEXT, instance_id INTEGER,
+    prompt_id TEXT, seed INTEGER, error TEXT, progress TEXT, created REAL, started REAL, finished REAL, segment INTEGER, draft INTEGER DEFAULT 0);
+"""
+
+
+MIGRATIONS = [  # columns added after v2.0 - existing projects get them on start
+    ("shots", "cont_takes", "TEXT DEFAULT '[]'"), ("takes", "frames", "INTEGER"), ("takes", "segment", "INTEGER"),
+    ("takes", "draft", "INTEGER DEFAULT 0"), ("jobs", "segment", "INTEGER"), ("jobs", "draft", "INTEGER DEFAULT 0"),
+]
+
+# ======================================================================================
+# Storage
+# ======================================================================================
+class DB:
+    def __init__(self, path):
+        self.conn = sqlite3.connect(str(path), check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.lock = threading.RLock()
+        with self.lock:
+            self.conn.executescript(SCHEMA)
+            for table, col, decl in MIGRATIONS:
+                cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+                if col not in cols:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+            self.conn.commit()
+
+    def q(self, sql, args=()):
+        with self.lock:
+            return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
+
+    def one(self, sql, args=()):
+        r = self.q(sql, args)
+        return r[0] if r else None
+
+    def x(self, sql, args=()):
+        """Execute and return lastrowid (for INSERTs)."""
+        with self.lock:
+            cur = self.conn.execute(sql, args)
+            self.conn.commit()
+            return cur.lastrowid
+
+    def u(self, sql, args=()):
+        """Execute and return the number of changed rows."""
+        with self.lock:
+            cur = self.conn.execute(sql, args)
+            self.conn.commit()
+            return cur.rowcount
+
+
+def find_rife():
+    """Optional: rife-ncnn-vulkan (https://github.com/nihui/rife-ncnn-vulkan) for smooth 16->24 fps on the Mac."""
+    hit = shutil.which("rife-ncnn-vulkan")
+    if hit:
+        return Path(hit)
+    for pat in ("~/Applications/rife-ncnn-vulkan*/rife-ncnn-vulkan", "~/Downloads/rife-ncnn-vulkan*/rife-ncnn-vulkan",
+                "~/Documents/AnimeStudio/tools/rife-ncnn-vulkan*/rife-ncnn-vulkan", "/Applications/rife-ncnn-vulkan*/rife-ncnn-vulkan"):
+        for p in glob.glob(os.path.expanduser(pat)):
+            if os.access(p, os.X_OK):
+                return Path(p)
+    return None
+
+
+class Studio:
+    def __init__(self, data_dir):
+        self.data = Path(data_dir).expanduser().resolve()
+        for sub in ("uploads", "shots", "cast", "jobs", "exports", "voices", "cache"):
+            (self.data / sub).mkdir(parents=True, exist_ok=True)
+        self.db = DB(self.data / "studio.db")
+        for k, v in DEFAULT_SETTINGS.items():
+            self.db.x("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
+        if not self.db.one("SELECT id FROM instances"):
+            for name, url, roles in DEFAULT_INSTANCES:
+                self.db.x("INSERT INTO instances(name,url,roles) VALUES(?,?,?)", (name, url, roles))
+        for key, name in DEFAULT_STARTER.items():
+            s = STARTERS[key][name]
+            self.db.x("INSERT OR IGNORE INTO workflows(stage,json,name,fps,max_frames,updated) VALUES(?,?,?,?,?,?)",
+                      (key, json.dumps(s["wf"]), name, s["fps"], s["max_frames"], time.time()))
+        for inst in self.db.q("SELECT id, roles FROM instances"):
+            roles = [r for r in (inst["roles"] or "").split(",") if r]
+            if "animate" in roles and "continue" not in roles:
+                self.db.x("UPDATE instances SET roles=? WHERE id=?", (",".join(roles + ["continue"]), inst["id"]))
+        self.db.x("UPDATE jobs SET status='pending', instance_id=NULL, prompt_id=NULL, progress='requeued after restart' "
+                  "WHERE status='running'")
+        self.health = {}
+        self.assembly = {"running": False, "log": [], "output": None, "folder": None}
+        self.tools_cache = None
+
+    def tools(self, refresh=False):
+        if self.tools_cache is None or refresh:
+            self.tools_cache = {"ffmpeg": shutil.which("ffmpeg"), "say": shutil.which("say"), "rife": str(find_rife() or "") or None,
+                                "open": shutil.which("open")}
+        return self.tools_cache
+
+    def settings(self):
+        return {r["key"]: r["value"] for r in self.db.q("SELECT key,value FROM settings")}
+
+    def rel(self, p):
+        return str(Path(p).resolve().relative_to(self.data))
+
+    def abs(self, rel):
+        return self.data / rel
+
+    def save_upload(self, f, folder="uploads"):
+        name = re.sub(r"[^A-Za-z0-9._-]+", "_", f.get("name") or "file")[-80:]
+        dest = self.data / folder / f"{uuid.uuid4().hex[:10]}_{name}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(base64.b64decode(f["data"].split(",")[-1]))
+        return self.rel(dest)
+
+    def ordered_shots(self):
+        return self.db.q("SELECT * FROM shots ORDER BY seq, id")
+
+    def renumber(self):
+        for i, s in enumerate(self.ordered_shots(), 1):
+            self.db.x("UPDATE shots SET seq=? WHERE id=?", (i, s["id"]))
+
+    def take(self, take_id):
+        t = self.db.one("SELECT * FROM takes WHERE id=?", (take_id,)) if take_id else None
+        return t if t and self.abs(t["path"]).exists() else None
+
+    def take_path(self, take_id):
+        t = self.take(take_id)
+        return self.abs(t["path"]) if t else None
+
+    def wf_row(self, key):
+        return self.db.one("SELECT * FROM workflows WHERE stage=?", (key,))
+
+    def default_duration(self):
+        try:
+            return max(0.5, float(self.settings().get("default_duration") or 4))
+        except ValueError:
+            return 4.0
+
+    def wf_fps(self, key="animate"):
+        return int((self.wf_row(key) or {}).get("fps") or 16)
+
+    def max_frames(self, key="animate", draft=False):
+        maxf = int((self.wf_row(key) or {}).get("max_frames") or 81)
+        if draft:
+            maxf = min(maxf, int(float(self.settings().get("draft_max_frames") or 49)))
+        return ((maxf - 1) // 4) * 4 + 1
+
+    def frames_for(self, duration, key="animate", draft=False):
+        fps = self.wf_fps(key)
+        n = max(5, int(round(float(duration or 4) * fps)) + 1)
+        n = ((n - 1 + 3) // 4) * 4 + 1          # Wan wants 4k+1 frames
+        return min(n, self.max_frames(key, draft))
+
+    def take_frames(self, t):
+        """Frame count of a video take (measured once for takes made before v2.1)."""
+        if t.get("frames"):
+            return int(t["frames"])
+        fps = float(t.get("fps") or 16)
+        n = int(round(media_seconds(self.abs(t["path"])) * fps)) or 1
+        self.db.x("UPDATE takes SET frames=? WHERE id=?", (n, t["id"]))
+        return n
+
+    def chain(self, shot):
+        """The shot's approved animation: main clip followed by its continuation segments."""
+        clip = self.take(shot["clip_take"])
+        if not clip:
+            return []
+        out = [clip]
+        for tid in json.loads(shot.get("cont_takes") or "[]"):
+            t = self.take(tid)
+            if not t:
+                break
+            out.append(t)
+        return out
+
+    def chain_seconds(self, chain):
+        """Seconds of motion in a chain (continuations repeat the previous last frame, so drop one frame each)."""
+        total = 0.0
+        for i, t in enumerate(chain):
+            n = self.take_frames(t) - (1 if i else 0)
+            total += max(0, n) / float(t.get("fps") or 16)
+        return total
+
+    def last_frame(self, path):
+        out = self.data / "cache" / f"last_{Path(path).stem}.png"
+        if not out.exists() or out.stat().st_mtime < Path(path).stat().st_mtime:
+            ffmpeg(["-sseof", "-1", "-i", str(path), "-update", "1", "-q:v", "1", str(out)])
+        return out
+
+    def neighbor(self, shot, direction):
+        op, order = (">", "ASC") if direction > 0 else ("<", "DESC")
+        return self.db.one(f"SELECT * FROM shots WHERE seq {op} ? ORDER BY seq {order} LIMIT 1", (shot["seq"],))
+
+
+# ======================================================================================
+# ComfyUI client (direct - bypass any proxy, the server is on your LAN)
+# ======================================================================================
+_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def http(method, url, data=None, headers=None, timeout=30):
+    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+    try:
+        with _opener.open(req, timeout=timeout) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"HTTP {e.code} from {url}: {e.read().decode('utf-8', 'replace')[:3000]}") from None
+
+
+def http_json(method, url, obj=None, timeout=30):
+    data = json.dumps(obj).encode() if obj is not None else None
+    raw = http(method, url, data, {"Content-Type": "application/json"} if data else {}, timeout)
+    return json.loads(raw) if raw else None
+
+
+def comfy_upload(base, path, name):
+    """Upload any input file (image, video, audio) to ComfyUI's input folder root."""
+    b = uuid.uuid4().hex
+    body = (f'--{b}\r\nContent-Disposition: form-data; name="overwrite"\r\n\r\ntrue\r\n'
+            f'--{b}\r\nContent-Disposition: form-data; name="type"\r\n\r\ninput\r\n'
+            f'--{b}\r\nContent-Disposition: form-data; name="image"; filename="{name}"\r\n'
+            f'Content-Type: application/octet-stream\r\n\r\n').encode() + Path(path).read_bytes() + f"\r\n--{b}--\r\n".encode()
+    j = json.loads(http("POST", base + "/upload/image", body, {"Content-Type": f"multipart/form-data; boundary={b}"}, 600))
+    return f"{j['subfolder']}/{j['name']}" if j.get("subfolder") else j["name"]
+
+
+# ======================================================================================
+# Workflow slots
+# ======================================================================================
+TEXT_ENCODERS = {"CLIPTextEncode", "TextEncodeQwenImageEditPlus", "TextEncodeQwenImageEdit", "TextEncodeQwenImage21"}
+SAVE_NODES = {"SaveImage", "SaveVideo", "VHS_VideoCombine", "SaveWEBM", "SaveAnimatedWEBP", "SaveAnimatedPNG"}
+VIDEO_LOADERS = {"LoadVideo": "file", "VHS_LoadVideo": "video"}
+MODEL_CONSUMERS = {"KSampler", "KSamplerAdvanced", "SamplerCustom", "BasicGuider", "CFGGuider", "DualCFGGuider"}
+
+
+def _nid(k):
+    try:
+        return (0, int(k))
+    except ValueError:
+        return (1, str(k))
+
+
+def _title(n):
+    return ((n.get("_meta") or {}).get("title") or "").strip()
+
+
+def _tagged(wf, tag):
+    return sorted([k for k, n in wf.items() if _title(n).upper() == tag], key=_nid)
+
+
+def detect_slots(wf, key):
+    keys = sorted(wf.keys(), key=_nid)
+    cls = lambda k: wf[k].get("class_type") or ""
+    ins = lambda k: wf[k].get("inputs", {})
+    encs = [k for k in keys if cls(k) in TEXT_ENCODERS]
+    loads = [k for k in keys if cls(k) == "LoadImage"]
+    m = {"prompt": (_tagged(wf, "PROMPT") or [k for k in encs if "neg" not in _title(wf[k]).lower()])[:1],
+         "negative": (_tagged(wf, "NEGATIVE") or [k for k in encs if "neg" in _title(wf[k]).lower()])[:1],
+         "save": [k for k in keys if cls(k) in SAVE_NODES],
+         "seeds": [[k, f] for k in keys for f in ("seed", "noise_seed") if isinstance(ins(k).get(f), int)],
+         "refs": [], "start_image": [], "end_image": [], "video_in": [], "audio_in": [], "size": []}
+    if key == "keyframe":
+        m["refs"] = [k for i in (1, 2, 3) for k in _tagged(wf, f"REF{i}")] or loads[:3]
+        m["size"] = _tagged(wf, "SIZE") or [k for k in keys if "Latent" in cls(k) and {"width", "height"} <= set(ins(k))][:1]
+    elif key in ("animate", "animate_flf", "lipsync"):
+        m["start_image"] = (_tagged(wf, "START_IMAGE") or loads)[:1]
+        if key == "animate_flf":
+            m["end_image"] = (_tagged(wf, "END_IMAGE") or [k for k in loads if k not in m["start_image"]])[:1]
+        if key == "lipsync":
+            m["audio_in"] = (_tagged(wf, "AUDIO_IN") or [k for k in keys if cls(k) == "LoadAudio"])[:1]
+        m["size"] = _tagged(wf, "SIZE") or [k for k in keys if {"width", "height", "length"} <= set(ins(k))][:1]
+    elif key == "upscale":
+        m["video_in"] = (_tagged(wf, "VIDEO_IN") or [k for k in keys if cls(k) in VIDEO_LOADERS])[:1]
+    return m
+
+
+def check_workflow(wf, key):
+    if not isinstance(wf, dict) or not wf:
+        return ["Not a workflow."]
+    if "nodes" in wf and "links" in wf:
+        return ["This is the normal (UI) format. In ComfyUI use Workflow > Export (API) and upload that file."]
+    if any(not isinstance(n, dict) or "class_type" not in n for n in wf.values()):
+        return ["Some entries have no class_type - not an API-format workflow."]
+    m, p = detect_slots(wf, key), []
+    if key in ("keyframe", "animate", "animate_flf", "lipsync") and not m["prompt"]:
+        p.append("No prompt node (title a text-encode node PROMPT).")
+    if key in ("animate", "animate_flf", "lipsync") and not m["start_image"]:
+        p.append("No start image (title a Load Image node START_IMAGE).")
+    if key == "animate_flf" and not m["end_image"]:
+        p.append("No end image (title a Load Image node END_IMAGE).")
+    if key == "lipsync" and not m["audio_in"]:
+        p.append("No audio input (Load Audio node, title AUDIO_IN).")
+    if key == "upscale" and not m["video_in"]:
+        p.append("No video input (Load Video node, title VIDEO_IN).")
+    if not m["save"]:
+        p.append("No save node (Save Image / Save Video).")
+    return p
+
+
+def _remove_node(wf, key):
+    wf.pop(key, None)
+    for n in wf.values():
+        inp = n.get("inputs", {})
+        for name, v in list(inp.items()):
+            if isinstance(v, list) and len(v) == 2 and str(v[0]) == str(key):
+                del inp[name]
+
+
+def _set_text(node, text):
+    inp = node["inputs"]
+    for f in ("prompt", "text", "text_g"):
+        if f in inp and not isinstance(inp[f], list):
+            inp[f] = text
+            return
+    inp["text"] = text
+
+
+def inject_loras(wf, loras):
+    """Insert LoraLoaderModelOnly nodes between the model source and every sampler/guider."""
+    loras = [(n, s) for n, s in loras if n]
+    if not loras:
+        return
+    next_id = max([int(k) for k in wf if str(k).isdigit()] + [0]) + 1000
+    chains = {}
+    for k in list(wf):
+        n = wf[k]
+        src = n.get("inputs", {}).get("model")
+        if n.get("class_type") in MODEL_CONSUMERS and isinstance(src, list):
+            sk = (str(src[0]), src[1])
+            if sk not in chains:
+                cur = src
+                for name, strength in loras:
+                    nid = str(next_id)
+                    next_id += 1
+                    wf[nid] = _n("LoraLoaderModelOnly", {"model": cur, "lora_name": name, "strength_model": float(strength)})
+                    cur = [nid, 0]
+                chains[sk] = cur
+            n["inputs"]["model"] = chains[sk]
+
+
+def build_workflow(template, key, p):
+    wf = copy.deepcopy(template)
+    m = detect_slots(wf, key)
+    for k in m["prompt"]:
+        _set_text(wf[k], p.get("prompt", ""))
+    if p.get("negative") is not None:
+        for k in m["negative"]:
+            _set_text(wf[k], p["negative"])
+    imgs = p.get("images", {})
+    if key == "keyframe":
+        for i, k in enumerate(m["refs"]):
+            if imgs.get(f"ref{i + 1}"):
+                wf[k]["inputs"]["image"] = imgs[f"ref{i + 1}"]
+            else:
+                _remove_node(wf, k)
+        inject_loras(wf, p.get("loras", []))
+    for slot, field_name in (("start_image", "start"), ("end_image", "end")):
+        for k in m[slot]:
+            wf[k]["inputs"]["image"] = imgs[field_name]
+    for k in m["audio_in"]:
+        wf[k]["inputs"]["audio"] = imgs["audio"]
+    for k in m["video_in"]:
+        wf[k]["inputs"][VIDEO_LOADERS.get(wf[k]["class_type"], "file")] = imgs["video"]
+    for k, f in m["seeds"]:
+        if k in wf:
+            wf[k]["inputs"][f] = p["seed"]
+    for k in m["size"]:
+        inp, step = wf[k]["inputs"], 32 if wf[k]["class_type"] == "Wan22ImageToVideoLatent" else 16
+        for f in ("width", "height", "length"):
+            if p.get(f) and f in inp and not isinstance(inp[f], list):
+                v = int(p[f])
+                inp[f] = max(step, int(round(v / step)) * step) if f != "length" else v
+    for k in m["save"]:
+        if "filename_prefix" in wf[k]["inputs"]:
+            wf[k]["inputs"]["filename_prefix"] = p["prefix"]
+    return wf
+
+
+def collect_outputs(entry):
+    files, outs = [], entry.get("outputs", {})
+    for k in sorted(outs, key=_nid):
+        for v in outs[k].values():
+            if isinstance(v, list):
+                files += [f for f in v if isinstance(f, dict) and f.get("filename")]
+    real = [f for f in files if f.get("type", "output") == "output"]
+    return real or files
+
+
+# ======================================================================================
+# Media helpers (run on the Mac)
+# ======================================================================================
+def ffmpeg(args):
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"] + args, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError("ffmpeg: " + (r.stderr or "")[-1500:])
+
+
+def stitch_frames(frames, fps, out):
+    tmp = Path(str(out) + ".frames")
+    tmp.mkdir(exist_ok=True)
+    for i, f in enumerate(sorted(frames, key=lambda p: p.name), 1):
+        f.rename(tmp / f"f_{i:06d}{f.suffix.lower()}")
+    ext = sorted(tmp.iterdir())[0].suffix
+    ffmpeg(["-framerate", str(fps), "-i", str(tmp / f"f_%06d{ext}"), "-c:v", "libx264", "-crf", "14",
+            "-preset", "medium", "-pix_fmt", "yuv420p", str(out)])
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def media_seconds(path):
+    """Duration of any audio/video file (wav natively, everything else via ffmpeg)."""
+    try:
+        with wave.open(str(path)) as w:
+            return w.getnframes() / float(w.getframerate())
+    except Exception:
+        pass
+    if not shutil.which("ffmpeg"):
+        return 0.0
+    err = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(path)], capture_output=True, text=True).stderr
+    m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", err)
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else 0.0
+
+
+def retime(st, take, mode, out_fps, log=None):
+    """Return a file at out_fps. hold = repeat frames, blend = ffmpeg motion interpolation, rife = rife-ncnn-vulkan."""
+    src, fps = st.abs(take["path"]), float(take["fps"] or 0)
+    if not fps or abs(fps - out_fps) < 0.01:
+        return src
+    rife = st.tools().get("rife")
+    if mode == "rife" and not rife:
+        mode = "blend"
+        if log is not None:
+            log.append("  (rife-ncnn-vulkan not found - using blend)")
+    dst = st.data / "cache" / f"take{take['id']}_{mode}{out_fps}.mp4"
+    if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
+        return dst
+    enc = ["-c:v", "libx264", "-crf", "14", "-preset", "medium", "-pix_fmt", "yuv420p", "-an"]
+    if mode == "hold":
+        ffmpeg(["-i", str(src), "-vf", f"fps={out_fps}"] + enc + [str(dst)])
+    elif mode == "blend":
+        ffmpeg(["-i", str(src), "-vf", f"minterpolate=fps={out_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"] + enc + [str(dst)])
+    else:
+        work = st.data / "cache" / f"rife_{take['id']}"
+        shutil.rmtree(work, ignore_errors=True)
+        (work / "in").mkdir(parents=True)
+        (work / "out").mkdir()
+        ffmpeg(["-i", str(src), str(work / "in" / "%08d.png")])
+        count = len(list((work / "in").glob("*.png")))
+        target = max(2, int(round(count * out_fps / fps)))
+        rp = Path(rife)
+        model = next((m for m in ("rife-v4.6", "rife-v4") if (rp.parent / m).is_dir()), None)
+        cmd = [str(rp), "-i", str(work / "in"), "-o", str(work / "out"), "-n", str(target)] + (["-m", model] if model else [])
+        r = subprocess.run(cmd, cwd=str(rp.parent), capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError("rife-ncnn-vulkan failed: " + (r.stderr or r.stdout)[-800:])
+        frames = sorted((work / "out").glob("*.png"))
+        stitch_frames(frames, out_fps, dst)
+        shutil.rmtree(work, ignore_errors=True)
+    return dst
+
+
+def list_voices():
+    if not shutil.which("say"):
+        return []
+    out = subprocess.run(["say", "-v", "?"], capture_output=True, text=True).stdout
+    voices = []
+    for line in out.splitlines():
+        m = re.match(r"^(.+?)\s{2,}([a-z]{2,3}[_-][A-Za-z0-9]+)", line)
+        if m:
+            voices.append({"name": m.group(1).strip(), "lang": m.group(2)})
+    return voices
+
+
+# ======================================================================================
+# Job worker: one job at a time per ComfyUI server, matched by role
+# ======================================================================================
+class Worker(threading.Thread):
+    daemon = True
+
+    def __init__(self, st):
+        super().__init__()
+        self.st, self.last_health = st, 0
+
+    def run(self):
+        while True:
+            try:
+                if time.time() - self.last_health > 15:
+                    self.refresh_health()
+                self.dispatch()
+            except Exception:
+                traceback.print_exc()
+            time.sleep(2)
+
+    def refresh_health(self):
+        self.last_health = time.time()
+        for inst in self.st.db.q("SELECT * FROM instances"):
+            threading.Thread(target=self.check, args=(inst,), daemon=True).start()
+
+    def check(self, inst):
+        try:
+            j = http_json("GET", inst["url"].rstrip("/") + "/system_stats", timeout=4)
+            parts = []
+            for d in j.get("devices", []):
+                nm = re.sub(r"^cuda:\d+\s*", "", d.get("name", "?")).split(" : ")[0]
+                parts.append(f"{nm} - {d.get('vram_free', 0) / 2**30:.1f} of {d.get('vram_total', 0) / 2**30:.1f} GB free")
+            self.st.health[inst["id"]] = {"ok": True, "info": "; ".join(parts), "t": time.time()}
+        except Exception as e:
+            self.st.health[inst["id"]] = {"ok": False, "info": str(e)[:200], "t": time.time()}
+
+    def dispatch(self):
+        db = self.st.db
+        busy = {r["instance_id"] for r in db.q("SELECT instance_id FROM jobs WHERE status='running'")}
+        for inst in db.q("SELECT * FROM instances WHERE enabled=1"):
+            if inst["id"] in busy or not self.st.health.get(inst["id"], {}).get("ok"):
+                continue
+            roles = [r.strip() for r in (inst["roles"] or "").split(",") if r.strip() in JOB_STAGES]
+            if not roles:
+                continue
+            job = db.one(f"SELECT * FROM jobs WHERE status='pending' AND stage IN ({','.join('?' * len(roles))}) ORDER BY id LIMIT 1", roles)
+            if job and db.u("UPDATE jobs SET status='running', instance_id=?, started=?, progress='starting', error=NULL "
+                            "WHERE id=? AND status='pending'", (inst["id"], time.time(), job["id"])):
+                busy.add(inst["id"])
+                threading.Thread(target=self.execute, args=(job["id"], inst), daemon=True).start()
+
+    def _progress(self, job_id, text):
+        self.st.db.x("UPDATE jobs SET progress=? WHERE id=? AND status='running'", (text, job_id))
+
+    def compose(self, job):
+        """Returns (workflow_key, params)."""
+        st, S = self.st, self.st.settings()
+        stage = job["stage"]
+        p = {"seed": job["seed"], "prefix": f"anime/j{job['id']:06d}_{stage}", "files": {}}
+        if stage == "sheet":
+            a = st.db.one("SELECT * FROM assets WHERE id=?", (job["asset_id"],))
+            if not a or not a["image"] or not st.abs(a["image"]).exists():
+                raise RuntimeError("Character needs a reference image first.")
+            desc = f" ({a['description']})" if a["description"] else ""
+            p["prompt"] = f"{SHEET_PROMPT}. Picture 1 is {a['name']}{desc}. {S.get('style_prompt', '')}"
+            p["negative"] = S.get("keyframe_negative", "")
+            p["files"] = {"ref1": st.abs(a["image"])}
+            p["loras"] = [(a["lora"], a["lora_strength"])]
+            p["width"], p["height"] = S["sheet_width"], S["sheet_height"]
+            return "keyframe", p
+        shot = st.db.one("SELECT * FROM shots WHERE id=?", (job["shot_id"],))
+        if not shot:
+            raise RuntimeError("Shot was deleted.")
+        if stage == "keyframe":
+            ids = json.loads(shot["asset_ids"] or "[]")
+            assets = [a for a in (st.db.one("SELECT * FROM assets WHERE id=?", (i,)) for i in ids) if a]
+            lines, refs, loras = [], [], []
+            for a in assets:
+                if a["lora"]:
+                    loras.append((a["lora"], a["lora_strength"]))
+                if a["image"] and st.abs(a["image"]).exists() and len(refs) < 3:
+                    refs.append(st.abs(a["image"]))
+                    lines.append(f"Picture {len(refs)} is {a['name']}" + (f" ({a['description']})" if a["description"] else ""))
+                elif a["description"]:
+                    lines.append(f"{a['name']}: {a['description']}")
+            if shot["ref_prev"] and len(refs) < 3:
+                prev = st.neighbor(shot, -1)
+                pp = st.take_path(prev["keyframe_take"]) if prev else None
+                if pp:
+                    refs.append(pp)
+                    lines.append(f"Picture {len(refs)} is the previous shot: keep the same location, lighting and outfits")
+            parts = [". ".join(lines), shot["keyframe_prompt"], shot["camera"], S.get("style_prompt", "")]
+            p["prompt"] = ". ".join(x.strip().rstrip(".") for x in parts if x and x.strip()) + "."
+            p["negative"] = S.get("keyframe_negative", "")
+            p["files"] = {f"ref{i + 1}": r for i, r in enumerate(refs)}
+            p["loras"] = loras[:4]
+            p["width"], p["height"] = S["kf_width"], S["kf_height"]
+            return "keyframe", p
+        kf = st.take_path(shot["keyframe_take"])
+        text = ", ".join(x for x in (shot["motion_prompt"] or shot["keyframe_prompt"], shot["camera"], S.get("motion_suffix", "")) if x)
+        draft = bool(job.get("draft"))
+        size = (S["draft_width"], S["draft_height"]) if draft else (S["vid_width"], S["vid_height"])
+
+        def end_on_next(seconds_needed, key_now):
+            """Use first-last-frame mode only when this clip reaches the end of the shot."""
+            if not shot["end_next"]:
+                return key_now
+            length = st.frames_for(seconds_needed, "animate_flf", draft)
+            if (length - 1) / float(st.wf_fps("animate_flf")) + 0.25 < seconds_needed:
+                return key_now     # more segments follow - the last one will land on the next keyframe
+            nxt = st.neighbor(shot, 1)
+            end = st.take_path(nxt["keyframe_take"]) if nxt else None
+            if not end:
+                raise RuntimeError("'End on the next shot' is on, but the next shot has no chosen keyframe.")
+            p["files"]["end"] = end
+            return "animate_flf"
+
+        if stage in ("animate", "lipsync"):
+            if not kf:
+                raise RuntimeError("Shot has no approved keyframe.")
+            key = stage
+            p["files"] = {"start": kf}
+            if stage == "animate":
+                key = end_on_next(float(shot["duration"]), key)
+            if stage == "lipsync":
+                if not shot["audio"] or not st.abs(shot["audio"]).exists():
+                    raise RuntimeError("Lip sync needs dialogue audio on the shot.")
+                p["files"]["audio"] = st.abs(shot["audio"])
+            p["prompt"], p["negative"] = text, S.get("video_negative", "")
+            p["width"], p["height"] = size
+            p["length"] = st.frames_for(shot["duration"], key, draft)
+            return key, p
+        if stage == "continue":
+            seg = int(job.get("segment") or 0)
+            chain = st.chain(shot)
+            if len(chain) < seg + 1:
+                raise RuntimeError("Choose a take for the previous part of this shot first.")
+            chain = chain[:seg + 1]
+            covered = st.chain_seconds(chain)
+            remaining = float(shot["duration"]) - covered
+            if remaining < 0.25:
+                raise RuntimeError(f"Already animated: {covered:.1f} of {float(shot['duration']):.1f} s. Make the shot longer to continue it.")
+            p["files"] = {"start": st.last_frame(st.abs(chain[-1]["path"]))}
+            key = end_on_next(remaining, "animate")
+            # +1 frame: the first frame repeats the previous segment's last frame and is dropped at assembly
+            p["length"] = st.frames_for(remaining + 1.0 / st.wf_fps(key), key, draft)
+            p["prompt"] = ", ".join(x for x in ("the motion continues seamlessly from the first frame", text) if x)
+            p["negative"] = S.get("video_negative", "")
+            p["width"], p["height"] = size
+            return key, p
+        if stage == "upscale":
+            clip = st.take_path(shot["clip_take"])
+            if not clip:
+                raise RuntimeError("Shot has no approved clip.")
+            p["files"] = {"video": clip}
+            return "upscale", p
+        raise RuntimeError(f"Unknown stage {stage}")
+
+    def execute(self, job_id, inst):
+        st, db = self.st, self.st.db
+        base, pid = inst["url"].rstrip("/"), None
+        try:
+            job = db.one("SELECT * FROM jobs WHERE id=?", (job_id,))
+            key, p = self.compose(job)
+            row = st.wf_row(key)
+            if not row:
+                raise RuntimeError(f"No '{key}' workflow set. Upload one in Settings > Workflows.")
+            tpl = json.loads(row["json"])
+            problems = check_workflow(tpl, key)
+            if problems:
+                raise RuntimeError(f"'{key}' workflow: " + " ".join(problems))
+            self._progress(job_id, "uploading inputs")
+            p["images"] = {slot: comfy_upload(base, path, f"anime_j{job_id}_{slot}{Path(path).suffix.lower()}")
+                           for slot, path in p["files"].items()}
+            wf = build_workflow(tpl, key, p)
+            res = http_json("POST", base + "/prompt", {"prompt": wf, "client_id": f"anime-studio-{job_id}"}, 60)
+            if res.get("node_errors"):
+                raise RuntimeError("ComfyUI rejected the workflow: " + json.dumps(res["node_errors"])[:2500])
+            pid = res["prompt_id"]
+            db.x("UPDATE jobs SET prompt_id=?, progress='queued on ComfyUI' WHERE id=?", (pid, job_id))
+            t0, timeout, fails, entry = time.time(), int(float(st.settings().get("job_timeout") or 3600)), 0, None
+            while True:
+                if (db.one("SELECT status FROM jobs WHERE id=?", (job_id,)) or {}).get("status") != "running":
+                    self._interrupt(base, pid)
+                    return
+                try:
+                    hist = http_json("GET", f"{base}/history/{pid}", timeout=30)
+                    fails = 0
+                except Exception:
+                    fails += 1
+                    if fails > 30:
+                        raise
+                    hist = {}
+                if pid in hist:
+                    entry = hist[pid]
+                    s = entry.get("status", {})
+                    if s.get("completed") or s.get("status_str") in ("success", "error"):
+                        break
+                if time.time() - t0 > timeout:
+                    self._interrupt(base, pid)
+                    raise RuntimeError(f"Timed out after {timeout}s")
+                self._progress(job_id, f"rendering {int(time.time() - t0)}s")
+                time.sleep(2)
+            if entry.get("status", {}).get("status_str") == "error":
+                msgs = [m for m in entry["status"].get("messages", []) if m and m[0] == "execution_error"]
+                raise RuntimeError("ComfyUI error: " + json.dumps(msgs[-1][1] if msgs else entry["status"])[:2500])
+            files = collect_outputs(entry)
+            if not files:
+                raise RuntimeError("Workflow finished but saved no files.")
+            self._progress(job_id, f"downloading {len(files)} file(s)")
+            out_dir = st.data / "jobs" / str(job_id)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            local = []
+            for i, f in enumerate(files):
+                q = urllib.parse.urlencode({"filename": f["filename"], "subfolder": f.get("subfolder", ""), "type": f.get("type", "output")})
+                dest = out_dir / f"{i:06d}_{Path(f['filename']).name}"
+                dest.write_bytes(http("GET", f"{base}/view?{q}", timeout=300))
+                local.append(dest)
+            self.finish(job, key, local)
+            db.x("UPDATE jobs SET status='done', finished=?, progress='done' WHERE id=? AND status='running'", (time.time(), job_id))
+            shutil.rmtree(out_dir, ignore_errors=True)
+        except Exception as e:
+            traceback.print_exc()
+            db.x("UPDATE jobs SET status='error', error=?, finished=?, progress='' WHERE id=? AND status='running'",
+                 (str(e)[:4000], time.time(), job_id))
+
+    def _interrupt(self, base, pid):
+        if not pid:
+            return
+        try:
+            http_json("POST", base + "/queue", {"delete": [pid]}, 10)
+            q = http_json("GET", base + "/queue", timeout=10)
+            if any(item[1] == pid for item in q.get("queue_running", [])):
+                http_json("POST", base + "/interrupt", {}, 10)
+        except Exception:
+            pass
+
+    def finish(self, job, key, local):
+        st, stage = self.st, job["stage"]
+        imgs = [f for f in local if f.suffix.lower() in IMG_EXT]
+        vids = [f for f in local if f.suffix.lower() in VID_EXT]
+        if stage == "sheet":
+            folder = st.data / "cast" / f"{job['asset_id']:04d}"
+        else:
+            folder = st.data / "shots" / f"{job['shot_id']:04d}"
+        folder.mkdir(parents=True, exist_ok=True)
+        made = []
+        if stage in ("sheet", "keyframe"):
+            for i, f in enumerate(imgs or local):
+                dest = folder / f"{stage}_j{job['id']}_{i}{f.suffix.lower()}"
+                shutil.move(str(f), dest)
+                made.append((dest, 0))
+        else:
+            if stage == "upscale":
+                src = st.db.one("SELECT t.fps FROM takes t JOIN shots s ON s.clip_take=t.id WHERE s.id=?", (job["shot_id"],))
+                fps = (src or {}).get("fps") or 16
+            else:
+                fps = st.wf_fps(key)
+            dest = folder / f"{stage}_j{job['id']}.mp4"
+            if vids:
+                dest = dest.with_suffix(vids[0].suffix.lower())
+                shutil.move(str(vids[0]), dest)
+            else:
+                if not st.tools()["ffmpeg"]:
+                    raise RuntimeError("ffmpeg is needed on this Mac to turn frames into video: brew install ffmpeg")
+                self._progress(job["id"], f"stitching {len(imgs)} frames at {fps} fps")
+                stitch_frames(imgs, fps, dest)
+            made.append((dest, fps))
+        nframes = len(imgs) if imgs and not vids else None
+        for path, fps in made:
+            tid = st.db.x("INSERT INTO takes(shot_id,asset_id,stage,path,fps,seed,job_id,created,frames,segment,draft) "
+                          "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                          (job["shot_id"], job["asset_id"], stage, st.rel(path), fps, job["seed"], job["id"], time.time(),
+                           nframes if fps else None, job.get("segment"), 1 if job.get("draft") else 0))
+            if stage in TAKE_FIELD:
+                f = TAKE_FIELD[stage]
+                st.db.x(f"UPDATE shots SET {f}=? WHERE id=? AND {f} IS NULL", (tid, job["shot_id"]))
+            elif stage == "continue":
+                shot = st.db.one("SELECT * FROM shots WHERE id=?", (job["shot_id"],))
+                cont = [t["id"] for t in st.chain(shot)[1:]] if shot else []
+                if shot and len(cont) == int(job.get("segment") or 0):
+                    st.db.x("UPDATE shots SET cont_takes=? WHERE id=?", (json.dumps(cont + [tid]), shot["id"]))
+
+
+# ======================================================================================
+# Assembly + DaVinci Resolve export (on the Mac)
+# ======================================================================================
+def tc(frames, fps, hour=0):
+    f = int(frames)
+    return f"{hour + f // (fps * 3600):02d}:{f // (fps * 60) % 60:02d}:{f // fps % 60:02d}:{f % fps:02d}"
+
+
+def assemble(st, use_music, music_volume):
+    A = st.assembly
+    A.update(running=True, log=[], output=None, folder=None)
+    log = A["log"]
+    try:
+        if not st.tools(refresh=True)["ffmpeg"]:
+            raise RuntimeError("ffmpeg not found. Install it with: brew install ffmpeg")
+        S = st.settings()
+        W, H, FPS = int(S["out_width"]), int(S["out_height"]), int(S["out_fps"])
+        shots = st.ordered_shots()
+        if not shots:
+            raise RuntimeError("No shots yet.")
+        name = re.sub(r"[^A-Za-z0-9_-]+", "_", S.get("title") or "episode").strip("_") or "episode"
+        out = st.data / "exports" / f"{name}_{time.strftime('%Y%m%d_%H%M%S')}"
+        (out / "shots").mkdir(parents=True)
+        venc = ["-c:v", "libx264", "-crf", "16", "-preset", "medium", "-pix_fmt", "yuv420p", "-r", str(FPS)]
+        aenc = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
+        fill = f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},setsar=1"
+        segs, edl, rec = [], [f"TITLE: {name}", "FCM: NON-DROP FRAME", ""], 0
+        for i, s in enumerate(shots, 1):
+            dur = max(0.5, float(s["duration"] or 4))
+            nfr = int(round(dur * FPS))
+            seg = out / "shots" / f"{i:04d}_shot.mp4"
+            chain = st.chain(s)
+            take = st.take(s["final_take"]) or (chain[0] if chain else None)
+            if take and s["kind"] == "still" and take["stage"] not in ("lipsync", "upscale"):
+                take, chain = None, []   # still shots use the keyframe pan unless they were lip-synced
+            kf = st.take_path(s["keyframe_take"])
+            audio = st.abs(s["audio"]) if s["audio"] and st.abs(s["audio"]).exists() else None
+            ain = ["-i", str(audio)] if audio else ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
+            if take:
+                mode = s["retime"] or "hold"
+                parts = [retime(st, take, mode, FPS, log)]
+                for t in chain[1:]:
+                    trimmed = st.data / "cache" / f"take{t['id']}_trim.mp4"
+                    if not trimmed.exists():
+                        ffmpeg(["-i", str(st.abs(t["path"])), "-vf", "trim=start_frame=1,setpts=PTS-STARTPTS",
+                                "-c:v", "libx264", "-crf", "14", "-pix_fmt", "yuv420p", "-an", str(trimmed)])
+                    parts.append(retime(st, dict(t, id=f"{t['id']}t", path=st.rel(trimmed)), mode, FPS, log))
+                vin = sum((["-i", str(x)] for x in parts), [])
+                n = len(parts)
+                vf = "".join(f"[{k}:v]fps={FPS},{fill}[p{k}];" for k in range(n))
+                vf += "".join(f"[p{k}]" for k in range(n)) + f"concat=n={n}:v=1:a=0,tpad=stop_mode=clone:stop_duration={dur}[v]"
+                motion = st.chain_seconds(chain) if chain else 0
+                how = f"clip ({take['stage']}{' + ' + str(n - 1) + ' continued' if n > 1 else ''}, {mode})"
+                if any(t.get("draft") for t in [take] + chain):
+                    how += " DRAFT"
+                if motion and dur - motion > 0.25:
+                    how += f", last frame held {dur - motion:.1f}s"
+            elif kf:
+                how, vin = "still pan", ["-loop", "1", "-framerate", str(FPS), "-i", str(kf)]
+                vf = (f"[0:v]scale={W * 2}:{H * 2}:force_original_aspect_ratio=increase,crop={W * 2}:{H * 2},"
+                      f"zoompan=z='min(1+0.0010*on,1.2)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS},setsar=1[v]")
+            else:
+                how, vin = "MISSING - black", ["-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r={FPS}"]
+                vf = "[0:v]setsar=1[v]"
+            a_idx = (len(vin) // 2) if take else 1
+            ffmpeg(vin + ain + ["-filter_complex", vf + f";[{a_idx}:a]aresample=48000,apad[a]", "-map", "[v]", "-map", "[a]",
+                                "-frames:v", str(nfr), "-t", f"{nfr / FPS:.3f}"] + venc + aenc + [str(seg)])
+            segs.append(seg)
+            edl += [f"{i:03d}  AX       AA/V  C        {tc(0, FPS)} {tc(nfr, FPS)} {tc(rec, FPS, 1)} {tc(rec + nfr, FPS, 1)}",
+                    f"* FROM CLIP NAME: {seg.name}", f"* COMMENT: {(s['scene'] or '')[:60]} | {(s['keyframe_prompt'] or '')[:80]}", ""]
+            rec += nfr
+            log.append(f"Shot {i}: {how}, {dur:.1f}s" + (" + dialogue" if audio else ""))
+        (out / "timeline.edl").write_text("\n".join(edl))
+        (out / "concat.txt").write_text("".join(f"file 'shots/{p.name}'\n" for p in segs))
+        joined, final = out / "_joined.mp4", out / f"{name}.mp4"
+        ffmpeg(["-f", "concat", "-safe", "0", "-i", str(out / "concat.txt"), "-c", "copy", str(joined)])
+        music = S.get("music")
+        if use_music and music and st.abs(music).exists():
+            log.append("Mixing music...")
+            ffmpeg(["-i", str(joined), "-stream_loop", "-1", "-i", str(st.abs(music)), "-filter_complex",
+                    f"[1:a]volume={float(music_volume):.3f}[m];[0:a][m]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]",
+                    "-map", "0:v", "-map", "[a]", "-c:v", "copy"] + aenc + [str(final)])
+            joined.unlink()
+        else:
+            joined.rename(final)
+        (out / "concat.txt").unlink()
+        (out / "shotlist.csv").write_text(API(st).csv_export())
+        A["output"], A["folder"] = st.rel(final), st.rel(out)
+        log.append(f"Done: {final.name}  ({int(rec / FPS // 60)}:{int(rec / FPS % 60):02d})")
+        log.append("For DaVinci Resolve: File > Import > Timeline > timeline.edl, and point it at the 'shots' folder.")
+    except Exception as e:
+        traceback.print_exc()
+        log.append("ERROR: " + str(e))
+    finally:
+        A["running"] = False
+
+
+# ======================================================================================
+# HTTP API
+# ======================================================================================
+CSV_FIELDS = ["seq", "scene", "kind", "cast", "keyframe_prompt", "motion_prompt", "camera", "dialogue", "duration",
+              "retime", "ref_prev", "end_next", "notes"]
+SHOT_FIELDS = {"scene", "kind", "keyframe_prompt", "motion_prompt", "camera", "dialogue", "duration", "retime", "ref_prev", "end_next", "notes"}
+TRUE = (1, True, "1", "true", "yes", "y", "on")
+
+
+class API:
+    def __init__(self, st):
+        self.st = st
+
+    def media(self, p):
+        return ("/media/" + urllib.parse.quote(p)) if p else None
+
+    def state(self, _=None):
+        st, db = self.st, self.st.db
+        takes, asset_takes, active, asset_active = {}, {}, {}, {}
+        for t in db.q("SELECT * FROM takes ORDER BY id"):
+            t["url"] = self.media(t["path"])
+            if t["stage"] == "sheet":
+                asset_takes.setdefault(t["asset_id"], []).append(t)
+            else:
+                takes.setdefault(t["shot_id"], []).append(t)
+        for j in db.q("SELECT shot_id, asset_id, stage, status FROM jobs WHERE status IN ('pending','running')"):
+            if j["stage"] == "sheet":
+                asset_active.setdefault(j["asset_id"], []).append(j["status"])
+            else:
+                active.setdefault(j["shot_id"], {}).setdefault(j["stage"], []).append(j["status"])
+        shots = []
+        for s in st.ordered_shots():
+            chain = st.chain(s)
+            covered = st.chain_seconds(chain) if chain else 0.0
+            s.update(asset_ids=json.loads(s["asset_ids"] or "[]"), takes=takes.get(s["id"], []), active=active.get(s["id"], {}),
+                     audio_url=self.media(s["audio"]), frames=st.frames_for(s["duration"]),
+                     cont=[t["id"] for t in chain[1:]], covered=round(covered, 2),
+                     remaining=round(max(0.0, float(s["duration"]) - covered), 2) if chain else None,
+                     draft_in_use=any(t.get("draft") for t in chain))
+            shots.append(s)
+        assets = db.q("SELECT * FROM assets ORDER BY kind, name")
+        for a in assets:
+            a.update(url=self.media(a["image"]), sheets=asset_takes.get(a["id"], []), active=asset_active.get(a["id"], []))
+        insts = db.q("SELECT * FROM instances ORDER BY id")
+        for i in insts:
+            i["health"] = st.health.get(i["id"])
+        wfs = {}
+        for key in WF_KEYS:
+            w = st.wf_row(key)
+            if w:
+                wf = json.loads(w["json"])
+                wfs[key] = {"name": w["name"], "fps": w["fps"], "max_frames": w["max_frames"], "nodes": len(wf),
+                            "slots": detect_slots(wf, key), "problems": check_workflow(wf, key)}
+            else:
+                wfs[key] = None
+        jobs = db.q("SELECT * FROM jobs WHERE status IN ('pending','running') OR id IN (SELECT id FROM jobs ORDER BY id DESC LIMIT 300) "
+                    "ORDER BY id DESC")
+        counts = {r["status"]: r["n"] for r in db.q("SELECT status, COUNT(*) n FROM jobs GROUP BY status")}
+        A = dict(st.assembly, log=list(st.assembly["log"]))
+        A["output_url"] = self.media(A.get("output"))
+        S = st.settings()
+        starters = {k: list(v.keys()) for k, v in STARTERS.items()}
+        S["max_clip_seconds"] = round((st.max_frames() - 1) / float(st.wf_fps()), 2)
+        return {"settings": S, "shots": shots, "assets": assets, "instances": insts, "workflows": wfs, "starters": starters,
+                "jobs": jobs, "job_counts": counts, "assembly": A, "tools": st.tools(), "music_url": self.media(S.get("music")),
+                "version": VERSION, "platform": sys.platform}
+
+    # ---- settings / servers / workflows / tools
+    def settings(self, b):
+        for k, v in (b.get("settings") or {}).items():
+            self.st.db.x("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (k, str(v)))
+        return {"ok": True}
+
+    def instance_save(self, b):
+        roles = ",".join(r for r in b.get("roles", []) if r in JOB_STAGES)
+        url = b["url"].strip().rstrip("/")
+        if not url.startswith("http"):
+            url = "http://" + url
+        if b.get("id"):
+            self.st.db.x("UPDATE instances SET name=?, url=?, roles=?, enabled=? WHERE id=?",
+                         (b["name"], url, roles, 1 if b.get("enabled", True) else 0, b["id"]))
+        else:
+            self.st.db.x("INSERT INTO instances(name,url,roles,enabled) VALUES(?,?,?,1)", (b["name"], url, roles))
+        self.st.worker.last_health = 0
+        return {"ok": True}
+
+    def instance_delete(self, b):
+        self.st.db.x("DELETE FROM instances WHERE id=?", (b["id"],))
+        return {"ok": True}
+
+    def instance_check(self, _):
+        self.st.tools(refresh=True)
+        self.st.worker.refresh_health()
+        time.sleep(4.5)
+        return {"ok": True}
+
+    def workflow(self, b):
+        key = b["stage"]
+        if key not in WF_KEYS:
+            raise ValueError("Unknown workflow slot")
+        if b.get("remove"):
+            self.st.db.x("DELETE FROM workflows WHERE stage=?", (key,))
+            return {"ok": True}
+        if b.get("starter"):
+            s = STARTERS[key][b["starter"]]
+            wf, name, fps, maxf = s["wf"], b["starter"], s["fps"], s["max_frames"]
+        else:
+            wf = json.loads(base64.b64decode(b["file"]["data"].split(",")[-1]))
+            name, fps, maxf = b["file"].get("name", "workflow.json"), int(b.get("fps") or 16), int(b.get("max_frames") or 81)
+        problems = check_workflow(wf, key)
+        if problems:
+            return {"ok": False, "problems": problems}
+        self.st.db.x("INSERT OR REPLACE INTO workflows(stage,json,name,fps,max_frames,updated) VALUES(?,?,?,?,?,?)",
+                     (key, json.dumps(wf), name, fps, maxf, time.time()))
+        return {"ok": True}
+
+    def workflow_meta(self, b):
+        self.st.db.x("UPDATE workflows SET fps=?, max_frames=? WHERE stage=?", (int(b["fps"]), int(b["max_frames"]), b["stage"]))
+        return {"ok": True}
+
+    def voices(self, _):
+        return {"voices": list_voices()}
+
+    def reveal(self, b):
+        p = self.st.abs(b["path"]) if b.get("path") else self.st.data
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(p)] if p.is_file() else ["open", str(p)])
+        return {"ok": True}
+
+    def quit(self, _):
+        threading.Timer(0.5, lambda: os._exit(0)).start()
+        return {"ok": True}
+
+    # ---- script -> shot list
+    def script_draft(self, b):
+        st = self.st
+        text = b.get("script", "")
+        st.db.x("INSERT OR REPLACE INTO settings(key,value) VALUES('script',?)", (text,))
+        names = {a["name"].strip().lower(): a["id"] for a in st.db.q("SELECT id,name FROM assets")}
+        mx = st.db.one("SELECT COALESCE(MAX(seq),0) m FROM shots")["m"]
+        scene, made = "", 0
+        speaker_re = r"^([A-Z][A-Za-z0-9 .'-]{0,30})\s*(?:\([^)]*\))?\s*:\s*(.+)$"
+        for block in re.split(r"\n\s*\n", text):
+            m = re.match(speaker_re, block.strip(), re.S)
+            if m and m.group(1).strip().lower() not in names:
+                who = m.group(1).strip()
+                names[who.lower()] = st.db.x("INSERT INTO assets(kind,name) VALUES('character',?)", (who.title() if who.isupper() else who,))
+        display = {a["id"]: a["name"] for a in st.db.q("SELECT id,name FROM assets")}
+        for block in re.split(r"\n\s*\n", text):
+            block = block.strip()
+            if not block:
+                continue
+            first = block.splitlines()[0].strip()
+            if re.match(r"^(#+|INT\.|EXT\.|INT/EXT|SCENE\b)", first, re.I):
+                scene = first.lstrip("#").strip()
+                block = "\n".join(block.splitlines()[1:]).strip()
+                if not block:
+                    continue
+            m = re.match(speaker_re, block, re.S)
+            if m:
+                who, line = m.group(1).strip(), " ".join(m.group(2).split())
+                who = display.get(names[who.lower()], who)
+                dur = round(max(2.0, len(line.split()) / 2.6 + 0.8), 1)
+                vals = (mx + made + 1, scene, "still", json.dumps([names[who.lower()]]), f"{who} speaking, medium close-up", "",
+                        "slow push-in", f"{who}: {line}", dur)
+            else:
+                action = " ".join(block.split())
+                cast = [i for n, i in names.items() if re.search(r"\b" + re.escape(n) + r"\b", action.lower())][:3]
+                vals = (mx + made + 1, scene, "motion", json.dumps(cast), action, action, "", "", st.default_duration())
+            st.db.x("INSERT INTO shots(seq,scene,kind,asset_ids,keyframe_prompt,motion_prompt,camera,dialogue,duration) VALUES(?,?,?,?,?,?,?,?,?)", vals)
+            made += 1
+        st.renumber()
+        return {"ok": True, "made": made}
+
+    # ---- cast & locations
+    def asset_save(self, b):
+        db = self.st.db
+        img = self.st.save_upload(b["file"]) if b.get("file") else None
+        vals = (b.get("kind", "character"), b.get("name") or "Unnamed", b.get("description", ""), b.get("voice", ""),
+                b.get("lora", ""), float(b.get("lora_strength") or 1.0))
+        if b.get("id"):
+            db.x("UPDATE assets SET kind=?, name=?, description=?, voice=?, lora=?, lora_strength=? WHERE id=?", vals + (b["id"],))
+            if img:
+                db.x("UPDATE assets SET image=? WHERE id=?", (img, b["id"]))
+        else:
+            db.x("INSERT INTO assets(kind,name,description,voice,lora,lora_strength,image) VALUES(?,?,?,?,?,?,?)", vals + (img,))
+        return {"ok": True}
+
+    def asset_delete(self, b):
+        self.st.db.x("DELETE FROM assets WHERE id=?", (b["id"],))
+        return {"ok": True}
+
+    def asset_use_sheet(self, b):
+        t = self.st.db.one("SELECT * FROM takes WHERE id=?", (b["take_id"],))
+        self.st.db.x("UPDATE assets SET image=? WHERE id=?", (t["path"], t["asset_id"]))
+        return {"ok": True}
+
+    # ---- shots
+    def shot_save(self, b):
+        st = self.st
+        vals = {k: b[k] for k in SHOT_FIELDS if k in b}
+        if "duration" in vals:
+            vals["duration"] = max(0.5, float(vals["duration"] or st.default_duration()))
+        elif not b.get("id"):
+            vals["duration"] = st.default_duration()
+        for f in ("ref_prev", "end_next"):
+            if f in vals:
+                vals[f] = 1 if vals[f] in TRUE else 0
+        if "asset_ids" in b:
+            vals["asset_ids"] = json.dumps([int(x) for x in b["asset_ids"]][:8])
+        if b.get("audio_file"):
+            vals["audio"] = st.save_upload(b["audio_file"], "voices")
+            secs = media_seconds(st.abs(vals["audio"]))
+            cur = float(vals.get("duration") or (st.db.one("SELECT duration FROM shots WHERE id=?", (b.get("id"),)) or {}).get("duration") or st.default_duration())
+            if secs + 0.4 > cur:
+                vals["duration"] = round(secs + 0.4, 1)
+        if b.get("clear_audio"):
+            vals["audio"] = None
+        if b.get("id"):
+            if vals:
+                st.db.x(f"UPDATE shots SET {', '.join(k + '=?' for k in vals)} WHERE id=?", list(vals.values()) + [b["id"]])
+            return {"ok": True, "id": b["id"]}
+        mx = st.db.one("SELECT COALESCE(MAX(seq),0) m FROM shots")["m"]
+        vals["seq"] = float(b["after_seq"]) + 0.5 if b.get("after_seq") is not None else mx + 1
+        sid = st.db.x(f"INSERT INTO shots({', '.join(vals)}) VALUES({','.join('?' * len(vals))})", list(vals.values()))
+        st.renumber()
+        return {"ok": True, "id": sid}
+
+    def shot_delete(self, b):
+        for sid in b["ids"]:
+            self.st.db.x("DELETE FROM shots WHERE id=?", (sid,))
+            self.st.db.x("UPDATE jobs SET status='cancelled' WHERE shot_id=? AND status='pending'", (sid,))
+        self.st.renumber()
+        return {"ok": True}
+
+    def shot_move(self, b):
+        shots = self.st.ordered_shots()
+        idx = next(i for i, s in enumerate(shots) if s["id"] == b["id"])
+        j = idx + (1 if b["dir"] > 0 else -1)
+        if 0 <= j < len(shots):
+            shots[idx], shots[j] = shots[j], shots[idx]
+            for i, s in enumerate(shots, 1):
+                self.st.db.x("UPDATE shots SET seq=? WHERE id=?", (i, s["id"]))
+        return {"ok": True}
+
+    def csv_import(self, b):
+        st = self.st
+        raw = base64.b64decode(b["file"]["data"].split(",")[-1]).decode("utf-8-sig")
+        dialect = "excel-tab" if raw.count("\t") > raw.count(",") else "excel"
+        rows = list(csv.DictReader(io.StringIO(raw), dialect=dialect))
+        names = {a["name"].strip().lower(): a["id"] for a in st.db.q("SELECT id,name FROM assets")}
+        mx = st.db.one("SELECT COALESCE(MAX(seq),0) m FROM shots")["m"]
+        for n, r in enumerate(rows, 1):
+            r = {(k or "").strip().lower().replace(" ", "_"): (v or "").strip() for k, v in r.items()}
+            ids = []
+            for nm in re.split(r"[;|,]", r.get("cast", "") or r.get("characters", "")):
+                nm = nm.strip()
+                if nm:
+                    if nm.lower() not in names:
+                        names[nm.lower()] = st.db.x("INSERT INTO assets(kind,name) VALUES('character',?)", (nm,))
+                    ids.append(names[nm.lower()])
+            try:
+                seq = mx + (float(r.get("seq") or r.get("shot") or 0) or n)
+            except ValueError:
+                seq = mx + n
+            kind = r.get("kind", "motion").lower()
+            rt = r.get("retime", "hold").lower()
+            try:
+                dur = float(r.get("duration") or r.get("length") or st.default_duration())
+            except ValueError:
+                dur = st.default_duration()
+            st.db.x("INSERT INTO shots(seq,scene,kind,asset_ids,keyframe_prompt,motion_prompt,camera,dialogue,duration,retime,ref_prev,end_next,notes) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (seq, r.get("scene", ""), kind if kind in ("motion", "still") else "motion", json.dumps(ids),
+                     r.get("keyframe_prompt") or r.get("description", ""), r.get("motion_prompt", ""), r.get("camera", ""),
+                     r.get("dialogue", ""), dur, rt if rt in ("hold", "blend", "rife") else "hold",
+                     1 if r.get("ref_prev", "").lower() in TRUE else 0, 1 if r.get("end_next", "").lower() in TRUE else 0, r.get("notes", "")))
+        st.renumber()
+        return {"ok": True, "imported": len(rows)}
+
+    def csv_export(self, _=None):
+        st = self.st
+        names = {a["id"]: a["name"] for a in st.db.q("SELECT id,name FROM assets")}
+        buf = io.StringIO()
+        w = csv.DictWriter(buf, fieldnames=CSV_FIELDS)
+        w.writeheader()
+        for s in st.ordered_shots():
+            row = {k: s.get(k, "") for k in CSV_FIELDS if k != "cast"}
+            row.update(cast=";".join(names.get(i, "") for i in json.loads(s["asset_ids"] or "[]")), seq=int(s["seq"]))
+            w.writerow(row)
+        return buf.getvalue()
+
+    # ---- temporary voices with macOS `say`
+    def voice(self, b):
+        st = self.st
+        if not st.tools()["say"]:
+            raise RuntimeError("Temporary voices use the macOS 'say' command (Mac only).")
+        if not st.tools()["ffmpeg"]:
+            raise RuntimeError("ffmpeg is needed: brew install ffmpeg")
+        S = st.settings()
+        voices = {a["name"].strip().lower(): a["voice"] for a in st.db.q("SELECT name, voice FROM assets")}
+        made = 0
+        for sid in b["shot_ids"]:
+            s = st.db.one("SELECT * FROM shots WHERE id=?", (sid,))
+            if not s or not (s["dialogue"] or "").strip():
+                continue
+            cast = [st.db.one("SELECT name FROM assets WHERE id=?", (i,)) for i in json.loads(s["asset_ids"] or "[]")]
+            default_speaker = next((c["name"] for c in cast if c), "")
+            work = st.data / "voices" / f"tmp_{sid}"
+            shutil.rmtree(work, ignore_errors=True)
+            work.mkdir(parents=True)
+            parts = []
+            for n, line in enumerate(l for l in s["dialogue"].splitlines() if l.strip()):
+                m = re.match(r"^\s*([^:]{1,40}):\s*(.+)$", line)
+                who, text = (m.group(1).strip(), m.group(2)) if m else (default_speaker, line.strip())
+                v = voices.get(who.lower()) or S.get("default_voice") or ""
+                aiff = work / f"{n:03d}.aiff"
+                cmd = ["say", "-o", str(aiff)] + (["-v", v] if v else []) + [text]
+                r = subprocess.run(cmd, capture_output=True, text=True)
+                if r.returncode != 0:
+                    raise RuntimeError(f"say failed: {r.stderr[:300]}")
+                parts.append(aiff)
+            if not parts:
+                continue
+            ins = sum((["-i", str(p)] for p in parts), [])
+            graph = "".join(f"[{i}:a]aresample=48000,aformat=channel_layouts=stereo,apad=pad_dur=0.25[a{i}];" for i in range(len(parts)))
+            graph += "".join(f"[a{i}]" for i in range(len(parts))) + f"concat=n={len(parts)}:v=0:a=1[out]"
+            dest = st.data / "voices" / f"shot{sid}_{uuid.uuid4().hex[:6]}.wav"
+            ffmpeg(ins + ["-filter_complex", graph, "-map", "[out]", "-ar", "48000", str(dest)])
+            shutil.rmtree(work, ignore_errors=True)
+            secs = media_seconds(dest)
+            dur = s["duration"]
+            if b.get("fit", True) and secs + 0.4 > dur:
+                dur = round(secs + 0.4, 1)
+            st.db.x("UPDATE shots SET audio=?, duration=? WHERE id=?", (st.rel(dest), dur, sid))
+            made += 1
+        return {"ok": True, "made": made}
+
+    # ---- generation / takes / jobs
+    def generate(self, b):
+        st, stage = self.st, b["stage"]
+        takes = max(1, min(8, int(b.get("takes", 1))))
+        made, skipped = 0, []
+        if stage == "sheet":
+            for aid in b["asset_ids"]:
+                for _ in range(takes):
+                    st.db.x("INSERT INTO jobs(asset_id,stage,status,seed,created,progress) VALUES(?,?,'pending',?,?,'waiting')",
+                            (aid, "sheet", random.randint(1, 2**48), time.time()))
+                    made += 1
+            return {"ok": True, "queued": made, "skipped": []}
+        for sid in b["shot_ids"]:
+            s = st.db.one("SELECT * FROM shots WHERE id=?", (sid,))
+            if not s:
+                continue
+            label = f"shot {int(s['seq'])}"
+            draft = 1 if (b.get("draft") and stage in ("animate", "continue")) else 0
+            segment = None
+            if stage == "continue":
+                chain = st.chain(s)
+                if not chain:
+                    skipped.append(f"{label}: animate it first")
+                    continue
+                segment = int(b["segment"]) if b.get("segment") is not None else len(chain) - 1
+                if segment > len(chain) - 1:
+                    skipped.append(f"{label}: choose the previous part first")
+                    continue
+                if float(s["duration"]) - st.chain_seconds(chain[:segment + 1]) < 0.25:
+                    skipped.append(f"{label}: already animated for its full length")
+                    continue
+            if stage != "keyframe" and s["kind"] == "still" and stage != "lipsync":
+                skipped.append(f"{label}: still shot")
+                continue
+            if stage in ("animate", "lipsync") and not st.take_path(s["keyframe_take"]):
+                skipped.append(f"{label}: no approved keyframe")
+                continue
+            if stage == "lipsync" and not s["audio"]:
+                skipped.append(f"{label}: no dialogue audio")
+                continue
+            if stage == "upscale" and not st.take_path(s["clip_take"]):
+                skipped.append(f"{label}: no approved clip")
+                continue
+            n = 1 if (stage == "upscale" or b.get("seed")) else takes
+            for _ in range(n):
+                seed = int(b["seed"]) if b.get("seed") else random.randint(1, 2**48)
+                st.db.x("INSERT INTO jobs(shot_id,stage,status,seed,created,progress,segment,draft) VALUES(?,?,'pending',?,?,'waiting',?,?)",
+                        (sid, stage, seed, time.time(), segment, draft))
+                made += 1
+        return {"ok": True, "queued": made, "skipped": skipped}
+
+    def approve(self, b):
+        st = self.st
+        t = st.db.one("SELECT * FROM takes WHERE id=?", (b["take_id"],))
+        if t["stage"] == "continue":
+            shot = st.db.one("SELECT * FROM shots WHERE id=?", (t["shot_id"],))
+            cont = [x["id"] for x in st.chain(shot)[1:]]
+            seg = int(t["segment"] or 0)
+            if seg > len(cont):
+                raise RuntimeError("Choose a take for the earlier part of this shot first.")
+            # later parts were made from the old ending, so they no longer join up
+            st.db.x("UPDATE shots SET cont_takes=? WHERE id=?", (json.dumps(cont[:seg] + [t["id"]]), t["shot_id"]))
+        elif t["stage"] == "lipsync" or t["stage"] == "animate":
+            st.db.x("UPDATE shots SET clip_take=?, final_take=NULL, cont_takes='[]' WHERE id=? AND (clip_take IS NULL OR clip_take<>?)",
+                    (t["id"], t["shot_id"], t["id"]))
+        else:
+            self.st.db.x(f"UPDATE shots SET {TAKE_FIELD[t['stage']]}=? WHERE id=?", (t["id"], t["shot_id"]))
+        return {"ok": True}
+
+    def take_delete(self, b):
+        st = self.st
+        t = st.db.one("SELECT * FROM takes WHERE id=?", (b["take_id"],))
+        if t:
+            if t["stage"] == "continue":
+                shot = st.db.one("SELECT * FROM shots WHERE id=?", (t["shot_id"],))
+                cont = json.loads((shot or {}).get("cont_takes") or "[]")
+                if t["id"] in cont:
+                    st.db.x("UPDATE shots SET cont_takes=? WHERE id=?", (json.dumps(cont[:cont.index(t["id"])]), t["shot_id"]))
+            if t["stage"] in ("animate", "lipsync"):
+                st.db.x("UPDATE shots SET cont_takes='[]' WHERE id=? AND clip_take=?", (t["shot_id"], t["id"]))
+            if t["stage"] in TAKE_FIELD:
+                f = TAKE_FIELD[t["stage"]]
+                st.db.x(f"UPDATE shots SET {f}=NULL WHERE id=? AND {f}=?", (t["shot_id"], t["id"]))
+            st.db.x("DELETE FROM takes WHERE id=?", (t["id"],))
+            try:
+                st.abs(t["path"]).unlink()
+            except OSError:
+                pass
+        return {"ok": True}
+
+    def job_action(self, b):
+        db, act, now = self.st.db, b["action"], time.time()
+        if act == "cancel":
+            for jid in b["ids"]:
+                db.x("UPDATE jobs SET status='cancelled', finished=? WHERE id=? AND status IN ('pending','running')", (now, jid))
+        elif act == "retry":
+            for jid in b["ids"]:
+                db.x("UPDATE jobs SET status='pending', instance_id=NULL, prompt_id=NULL, error=NULL, progress='waiting' "
+                     "WHERE id=? AND status IN ('error','cancelled')", (jid,))
+        elif act == "retry_errors":
+            db.x("UPDATE jobs SET status='pending', instance_id=NULL, prompt_id=NULL, error=NULL, progress='waiting' WHERE status='error'")
+        elif act == "cancel_pending":
+            db.x("UPDATE jobs SET status='cancelled', finished=? WHERE status='pending'", (now,))
+        elif act == "clear":
+            db.x("DELETE FROM jobs WHERE status IN ('done','cancelled')")
+        return {"ok": True}
+
+    def music(self, b):
+        val = "" if b.get("clear") else self.st.save_upload(b["file"])
+        self.st.db.x("INSERT OR REPLACE INTO settings(key,value) VALUES('music',?)", (val,))
+        return {"ok": True}
+
+    def assemble(self, b):
+        if self.st.assembly["running"]:
+            return {"ok": False, "error": "Already assembling."}
+        threading.Thread(target=assemble, args=(self.st, b.get("use_music"), b.get("music_volume", 0.25)), daemon=True).start()
+        return {"ok": True}
+
+
+ROUTES = {
+    "/api/settings": "settings", "/api/instance/save": "instance_save", "/api/instance/delete": "instance_delete",
+    "/api/instance/check": "instance_check", "/api/workflow": "workflow", "/api/workflow/meta": "workflow_meta",
+    "/api/voices": "voices", "/api/reveal": "reveal", "/api/quit": "quit", "/api/script/draft": "script_draft",
+    "/api/asset/save": "asset_save", "/api/asset/delete": "asset_delete", "/api/asset/use_sheet": "asset_use_sheet",
+    "/api/shot/save": "shot_save", "/api/shot/delete": "shot_delete", "/api/shot/move": "shot_move",
+    "/api/csv/import": "csv_import", "/api/voice": "voice", "/api/generate": "generate", "/api/approve": "approve",
+    "/api/take/delete": "take_delete", "/api/jobs": "job_action", "/api/music": "music", "/api/assemble": "assemble",
+}
+
+
+def make_handler(st, api):
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def _send(self, code, body, ctype="application/json", extra=None):
+            if isinstance(body, (dict, list)):
+                body = json.dumps(body).encode()
+            elif isinstance(body, str):
+                body = body.encode()
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            for k, v in (extra or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            try:
+                path = urllib.parse.urlparse(self.path).path
+                if path in ("/", "/index.html"):
+                    return self._send(200, INDEX_HTML, "text/html; charset=utf-8")
+                if path == "/api/ping":
+                    return self._send(200, {"ok": True, "app": "anime-studio", "version": VERSION})
+                if path == "/api/state":
+                    return self._send(200, api.state())
+                if path == "/api/csv/export":
+                    return self._send(200, api.csv_export(), "text/csv", {"Content-Disposition": 'attachment; filename="shotlist.csv"'})
+                if path.startswith("/api/workflow/"):
+                    key = path.rsplit("/", 1)[-1]
+                    row = st.wf_row(key)
+                    return self._send(200, row["json"] if row else "{}", "application/json",
+                                      {"Content-Disposition": f'attachment; filename="{key}_api.json"'})
+                if path.startswith("/media/"):
+                    return self._file(urllib.parse.unquote(path[len("/media/"):]))
+                self._send(404, {"error": "not found"})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception as e:
+                traceback.print_exc()
+                self._send(500, {"error": str(e)})
+
+        def do_POST(self):
+            try:
+                path = urllib.parse.urlparse(self.path).path
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                fn = ROUTES.get(path)
+                if not fn:
+                    return self._send(404, {"error": "not found"})
+                self._send(200, getattr(api, fn)(body))
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception as e:
+                traceback.print_exc()
+                self._send(200, {"ok": False, "error": str(e)})
+
+        def _file(self, rel):
+            p = (st.data / rel).resolve()
+            if st.data not in p.parents or not p.is_file():
+                return self._send(404, {"error": "not found"})
+            size = p.stat().st_size
+            start, end, code = 0, size - 1, 200
+            m = re.match(r"bytes=(\d*)-(\d*)", self.headers.get("Range") or "")
+            if m and (m.group(1) or m.group(2)):
+                if m.group(1):
+                    start = int(m.group(1))
+                    end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+                else:
+                    start = max(0, size - int(m.group(2)))
+                code = 206
+            self.send_response(code)
+            self.send_header("Content-Type", mimetypes.guess_type(p.name)[0] or "application/octet-stream")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(end - start + 1))
+            if code == 206:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.end_headers()
+            with open(p, "rb") as f:
+                f.seek(start)
+                left = end - start + 1
+                while left > 0:
+                    chunk = f.read(min(1 << 20, left))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+    return H
+
+
+INDEX_HTML = (Path(__file__).resolve().parent / "ui.html").read_text(encoding="utf-8") if (Path(__file__).resolve().parent / "ui.html").exists() else "<h1>ui.html missing</h1>"
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Anime Studio - ComfyUI production app")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=8700)
+    ap.add_argument("--data", default="~/Documents/AnimeStudio")
+    ap.add_argument("--export-workflows", metavar="DIR", help="Write the starter API workflows to DIR and exit")
+    args = ap.parse_args()
+    if args.export_workflows:
+        d = Path(args.export_workflows)
+        d.mkdir(parents=True, exist_ok=True)
+        for key, variants in STARTERS.items():
+            for name, s in variants.items():
+                (d / f"{key}__{name}_api.json").write_text(json.dumps(s["wf"], indent=2, ensure_ascii=False))
+        print("Wrote starter workflows to", d)
+        return
+    st = Studio(args.data)
+    st.worker = Worker(st)
+    st.worker.start()
+    try:
+        srv = ThreadingHTTPServer((args.host, args.port), make_handler(st, API(st)))
+    except OSError as e:
+        print(f"Port {args.port} busy ({e}) - is Anime Studio already running?")
+        sys.exit(3)
+    print(f"Anime Studio {VERSION} -> http://{args.host}:{args.port}   data: {st.data}   tools: {st.tools()}", flush=True)
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
