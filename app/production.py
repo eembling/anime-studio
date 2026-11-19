@@ -254,7 +254,7 @@ class Production:
                     if not s['clip_take'] or 'animate' in s['outdated']:
                         tasks.append(('animate', s['id']))
                     elif (s['remaining'] and s['remaining'] > .1) or 'continue' in s['outdated']:
-                        
+
                         if 'continue' in s['outdated']:
                             tasks.append(('animate', s['id']))
                         else:
