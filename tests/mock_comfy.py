@@ -88,6 +88,15 @@ class H(BaseHTTPRequestHandler):
         b = json.dumps(obj).encode(); self.send_response(code); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def do_GET(self):
         u = urlparse(self.path)
+        if u.path == '/object_info':
+            import importlib.util
+            spec = importlib.util.spec_from_file_location('studio', Path(__file__).resolve().parent.parent / 'app/anime_studio.py')
+            mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+            classes = set(REQUIRED) | {'FakeTTS', 'FakeText'}
+            for variants in mod.STARTERS.values():
+                for starter in variants.values():
+                    classes.update(n['class_type'] for n in starter['wf'].values())
+            return self.j(200, {c: {'input': {'required': {}}} for c in classes})
         if u.path == "/system_stats":
             return self.j(200, {"devices": [{"name": f"cuda:0 NVIDIA GeForce {gpu} : cudaMallocAsync", "vram_total": 12 * 2**30, "vram_free": 11 * 2**30}]})
         if u.path.startswith("/history/"):

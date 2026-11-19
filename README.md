@@ -2,7 +2,7 @@
 
 A Mac app that runs a whole anime production on a ComfyUI server used as a render farm: script → shot list → characters → keyframes → animation → 24 fps → voices / lip sync → upscale → an assembled episode plus a DaVinci Resolve timeline.
 
-The app talks to ComfyUI over its HTTP API. Every workflow uses **nodes built into ComfyUI**, so nothing gets installed on the server; you only download model files there. Everything else runs on the Mac.
+The app talks to ComfyUI over its HTTP API. The core image/video workflows use nodes built into ComfyUI. Optional voices use the ComfyUI-Qwen-TTS custom node pack; the app checks the server before queuing work. Everything else runs on the Mac.
 
 | Runs on | What |
 |---|---|
@@ -136,3 +136,22 @@ MIT. See `LICENSE`.
 ## Batch image utility
 
 `comfy_batch.py` submits a folder of images through an API-format ComfyUI workflow. Install `requests`, then run `python3 comfy_batch.py --help` for server, input, output and node-selection options.
+
+## Changes in 2.7 — production workflow
+
+Open **Production** to work scene by scene:
+
+1. **Preview scene / episode** builds a 960×540 animatic using selected keyframes, dialogue and shot durations. It never submits GPU jobs. Static/hold/locked camera notes hold the image; other notes use a slow push-in. Adjust duration and camera notes in Shots, then rebuild the preview. Missing images are black. Animatics are saved separately from episode exports.
+2. **Outdated render tracking** records the inputs used for new takes. Changed prompts, references, voices, timing, selected upstream takes or workflows flag affected selections. Old takes remain available; older versions without recorded inputs show unknown history. **Regenerate affected stages** queues new takes for the earliest affected dependency per shot; choose them in Shots/Voices before regenerating downstream stages. Production and shot cards show warnings.
+3. **Check readiness** inspects each enabled server’s `/object_info` for node types and advertised model choices. Missing nodes/models include repair guidance. Generation refuses to queue when no enabled server passes, and the dispatcher routes jobs only to compatible servers. Checks are cached for 60 seconds; run Check readiness after installing models. Internally managed custom-node weights and actual GPU memory requirements cannot be proven from this endpoint.
+4. **Script → Review script revision** previews changes, maps passages to existing shots, and applies checked changes only. Map a passage to “Create new shot” to add it. Removed passages require explicit selection; otherwise those shots remain at the end. Unchanged and reordered passages retain shot IDs and takes. A preview expires if the shots change before applying.
+5. **Prepare this scene** persists a scene plan: missing voices → two keyframe options → pause for explicit keyframe approval → animation and automatic continuations → optional lip sync/upscale. Choose takes in Shots and approve keyframes in Production. Failed or unsupported stages block with a reason; retry failed jobs in Render queue, then resume. Approval waits do not prevent another scene from progressing. Cancel stops the plan and its unfinished jobs.
+
+Higher priorities run first among waiting jobs; running jobs are not interrupted. Change a pending job’s priority in Render queue. Completion estimates use previous successful job durations and enabled server roles; they are approximate, and future unqueued plan stages are excluded.
+
+Build the Mac app with `bash build_app.sh`. The bundle includes `production.py` and `production.js`. Existing project databases migrate automatically. To validate development changes:
+
+```bash
+python3 tests/test_production.py
+python3 tests/test_pipeline.py
+```
