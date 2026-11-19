@@ -447,13 +447,28 @@ function toast(m,bad){const t=$('#toast');t.textContent=m;t.className=bad?'bad':
 function readFile(f){return new Promise(res=>{const r=new FileReader();r.onload=()=>res({name:f.name,data:r.result});r.readAsDataURL(f)})}
 function pick(accept,cb){const i=document.createElement('input');i.type='file';i.accept=accept;i.onchange=async()=>{if(i.files[0])cb(await readFile(i.files[0]))};i.click()}
 document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>go(b.dataset.t));
-function go(t){tab=t;document.querySelectorAll('#nav button').forEach(x=>x.classList.toggle('on',x.dataset.t===t));document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x.id==='t-'+t));render(true);$('main').scrollTo(0,0)}
+const TAB_SCROLL={};
+let SCROLL_PAINT=0,SCROLL_INPUT=0,SCROLL_DEPTH=0;
+for(const type of ['wheel','touchmove','pointerdown','keydown'])document.addEventListener(type,()=>SCROLL_INPUT++,{capture:true,passive:true});
+function preserveMainScroll(update){
+ const main=$('main');if(!main||SCROLL_DEPTH)return update();
+ const top=main.scrollTop,left=main.scrollLeft,activeTab=tab,input=SCROLL_INPUT,paint=++SCROLL_PAINT;
+ SCROLL_DEPTH++;
+ try{return update()}finally{
+  SCROLL_DEPTH--;main.scrollTop=top;main.scrollLeft=left;
+  requestAnimationFrame(()=>{if(paint===SCROLL_PAINT&&input===SCROLL_INPUT&&activeTab===tab){main.scrollTop=top;main.scrollLeft=left}});
+ }
+}
+function go(t){const main=$('main');TAB_SCROLL[tab]={top:main.scrollTop,left:main.scrollLeft};
+ tab=t;document.querySelectorAll('#nav button').forEach(x=>x.classList.toggle('on',x.dataset.t===t));document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x.id==='t-'+t));render(true);
+ const position=TAB_SCROLL[t]||{top:0,left:0};++SCROLL_PAINT;main.scrollTop=position.top;main.scrollLeft=position.left;
+}
 let LASTSTATE='';
 async function load(){try{const t=await (await fetch('/api/state')).text();if(t===LASTSTATE)return;LASTSTATE=t;S=JSON.parse(t);render()}catch(e){}}
 const fmtT=sec=>{sec=Math.round(sec);return sec>=3600?`${Math.floor(sec/3600)}h ${String(Math.floor(sec%3600/60)).padStart(2,'0')}m`:`${Math.floor(sec/60)}:${String(sec%60).padStart(2,'0')}`};
 const pad=n=>String(n|0).padStart(3,'0');
 function lb(u){$('#lbimg').src=u;$('#lightbox').style.display='flex'}
-function modal(h){$('#dlg').innerHTML=h;$('#modal').classList.add('on');setTimeout(()=>{const f=$('#dlg input,#dlg textarea');f&&f.focus()},30)}
+function modal(h){$('#dlg').innerHTML=h;$('#modal').classList.add('on');setTimeout(()=>{const f=$('#dlg input,#dlg textarea');f&&f.focus({preventScroll:true})},30)}
 function closeModal(){$('#modal').classList.remove('on')}
 $('#modal').onclick=e=>{if(e.target.id==='modal')closeModal()};
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeModal();$('#lightbox').style.display='none'}});
@@ -465,7 +480,8 @@ function take(id){for(const s of S.shots)for(const t of s.takes)if(t.id===id)ret
 
 const SIG={};   // skip rebuilding a big list when nothing it shows has changed
 function same(name,parts){const k=JSON.stringify(parts);if(SIG[name]===k)return true;SIG[name]=k;return false}
-function render(force){if(!S)return;if(force)for(const k in SIG)delete SIG[k];
+function render(force){return preserveMainScroll(()=>renderContent(force))}
+function renderContent(force){if(!S)return;if(force)for(const k in SIG)delete SIG[k];
  const [t,sub]=TITLES[tab];$('#pagetitle').textContent=tab==='shots'?(S.settings.title||'Shots'):t;$('#pagesub').textContent=tab==='shots'?sub:sub;
  const c=S.job_counts,act=(c.pending||0)+(c.running||0),total=S.shots.reduce((a,s)=>a+(+s.duration||0),0),cn=counts();
  $('#n-shots').textContent=S.shots.length?`${S.shots.length} shots, ${fmtT(total)}`:'';
@@ -485,7 +501,8 @@ function draftShots(){if(!$('#script').value.trim())return toast('Write or paste
  post('/api/script/draft',{script:$('#script').value}).then(r=>{if(r.ok!==false){toast(`Created ${r.made} shots`);go('shots')}})}
 
 /* ---------- cast ---------- */
-function renderCast(){if(same('cast',[S.assets]))return;$('#cast').innerHTML=S.assets.map(a=>`<article class="model">
+function renderCast(){return preserveMainScroll(renderCastContent)}
+function renderCastContent(){if(same('cast',[S.assets]))return;$('#cast').innerHTML=S.assets.map(a=>`<article class="model">
  <div class="art" ${a.url?`onclick="lb('${a.url}')"`:''}>${a.url?`<img src="${a.url}" alt="${esc(a.name)} reference">`:`<div class="ph">No reference image yet.<br><button class="btn sm" style="margin-top:8px" onclick="editAsset(${a.id})">Add one</button></div>`}</div>
  <div class="body"><h3>${esc(a.name)}<span class="k">${a.kind}</span></h3>${a.description?`<div class="desc">${esc(a.description)}</div>`:''}
   <div class="meta">${a.voice?`<span class="flag">Voice: ${esc(a.voice)}</span>`:''}${a.lora?`<span class="flag" title="${esc(a.lora)}">LoRA ${a.lora_strength}</span>`:''}</div>
@@ -582,10 +599,24 @@ function stripHTML(){const total=S.shots.reduce((a,s)=>a+(+s.duration||0),0);if(
  return `<div class="strip"><div class="strip-head"><h2>Episode</h2><span class="muted" style="font-size:12.5px">Each slice is one shot, sized by its length. Click to jump to it.</span>
  <div class="legend"><span><i style="background:var(--line)"></i>Not started</span><span><i style="background:var(--red)"></i>Keyframe</span><span><i style="background:var(--ink)"></i>Animated</span><span><i style="background:var(--green)"></i>Finished</span></div></div>
  <div class="segs">${segs}</div><div class="ruler">${ticks}</div></div>`}
-function jump(id){FILTER='all';renderShots();const el=$('#cut-'+id);if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.remove('flash');void el.offsetWidth;el.classList.add('flash')}}
+function jump(id){if(tab!=='shots')go('shots');FILTER='all';renderShots();++SCROLL_PAINT;const el=$('#cut-'+id);if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.remove('flash');void el.offsetWidth;el.classList.add('flash')}}
 function setFilter(f){FILTER=f;sel.clear();$('#selall').checked=false;renderShots()}
 function matches(s){return FILTER==='all'||(FILTER==='voice'?missingLines(s)>0:needs(s)===FILTER)}
-function renderShots(){
+function updateShotCards(markup){
+ const board=$('#shotlist'),template=document.createElement('template');template.innerHTML=markup;
+ const existing=new Map([...board.children].filter(el=>el.id).map(el=>[el.id,el]));
+ const retained=new Set();let index=0;
+ for(const fresh of [...template.content.children]){
+  let node=existing.get(fresh.id);
+  if(!node)node=fresh;
+  else if(node.outerHTML!==fresh.outerHTML){node.replaceWith(fresh);node=fresh}
+  if(board.children[index]!==node)board.insertBefore(node,board.children[index]||null);
+  retained.add(node);index++;
+ }
+ for(const node of [...board.children])if(!retained.has(node))node.remove();
+}
+function renderShots(){return preserveMainScroll(renderShotsContent)}
+function renderShotsContent(){
  if([...document.querySelectorAll('#shotlist video')].some(v=>!v.paused))return;
  if(same('shots',[S.shots,S.assets,S.settings,S.workflows,FILTER,[...sel],VIEW]))return;
  const cn=counts();
@@ -597,7 +628,7 @@ function renderShots(){
  if(!S.shots.length){$('#shotlist').innerHTML=`<div class="empty-state"><h2>No shots yet</h2><p>Start from the script and the app drafts the shot list for you. Or import a spreadsheet, or add shots one at a time.</p><button class="btn pri" onclick="go('script')">Open the script</button> <button class="btn" onclick="pick('.csv,.tsv,.txt',f=>post('/api/csv/import',{file:f}))">Import shot list</button> <button class="btn ghost" onclick="editShot()">Add a shot</button></div>`;return}
  if(!list.length){$('#shotlist').innerHTML=`<div class="empty-state"><h2>Nothing here</h2><p>No shots match this filter.</p><button class="btn" onclick="setFilter('all')">Show all shots</button></div>`;return}
  const fresh={};
- $('#shotlist').innerHTML=list.map(s=>{
+ updateShotCards(list.map(s=>{
   const kfs=s.takes.filter(t=>t.stage==='keyframe'),clips=s.takes.filter(t=>t.stage==='animate'||t.stage==='lipsync'),ups=s.takes.filter(t=>t.stage==='upscale');
   const viewing=take(VIEW[s.id])||take(s.final_take)||take(s.clip_take)||take(s.keyframe_take);
   const approved=viewing&&([s.keyframe_take,s.clip_take,s.final_take].includes(viewing.id)||s.cont.includes(viewing.id));
@@ -637,9 +668,9 @@ function renderShots(){
     <div class="st-b">${clips.length?chips(clips,s.clip_take,'T','c'):s.kind==='still'?'<span class="none">Made from the keyframe when you assemble.</span>':''}${pend('animate')}${pend('lipsync')}</div>${contRow}${pend('continue')}${cover}</div>
    <div class="stage"><div class="st-h"><span class="dot ${stState(s.final_take,s.active.upscale)}"></span>Upscale<span class="cnt">optional</span><span class="btns"><button class="btn sm" ${s.clip_take?'':'disabled title="Choose a clip first"'} onclick="gen('upscale',[${s.id}])">Upscale</button></span></div>
     <div class="st-b">${chips(ups,s.final_take,'U','u')}${pend('upscale')}</div></div>
-  </div></article>`}).join('');
+  </div></article>`}).join(''));
  prevApproved=fresh;
- document.querySelectorAll('#shotlist video[data-audio]').forEach(v=>{const a=new Audio(v.dataset.audio);v._a=a;
+ document.querySelectorAll('#shotlist video[data-audio]').forEach(v=>{if(v._a)return;const a=new Audio(v.dataset.audio);v._a=a;
   const sync=()=>{if(Math.abs(a.currentTime-v.currentTime)>0.15)a.currentTime=Math.min(v.currentTime,a.duration||v.currentTime)};
   v.addEventListener('play',()=>{sync();a.play().catch(()=>{})});v.addEventListener('pause',()=>a.pause());v.addEventListener('seeked',sync);
   v.addEventListener('timeupdate',()=>{if(v.currentTime<0.2&&a.currentTime>0.5)sync()})})}
@@ -722,7 +753,8 @@ const vkey=(sid,i)=>sid+':'+i;
 function allLines(){const out=[];S.shots.forEach(s=>{if(s.audio_mode==='file')return;(s.lines||[]).forEach(l=>out.push({s,l}))});return out}
 function vMatch(x){return VFILTER==='all'||(VFILTER==='missing'?!x.l.audio:(x.l.speaker||'').toLowerCase()===VFILTER)}
 function vGroups(){const groups=[];allLines().filter(vMatch).forEach(x=>{const sc=x.s.scene||'Untitled scene';const g=groups[groups.length-1];if(g&&g.scene===sc)g.items.push(x);else groups.push({scene:sc,items:[x]})});return groups}
-function renderVoices(){
+function renderVoices(){return preserveMainScroll(renderVoicesContent)}
+function renderVoicesContent(){
  if(same('voices',[S.shots,S.assets,S.workflows,S.instances.map(i=>[i.enabled,i.roles]),VFILTER,[...VSEL],SCENEPLAY&&SCENEPLAY.g]))return;
  const lines=allLines(),byName=Object.fromEntries(S.assets.map(a=>[a.name.toLowerCase(),a]));
  const speakers=[...new Set(lines.map(x=>(x.l.speaker||'').toLowerCase()).filter(Boolean))];
@@ -748,7 +780,7 @@ function renderVoices(){
    const takes=(l.takes||[]).map((t,i)=>`<span class="vt ${l.audio===t.path?'sel':''}" title="Take ${i+1}, ${(+t.seconds).toFixed(1)} s. Click the number to use it."><button class="play" onclick="event.stopPropagation();playA(this,'${t.url}')" aria-label="Play take">▶</button><span onclick="vUse(${s.id},${l.index},${t.id})">${i+1}</span><span class="x" onclick="event.stopPropagation();vDelTake(${t.id})" title="Delete this take" aria-label="Delete take">×</span></span>`).join('');
    const pend=(l.pending||[]).length?`<span class="pending"><span class="dot"></span>${l.pending.length} ${l.pending.includes('running')?'rendering':'waiting'}</span>`:'';
    return `<div class="vl ${l.audio?'':'missing'}"><input type="checkbox" ${VSEL.has(k)?'checked':''} onchange="vTog('${k}',this.checked)" aria-label="Select line">
-    <button class="shotno" onclick="go('shots');setTimeout(()=>jump(${s.id}),50)" title="Open the shot">Shot ${pad(s.seq)}</button>
+    <button class="shotno" onclick="jump(${s.id})" title="Open the shot">Shot ${pad(s.seq)}</button>
     <span class="who">${a&&a.url?`<img src="${a.url}" alt="">`:'<span class="ph"></span>'}<b>${esc(a?a.name:l.speaker||'No speaker')}</b></span>
     <div><div class="txt">${esc(l.text)}</div><input class="dir" value="${esc(l.direction||'')}" placeholder="Delivery note (optional): whispering, angry, out of breath…" onchange="post('/api/line/direction',{shot_id:${s.id},index:${l.index},direction:this.value})" aria-label="Delivery note"></div>
     <div><div class="vtakes">${takes||'<span class="vsrc">No takes yet</span>'}${pend}</div>${l.audio&&l.src!=='tts'?`<div class="vsrc" style="margin-top:6px">Using: ${SRC[l.src]||'audio'} <button class="play" style="display:inline-grid;vertical-align:middle;width:18px;height:18px;font-size:8px" onclick="playA(this,'${l.url}')" aria-label="Play">▶</button></div>`:''}</div>

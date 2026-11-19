@@ -254,9 +254,24 @@ MIGRATIONS = [  # columns added after v2.0 - existing projects get them on start
 # ======================================================================================
 # Storage
 # ======================================================================================
+class ProjectDatabaseAccessError(RuntimeError):
+    """macOS/file authorization denied access to the existing project, not a corrupt database."""
+
+
 class DB:
     def __init__(self, path):
-        self.conn = sqlite3.connect(str(path), check_same_thread=False)
+        try:
+            self.conn = sqlite3.connect(str(path), check_same_thread=False)
+        except sqlite3.DatabaseError as exc:
+            denied = getattr(exc, 'sqlite_errorcode', None) in (23, 3) or any(
+                text in str(exc).lower() for text in ('authorization denied', 'permission denied', 'not authorized', 'operation not permitted'))
+            if denied:
+                raise ProjectDatabaseAccessError(
+                    f"ANIME_STUDIO_DATA_ACCESS_DENIED: Cannot open project database {path}. "
+                    "macOS denied this app access to the project folder. In Anime Studio, choose "
+                    "Choose Project Folder and select the existing AnimeStudio Data folder to grant access. "
+                    "Do not delete or replace studio.db. Original SQLite error: " + str(exc)) from exc
+            raise
         self.conn.row_factory = sqlite3.Row
         self.lock = threading.RLock()
         with self.lock:

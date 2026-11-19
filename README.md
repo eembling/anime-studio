@@ -46,7 +46,7 @@ The server needs **32 GB of system RAM or more**. The Wan 14B fp8 models are 14.
    - `xcode-select --install` (recommended; it's what builds the native window)
 2. Build the app: `./build_app.sh`. This makes `dist/Anime Studio.app`. Or run `./build_app.sh ~/Applications`.
 3. Open it. The first time, right-click it and choose **Open**, because the app isn't signed.
-4. Project data lives in `AnimeStudio Data`, next to the app. The app remembers this folder, so moving the app to /Applications keeps using the same data. If the app's folder isn't writable, data goes to `~/Documents/AnimeStudio Data`. Set `ANIME_STUDIO_DATA` to use another folder.
+4. Settings and project data load automatically from `~/Library/Application Support/AnimeStudio`. On the first updated launch, the app copies your remembered legacy project into this app-owned location, validates the database, and remembers the new location. The original folder stays intact. Later launches use the saved copy without accessing Documents or asking you to select a folder. Set `ANIME_STUDIO_DATA` to explicitly use another folder.
 
 You can also run it without the app bundle: `python3 app/anime_studio.py`, then open http://127.0.0.1:8700.
 
@@ -111,7 +111,7 @@ The test starts two fake ComfyUI servers and runs the whole pipeline: script, ca
 - **Red server dot:** check that ComfyUI was started with `--listen` and that `http://<server>:8188` opens from the Mac.
 - **"value not in list":** a model file is missing on the server or has a different name. Compare with `server/download_models.sh`.
 - **Unknown node:** update ComfyUI. The workflows use Qwen-Image-Edit 2509 and Wan 2.2 nodes, which were added in 2025.
-- **Logs:** `AnimeStudio Data/app.log`, `launcher.log` and `build.log`.
+- **Logs:** `~/Library/Application Support/AnimeStudio/launcher.log`; `app.log` and `build.log` live in the saved project folder named by `~/Library/Application Support/AnimeStudio/data-folder`.
 
 ## License
 MIT. See `LICENSE`.
@@ -220,3 +220,9 @@ Render queue separates **Active renders**, **Queued renders**, and **Completed r
 Progress percentages are estimates from elapsed time and the median of up to 20 recent successful runs of the same stage and draft/full-quality mode, preferring the same server. They are not measured ComfyUI sampler progress. Jobs without history show an indeterminate bar. Overdue jobs stay below 100% and report an uncertain finish time; work waiting behind an unknown/overdue render does not receive a fabricated ETA. Estimates account for enabled compatible servers and parallel work but cannot predict external ComfyUI workloads. Learned timings survive clearing completed jobs.
 
 Focused validation: `python3 tests/test_render_queue.py` and `node --test tests/test_render_queue_ui.cjs`.
+
+## macOS project-folder access
+
+Normal startup uses Application Support so rebuilding the app does not require selecting a Documents folder again. A legacy project is copied once, including settings, media and SQLite WAL contents, and the saved location switches only after database validation. The original is retained. Migration failures are recorded in `~/Library/Application Support/AnimeStudio/launcher.log` and never silently replace a saved project with an empty one. An explicitly selected external project or `ANIME_STUDIO_DATA` override can still require macOS permission for its location; **Choose Project Folder…** remains available for these cases.
+
+Do not delete `studio.db`, create a blank replacement project, or change broad disk permissions to repair an access denial. Database corruption errors remain separate from permission errors. Native startup exits are surfaced promptly with log access rather than waiting for the generic startup timeout.

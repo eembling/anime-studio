@@ -16,7 +16,7 @@ cp "$ROOT/mac/Info.plist" "$APP/Contents/"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 cp "$ROOT/mac/launcher.sh" "$APP/Contents/MacOS/AnimeStudio"
 chmod 755 "$APP/Contents/MacOS/AnimeStudio"
-cp "$ROOT/app/anime_studio.py" "$ROOT/app/production.py" "$ROOT/app/soundtrack.py" "$ROOT/app/render_queue.py" "$ROOT/app/production.js" "$ROOT/app/ui.html" "$ROOT/mac/main.swift" "$ROOT/mac/AppIcon.icns" "$APP/Contents/Resources/"
+cp "$ROOT/app/anime_studio.py" "$ROOT/app/production.py" "$ROOT/app/soundtrack.py" "$ROOT/app/render_queue.py" "$ROOT/app/project_storage.py" "$ROOT/app/production.js" "$ROOT/app/ui.html" "$ROOT/mac/main.swift" "$ROOT/mac/AppIcon.icns" "$APP/Contents/Resources/"
 
 if [ "$(uname)" = "Darwin" ] && xcode-select -p >/dev/null 2>&1; then
   echo "Compiling the native window..."
@@ -26,4 +26,4 @@ if [ "$(uname)" = "Darwin" ] && xcode-select -p >/dev/null 2>&1; then
 fi
 touch "$APP"
 echo "Built: $APP"
-echo "Project data is kept next to the app, in '$(basename "$DEST_DIR")/AnimeStudio Data'."
+echo "Project settings and data load automatically from ~/Library/Application Support/AnimeStudio."
