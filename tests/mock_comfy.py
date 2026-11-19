@@ -16,6 +16,7 @@ REQUIRED = {
     "RIFE VFI": ["ckpt_name", "frames", "clear_cache_after_n_frames", "multiplier", "fast_mode", "ensemble", "scale_factor", "dtype", "torch_compile", "batch_size"],
     "LoadImage": ["image"], "LoadVideo": ["file"], "LoadAudio": ["audio"], "WanFirstLastFrameToVideo": ["positive", "negative", "vae", "width", "height", "length", "batch_size"],
     "ImageScale": ["image", "upscale_method", "width", "height", "crop"],
+    "FB_Qwen3TTSVoiceDesign": ["text", "instruct", "model_choice", "language"],
     "FB_Qwen3TTSVoiceClone": ["target_text", "model_choice", "device", "precision", "language"], "SaveAudio": ["audio", "filename_prefix"], "UpscaleModelLoader": ["model_name"], "LoraLoaderModelOnly": ["model", "lora_name", "strength_model"], "SaveImage": ["images", "filename_prefix"],
 }
 

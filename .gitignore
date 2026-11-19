@@ -14,3 +14,8 @@ __pycache__/
 tests/_run/
 
 .DS_Store
+
+# Local distribution and episode working files
+/AnimeStudio/
+/AnimeStudio.tar.gz
+/episode-*.md

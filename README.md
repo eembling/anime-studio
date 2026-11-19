@@ -125,3 +125,14 @@ MIT. See `LICENSE`.
 - Assembly warns when a shot's dialogue is longer than the shot.
 - Names with apostrophes no longer break buttons; Reveal only opens files inside the data folder.
 - The UI no longer redraws the shot, voice and cast lists when nothing changed.
+
+## Changes in 2.6
+
+- Cast → Design a voice creates reference recordings from a written voice description using local Qwen3-TTS VoiceDesign. Enter a sample line, generate takes, listen, and choose a reference.
+- Run `server/install_tts.sh` again to download the VoiceDesign model, then restart ComfyUI. Enable `voice_design` on the server in Settings. VoiceDesign uses the 1.7B model regardless of the voice-cloning model setting.
+- Designed takes are saved under `AnimeStudio Data/voices/reference`; the first becomes the reference when the character has none.
+- Missing custom-node errors now explain which node pack to install and where to inspect startup failures.
+
+## Batch image utility
+
+`comfy_batch.py` submits a folder of images through an API-format ComfyUI workflow. Install `requests`, then run `python3 comfy_batch.py --help` for server, input, output and node-selection options.

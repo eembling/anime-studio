@@ -7,7 +7,8 @@
 # What it does:
 #   1. saves your current Python package list (so you can roll back)
 #   2. installs the ComfyUI-Qwen-TTS node pack (github.com/flybirdxx/ComfyUI-Qwen-TTS) and its requirements
-#   3. downloads the Qwen3-TTS voice-cloning models into ComfyUI/models/qwen-tts
+#   3. downloads the Qwen3-TTS voice-cloning and voice-design models into ComfyUI/models/qwen-tts
+# Safe to run again: it skips what is already installed and only fetches missing models.
 # Everything runs locally; no cloud service or API key is used.
 set -euo pipefail
 
@@ -37,13 +38,15 @@ if ! command -v sox >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
   echo "Optional: sudo apt-get install -y sox"
 fi
 
-# 3. Models: shared tokenizer + the voice-cloning ("Base") models, 1.7B (better) and 0.6B (faster, smaller GPUs)
+# 3. Models: shared tokenizer, the voice-cloning ("Base") models, 1.7B (better) and 0.6B (faster, smaller GPUs),
+#    and VoiceDesign (makes a new voice from a written description; 1.7B only)
 mkdir -p "$COMFY/models/qwen-tts"
 QWEN_ROOT="$COMFY/models/qwen-tts" "$PY" - <<'EOF'
 import os
 from huggingface_hub import snapshot_download
 root = os.environ["QWEN_ROOT"]
-for repo in ("Qwen/Qwen3-TTS-Tokenizer-12Hz", "Qwen/Qwen3-TTS-12Hz-1.7B-Base", "Qwen/Qwen3-TTS-12Hz-0.6B-Base"):
+for repo in ("Qwen/Qwen3-TTS-Tokenizer-12Hz", "Qwen/Qwen3-TTS-12Hz-1.7B-Base", "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+             "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"):
     target = os.path.join(root, repo.split("/")[-1])
     print(f"Downloading {repo} -> {target}")
     snapshot_download(repo_id=repo, local_dir=target)

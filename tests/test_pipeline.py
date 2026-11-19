@@ -76,7 +76,7 @@ def main():
 
     s = state()
     iid = s["instances"][0]["id"]
-    roles = ["sheet", "keyframe", "animate", "continue", "lipsync", "upscale", "voice"]
+    roles = ["sheet", "keyframe", "animate", "continue", "lipsync", "upscale", "voice", "voice_design"]
     post("/api/instance/save", {"id": iid, "name": "GPU0", "url": f"127.0.0.1:{M1}", "roles": roles, "enabled": True})
     post("/api/instance/save", {"name": "GPU1", "url": f"http://127.0.0.1:{M2}", "roles": ["keyframe", "animate", "continue"]})
     post("/api/instance/check", {})
@@ -194,6 +194,28 @@ def main():
     m = [a for a in state()["assets"] if a["id"] == mina["id"]][0]
     refs = [c for c in m["clips"] if c["is_ref"]]
     check(len(refs) == 1 and refs[0]["transcript"] == "New words." and len(m["clips"]) == 2, "replacing the reference keeps one reference")
+
+    # Voice design: keep multiple takes and the sample transcript, without replacing an existing reference.
+    designed = post("/api/asset/save", {"name": "Designed", "kind": "character",
+                                      "voice_desc": "Calm low voice", "voice_sample": "Welcome home."})["id"]
+    r = post("/api/generate", {"stage": "voice_design", "asset_ids": [designed], "takes": 2})
+    check(r["queued"] == 2, "voice design queues two takes")
+    wait_jobs()
+    a = next(a for a in state()["assets"] if a["id"] == designed)
+    check(len(a["clips"]) == 2 and sum(c["is_ref"] for c in a["clips"]) == 1,
+          "designed takes saved with exactly one automatic reference")
+    check(all(c["transcript"] == "Welcome home." and c["path"].endswith(".wav") for c in a["clips"]),
+          "designed references keep the spoken transcript as WAV files")
+    sent_design = [json.loads(p.read_text()) for p in (RUN / "m1").glob("last_*.json")
+                   if "FB_Qwen3TTSVoiceDesign" in p.read_text()]
+    node = sent_design[-1]["1"]["inputs"] if sent_design else {}
+    check(node.get("text") == "Welcome home." and node.get("instruct") == "Calm low voice"
+          and node.get("model_choice") == "1.7B", "voice design sends text, description and supported model")
+    post("/api/clip/update", {"id": a["clips"][1]["id"], "is_ref": True})
+    a = next(a for a in state()["assets"] if a["id"] == designed)
+    check(a["clips"][1]["is_ref"] == 1, "another designed take can become the reference")
+    post("/api/asset/delete", {"id": designed})
+    check(not any(a["id"] == designed for a in state()["assets"]), "designed cast entry can be deleted")
 
     # ---------- Voices tab: the built-in Qwen3-TTS workflow, takes per line
     post("/api/workflow", {"stage": "voice", "starter": "qwen3_tts_clone"})
