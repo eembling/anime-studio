@@ -316,7 +316,8 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
 <aside>
  <div class="brand"><svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true"><rect x="1" y="1" width="28" height="28" rx="7" fill="#C8372D"/><rect x="7" y="9" width="16" height="12" rx="2" fill="none" stroke="#fff" stroke-width="2"/><path d="M13 12.2v5.6l4.6-2.8z" fill="#fff"/></svg><b>Anime Studio</b></div>
  <nav id="nav">
-  <button data-t="script"><span class="en">Script</span><span class="jp">脚本</span></button>
+  <button data-t="studio">Studio <span class="jp">編集</span></button>
+ <button data-t="script"><span class="en">Script</span><span class="jp">脚本</span></button>
   <button data-t="cast"><span class="en">Cast</span><span class="jp">キャラ表</span><span class="n" id="n-cast"></span></button>
   <button data-t="voices"><span class="en">Voices</span><span class="jp">アフレコ</span><span class="n" id="n-voices"></span></button>
   <button data-t="shots" class="on"><span class="en">Shots</span><span class="jp">カット</span><span class="n" id="n-shots"></span></button>
@@ -338,7 +339,7 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
   <div class="notes"><h3>How the script becomes shots</h3>
    <dl><dt>Blank lines separate blocks</dt><dd>Each block becomes one shot.</dd>
    <dt><code># Scene name</code>, <code>INT.</code> or <code>EXT.</code></dt><dd>Starts a new scene.</dd>
-   <dt><code>AIKO: line</code></dt><dd>A dialogue shot: a still keyframe with a slow push-in, the speaker as cast, length estimated from the words. Add lip sync later if it needs it.</dd>
+   <dt><code>AIKO: line</code> or <code>**AIKO:** line</code></dt><dd>A dialogue shot: a still keyframe with a slow push-in, the speaker as cast, length estimated from the words. Add lip sync later if it needs it.</dd>
    <dt>Any other paragraph</dt><dd>A motion shot. The text becomes its keyframe and motion prompt, and cast is matched by name.</dd>
    <dt>Spreadsheet instead?</dt><dd>Import a CSV with <code>seq, scene, kind, cast, keyframe_prompt, motion_prompt, camera, dialogue, duration, retime, ref_prev, end_next, notes</code>. Cast names are separated by <code>;</code>.</dd></dl></div>
  </div>
@@ -352,7 +353,7 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
 </section>
 
 <section class="tab" id="t-voices">
- <div id="vwarn"></div>
+ <div class="toolbar"><button class="btn" onclick="reviewVoiceRecovery()">Recover dialogue from shot prompts</button><span class="muted">Review spoken lines missed during script import. Existing dialogue and generated takes are preserved.</span></div><div id="vwarn"></div>
  <div class="toolbar">
   <div class="chips" id="vfilters"></div>
   <span class="sp"></span>
@@ -377,7 +378,19 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
  <div id="shotlist"></div>
 </section>
 
+<section class="tab" id="t-studio">
+ <h2>Episode timeline</h2><p>Drag shots to reorder. Trim or split at the playhead; source media stays intact. Preview selected video, dialogue and timed audio together before exporting.</p>
+ <div class="theater" id="edit-monitor" style="height:320px"><p>Seek the timeline to preview a shot.</p></div>
+ <div class="toolbar"><button class="btn pri" id="edit-play" onclick="playEdit()">Play episode</button><button class="btn" onclick="frameEdit(-1)">Previous frame</button><button class="btn" onclick="frameEdit(1)">Next frame</button><button class="btn" onclick="editTimelineShot()">Trim current shot</button><button class="btn" onclick="splitEdit()">Split at playhead</button><button class="btn" onclick="editAudioCue()">Add audio cue</button><span id="edit-state"></span></div>
+ <input id="edit-playhead" aria-label="Episode playhead in seconds" type="range" min="0" max="1" value="0" step="0.041667" oninput="seekEdit(this.value)">
+ <div id="edit-track" style="display:flex;overflow-x:auto;gap:4px;padding:10px 0"></div><div id="edit-cues" class="toolbar"></div>
+ <button class="btn sm" onclick="drawWaveform()">Show current dialogue waveform</button><canvas id="edit-waveform" width="1000" height="90" style="width:100%;height:90px" role="img" aria-label="Dialogue waveform appears after selecting a shot with audio"></canvas>
+ <div class="sec"><div><h2>Series and episodes</h2><p>Episodes have their own script, shots, style settings and cues. Cast, reference voices and server workflows are shared across the series. Finish or cancel renders before switching.</p><div class="toolbar"><button class="btn" onclick="editorPost('library',{action:'save'})">Save current episode</button><button class="btn" onclick="episodeAction('new')">New episode</button><button class="btn" onclick="episodeAction('duplicate')">Duplicate episode</button></div></div><div id="episode-list" class="card"></div></div>
+ <div class="sec"><div><h2>History and recovery</h2><p>Editorial changes create checkpoints. Restoring saves the current state first. Generated files stay available for recovery; history uses extra disk space.</p><div class="toolbar"><button class="btn" onclick="undoEdit()">Undo last edit</button><button class="btn" onclick="checkpointEdit()">Create checkpoint</button><button class="btn" onclick="backupProject()">Back up portable project</button><button class="btn" onclick="importProject()">Import project archive</button></div><div id="project-download"></div></div><div id="edit-history" class="card" style="max-height:480px;overflow-y:auto"></div></div>
+ <div class="sec"><div><h2>Final delivery</h2><p>Inspect the current episode before exporting. Subtitles are editable. Audio stems and loudness analysis use the rendered episode chosen in Assemble and require its dialogue-only master.</p><div class="toolbar"><button class="btn" onclick="runQuality()">Check episode quality</button><button class="btn" onclick="editSubtitles()">Edit subtitles</button><button class="btn" id="stem-export" onclick="exportStems()">Export stems and loudness report</button></div><div id="stem-files" class="toolbar"></div></div><div id="delivery-qc" class="card">Run quality checks before final delivery.</div></div>
+</section>
 <section class="tab" id="t-production">
+ <div class="toolbar"><button class="btn" onclick="editContinuity()">Scene continuity</button><button class="btn" onclick="compareSceneTakes()">Compare takes</button><button class="btn danger" onclick="sceneCleanup('clips')">Delete scene clips</button><button class="btn danger" onclick="sceneCleanup('reset')">Reset scene settings</button></div>
  <div class="toolbar"><label for="prodscene">Scene</label><select id="prodscene" onchange="PROD_SCENE=this.value;renderProduction()"></select><span id="prodsummary" class="muted"></span></div>
  <div class="sec"><div><h2>Animatic</h2><p>Check the pacing with selected keyframes, dialogue and shot lengths before rendering animation. Static/hold camera notes hold the image; other camera notes use a slow push-in. Edit shot timing on the Shots page and rebuild the preview.</p><div class="toolbar"><button class="btn" onclick="previewAnimatic(false)">Preview scene</button><button class="btn" onclick="previewAnimatic(true)">Preview episode</button></div><p id="prodpreviewstatus" role="status"></p></div><div id="prodvideo" class="panel">Your animatic will appear here. Missing keyframes appear black.</div></div>
  <div class="sec"><div><h2>Server readiness</h2><p>Inspect the node packs and model choices required by each server’s enabled workflows. No jobs or downloads are submitted by this check.</p><button class="btn" id="prodcheck" onclick="checkProduction()">Check readiness</button></div><div class="card" id="prodready"></div></div>
@@ -439,7 +452,7 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
 const $=s=>document.querySelector(s);
 let S=null,sel=new Set(),tab='shots',VOICES=null,FILTER='all',VIEW={},prevApproved={};
 const STAGES=['sheet','keyframe','animate','continue','lipsync','upscale','voice','voice_design'];
-const TITLES={production:['Production','Preview pacing, check servers, and prepare one scene at a time.'],script:['Script','Write or paste the episode, then turn it into shots.'],cast:['Cast','Characters and locations with their reference sheets.'],voices:['Voices','Generate every line in its character’s voice, choose the best take, and play scenes back.'],shots:['Shots','Keyframe, animate and finish each shot.'],queue:['Render queue','Everything sent to ComfyUI, newest first.'],assemble:['Assemble','Put the episode together and export it for Resolve.'],settings:['Settings','Servers, workflows and project defaults.']};
+const TITLES={studio:['Studio','Edit the episode, manage history and deliver finished work.'],production:['Production','Preview pacing, check servers, and prepare one scene at a time.'],script:['Script','Write or paste the episode, then turn it into shots.'],cast:['Cast','Characters and locations with their reference sheets.'],voices:['Voices','Generate every line in its character’s voice, choose the best take, and play scenes back.'],shots:['Shots','Keyframe, animate and finish each shot.'],queue:['Render queue','Everything sent to ComfyUI, newest first.'],assemble:['Assemble','Put the episode together and export it for Resolve.'],settings:['Settings','Servers, workflows and project defaults.']};
 const jsq=s=>esc(JSON.stringify((s??'').toString()));   // JS string literal, safe inside an onclick="…" attribute
 const esc=s=>(s??'').toString().replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function post(u,b){try{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.ok===false&&j.error)toast(j.error,1);await load();return j}catch(e){toast('Can’t reach the Anime Studio server. Reopen the app.',1);return {ok:false}}}
@@ -491,7 +504,7 @@ function renderContent(force){if(!S)return;if(force)for(const k in SIG)delete SI
  $('#servers').innerHTML=S.instances.map(i=>`<div class="srv" title="${esc(i.health?i.health.info:'Checking')}"><span class="dot ${i.health?(i.health.ok?'ok':'bad'):''}"></span>${esc(i.name)}</div>`).join('')+(S.tools.ffmpeg?'':'<div class="srv err"><span class="dot bad"></span>ffmpeg missing</div>');
  $('#stats').innerHTML=tab==='shots'||tab==='assemble'?`<div class="stat"><b>${fmtT(total)}</b><span>runtime</span></div><div class="stat"><b>${S.shots.length}</b><span>shots</span></div><div class="stat"><b class="ok-t">${cn.done}</b><span>ready</span></div>`:'';
  if(tab==='script'&&(force||document.activeElement!==$('#script')))$('#script').value=S.settings.script||'';
- if(tab==='production')renderProduction();renderDesigned();if(tab==='cast')renderCast();if(tab==='voices'&&(force||!document.activeElement.closest('#t-voices input')))renderVoices();if(tab==='shots')renderShots();if(tab==='queue')renderQueue();if(tab==='assemble')renderAssemble();
+ if(tab!=='studio'&&typeof stopEdit==='function')stopEdit();if(tab==='studio')renderStudio();if(tab==='production')renderProduction();renderDesigned();if(tab==='cast')renderCast();if(tab==='voices'&&(force||!document.activeElement.closest('#t-voices input')))renderVoices();if(tab==='shots')renderShots();if(tab==='queue')renderQueue();if(tab==='assemble')renderAssemble();
  if(tab==='settings'&&(force||!document.activeElement.closest('#t-settings')))renderSettings()}
 
 /* ---------- script ---------- */
@@ -718,7 +731,7 @@ function editShot(id,after){const s=id?S.shots.find(x=>x.id===id):{scene:'',kind
 function lineTable(sid){const box=$('#f_lines');if(!box)return;const s=S.shots.find(x=>x.id===sid);if(!s)return;
  if(s.audio_mode==='file'){box.innerHTML='<div class="muted" style="font-size:13px">This shot uses one audio file for the whole shot. Remove it below to set audio per line.</div>';return}
  if(!(s.lines||[]).length){box.innerHTML='<div class="muted" style="font-size:13px">No dialogue lines yet.</div>';return}
- const byName=Object.fromEntries(S.assets.map(a=>[a.name.toLowerCase(),a]));
+ const byName=Object.fromEntries(S.assets.map(a=>[a.name.trim().toLowerCase(),a]));
  box.innerHTML=`<div class="tbl"><table class="linetbl"><tbody>${s.lines.map(l=>{const a=byName[(l.speaker||'').toLowerCase()];const cl=a?a.clips:S.assets.flatMap(x=>x.clips);
   const cur=l.src==='clip'?'clip:'+l.clip_id:l.audio?'keep':'none';
   return `<tr><td style="width:28px">${l.url?`<button class="play" type="button" onclick="playA(this,'${l.url}')">▶</button>`:'<span class="play off">•</span>'}</td>
@@ -755,13 +768,14 @@ function vMatch(x){return VFILTER==='all'||(VFILTER==='missing'?!x.l.audio:(x.l.
 function vGroups(){const groups=[];allLines().filter(vMatch).forEach(x=>{const sc=x.s.scene||'Untitled scene';const g=groups[groups.length-1];if(g&&g.scene===sc)g.items.push(x);else groups.push({scene:sc,items:[x]})});return groups}
 function renderVoices(){return preserveMainScroll(renderVoicesContent)}
 function renderVoicesContent(){
- if(same('voices',[S.shots,S.assets,S.workflows,S.instances.map(i=>[i.enabled,i.roles]),VFILTER,[...VSEL],SCENEPLAY&&SCENEPLAY.g]))return;
- const lines=allLines(),byName=Object.fromEntries(S.assets.map(a=>[a.name.toLowerCase(),a]));
+ if(same('voices',[S.voice_recovery_count,S.shots,S.assets,S.workflows,S.instances.map(i=>[i.enabled,i.roles]),VFILTER,[...VSEL],SCENEPLAY&&SCENEPLAY.g]))return;
+ const lines=allLines(),byName=Object.fromEntries(S.assets.map(a=>[a.name.trim().toLowerCase(),a]));
  const speakers=[...new Set(lines.map(x=>(x.l.speaker||'').toLowerCase()).filter(Boolean))];
- const noRef=speakers.filter(n=>{const a=byName[n];return !a||!(a.clips||[]).length});
+ const noRef=speakers.filter(n=>{const a=byName[n];if(!a)return true;const clips=a.clips||[],reference=clips.find(c=>c.is_ref)||clips[0];return !reference||reference.available===false});
  const wf=S.workflows.voice,takers=S.instances.filter(i=>i.enabled&&i.roles.split(',').includes('voice'));
  let warn='';
- if(noRef.length)warn+=`<div class="warnbox"><b>No reference voice yet:</b>${noRef.map(n=>byName[n]?`<button class="btn sm" onclick="editAsset(${byName[n].id})">${esc(byName[n].name)}</button>`:`<span class="flag">${esc(n)}</span>`).join('')}<span class="muted">Their lines can’t be generated until you add a recording in Cast.</span></div>`;
+ if(S.voice_recovery_count)warn+=`<div class="warnbox"><b>${S.voice_recovery_count} shots have spoken dialogue stored as visual prompts.</b> Click “Recover dialogue from shot prompts” above to review them before generating voices.</div>`;
+ if(noRef.length)warn+=`<div class="warnbox"><b>No reference voice yet:</b>${noRef.map(n=>byName[n]?`<button class="btn sm" onclick="editAsset(${byName[n].id})">${esc(byName[n].name)}</button>`:`<span class="flag">${esc(n)}</span>`).join('')}<span class="muted">Add or design a reference voice in Cast before generating their lines. Missing reference files must be replaced.</span></div>`;
  if(!wf||(wf.problems||[]).length)warn+=`<div class="warnbox">The voice workflow isn’t ready. See Settings › Workflows.</div>`;
  if(!takers.length)warn+=`<div class="warnbox">No ComfyUI server is set to take voice jobs. Tick “voice” under Settings › ComfyUI servers.</div>`;
  $('#vwarn').innerHTML=warn;
@@ -813,6 +827,7 @@ function queueProgress(j,label){
  if(j.status==='done')return `<progress class="queue-progress done" value="100" max="100" aria-label="${esc(label)} complete"></progress><span class="ok-t">Complete · 100%</span>`;
  if(j.status==='pending')return `<progress class="queue-progress" value="0" max="100" aria-label="${esc(label)} queued"></progress><span class="muted">Queued · not started</span>`;
  if(j.status!=='running')return '';
+ const sampler=/^Sampler (\d+)\/(\d+)/.exec(j.progress||'');if(sampler&&+sampler[2]>0){const value=Math.min(100,100*sampler[1]/sampler[2]);return `<progress class="queue-progress" value="${value}" max="100" aria-label="Current sampler node progress"></progress><span>Current sampler · ${sampler[1]}/${sampler[2]} steps</span>`}
  const known=j.estimated_progress!=null;
  return `<progress class="queue-progress" ${known?`value="${j.estimated_progress}"`:''} max="100" aria-label="${esc(label)} ${known?'estimated progress':'active; progress unknown'}"></progress><span>${known?'Estimated '+j.estimated_progress+'%':'Active · learning timing'}${j.overdue?' · taking longer than typical':''}</span>`;
 }
@@ -872,10 +887,10 @@ function previewAudioExport(){const e=(S.audio_exports||[]).find(e=>e.id===+$('#
 function editAudioCue(id){const cue=id?(S.audio_cues||[]).find(c=>c.id===id):null;if(id&&!cue)return;
  const c=cue||{name:'',kind:'sfx',start:audioPlayhead(),offset:0,duration:'',volume:1,fade_in:0,fade_out:0,loop:0,enabled:1};
  modal(`<div class="dlg-h"><h2>${id?'Edit audio cue':'Add music or sound effect'}</h2></div><div class="dlg-b"><label class="f" for="acfile">Audio file ${id?'(leave empty to keep current source)':''}</label><input type="file" id="acfile" accept="audio/*"><div class="g2"><div><label class="f" for="acname">Name</label><input id="acname" value="${esc(c.name)}"></div><div><label class="f" for="ackind">Track</label><select id="ackind"><option value="sfx">Sound effect</option><option value="music">Music</option></select></div></div>
- <p class="muted">Times accept seconds, MM:SS or HH:MM:SS. Start is measured from the beginning of the episode. Source offset skips the beginning of the audio file.</p>
+ <label class="f">Follow a shot</label><select id="acanchor"><option value="">Absolute episode time</option>${S.shots.map(s=>`<option value="${s.id}" ${s.id===c.anchor_shot?'selected':''}>Shot ${pad(s.seq)} · ${esc(s.scene)}</option>`).join('')}</select><label class="f">Offset from shot start (seconds)</label><input id="acanchoroffset" type="number" min="0" step="0.01" value="${c.anchor_offset||0}"><p class="muted">Times accept seconds, MM:SS or HH:MM:SS. Start is measured from the beginning of the episode. Source offset skips the beginning of the audio file.</p>
  <div class="g2"><div><label class="f" for="acstart">Episode start time</label><input id="acstart" value="${audioTime(c.start)}"><button class="btn sm" onclick="$('#acstart').value=audioTime(audioPlayhead())">Use episode playhead</button></div><div><label class="f" for="acoffset">Source offset</label><input id="acoffset" value="${audioTime(c.offset)}"></div><div><label class="f" for="acduration">Play duration (blank = remaining source length)</label><input id="acduration" value="${c.duration===''?'':audioTime(c.duration)}"></div><div><label class="f" for="acvolume">Volume (0 = mute, 1 = original)</label><input id="acvolume" type="number" min="0" max="4" step="0.05" value="${c.volume}"></div><div><label class="f" for="acfadein">Fade in</label><input id="acfadein" value="${audioTime(c.fade_in)}"></div><div><label class="f" for="acfadeout">Fade out</label><input id="acfadeout" value="${audioTime(c.fade_out)}"></div></div><label class="check"><input id="acloop" type="checkbox" ${c.loop?'checked':''}> Loop source to fill play duration</label><label class="check" style="margin-left:14px"><input id="acenabled" type="checkbox" ${c.enabled?'checked':''}> Enabled</label></div><div class="dlg-f"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn pri" id="acsave">Save cue</button></div>`);
  $('#ackind').value=c.kind;
- $('#acsave').onclick=async()=>{const button=$('#acsave'),file=$('#acfile').files[0];if(!id&&!file)return toast('Choose an audio file first',1);button.disabled=true;try{const b={id,name:$('#acname').value,kind:$('#ackind').value,start:$('#acstart').value,offset:$('#acoffset').value,duration:$('#acduration').value,volume:+$('#acvolume').value,fade_in:$('#acfadein').value,fade_out:$('#acfadeout').value,loop:$('#acloop').checked,enabled:$('#acenabled').checked};if(file)b.file=await readFile(file);const r=await post('/api/audio/cue/save',b);if(r.ok!==false){closeModal();toast('Audio cue saved')}}finally{button.disabled=false}};
+ $('#acsave').onclick=async()=>{const button=$('#acsave'),file=$('#acfile').files[0];if(!id&&!file)return toast('Choose an audio file first',1);button.disabled=true;try{const b={id,anchor_shot:+$('#acanchor').value||null,anchor_offset:+$('#acanchoroffset').value,name:$('#acname').value,kind:$('#ackind').value,start:$('#acstart').value,offset:$('#acoffset').value,duration:$('#acduration').value,volume:+$('#acvolume').value,fade_in:$('#acfadein').value,fade_out:$('#acfadeout').value,loop:$('#acloop').checked,enabled:$('#acenabled').checked};if(file)b.file=await readFile(file);const r=await post('/api/audio/cue/save',b);if(r.ok!==false){closeModal();toast('Audio cue saved')}}finally{button.disabled=false}};
 }
 function toggleAudioCue(id,on){const c=(S.audio_cues||[]).find(c=>c.id===id);if(c)post('/api/audio/cue/save',{...c,enabled:on})}
 function removeAudioCue(id){if(confirm('Remove this audio cue from future mixes? Existing episode exports stay unchanged.'))post('/api/audio/cue/delete',{id})}
@@ -912,4 +927,4 @@ function saveInst(id){post('/api/instance/save',{id,name:$('#in_n'+id).value,url
 function addInst(){post('/api/instance/save',{name:'RTX 3060 #2',url:'http://172.16.2.70:8189',roles:['keyframe','animate','continue','lipsync','sheet']})}
 function saveSettings(){const o={};document.querySelectorAll('#setform [data-k]').forEach(e=>o[e.dataset.k]=e.value);post('/api/settings',{settings:o}).then(()=>toast('Settings saved'))}
 window.addEventListener('DOMContentLoaded',()=>{load();setInterval(()=>{if(!$('#modal').classList.contains('on')||$('#a_designed'))load()},4000)});   // the cast dialog follows its voice takes
-</script><script src="/production.js"></script></body></html>
+</script><script src="/editor.js"></script><script src="/production.js"></script></body></html>

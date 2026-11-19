@@ -2,6 +2,7 @@
 import json, sys, threading, time, uuid, re, subprocess
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 from urllib.parse import urlparse, parse_qs
 from PIL import Image, ImageDraw
 

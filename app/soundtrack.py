@@ -44,7 +44,19 @@ class Soundtrack:
             output TEXT, seconds REAL, clean INTEGER, created REAL)''')
 
     def cues(self):
-        return self.st.db.q('SELECT * FROM audio_cues ORDER BY start,id')
+        rows = self.st.db.q('SELECT * FROM audio_cues ORDER BY start,id')
+        starts = {}; cursor = 0
+        for shot in self.st.ordered_shots():
+            starts[shot['id']] = cursor
+            cursor += shot['duration']
+        for row in rows:
+            if row.get('anchor_shot'):
+                row['anchor_missing'] = row['anchor_shot'] not in starts
+                if row['anchor_missing']:
+                    row['enabled'] = 0
+                else:
+                    row['start'] = starts[row['anchor_shot']] + row['anchor_offset']
+        return rows
 
     def exports(self):
         return self.st.db.q('SELECT * FROM episode_audio_exports ORDER BY created DESC,id DESC')
@@ -53,6 +65,12 @@ class Soundtrack:
         old = self.st.db.one('SELECT * FROM audio_cues WHERE id=?', (body.get('id'),))
         if body.get('id') and not old:
             raise ValueError('This audio cue was removed. Refresh and try again.')
+        anchor, anchor_offset = None, 0
+        if hasattr(self.st, 'editor'):
+            anchor = int(body.get('anchor_shot', (old or {}).get('anchor_shot')) or 0) or None
+            anchor_offset = seconds(body.get('anchor_offset', (old or {}).get('anchor_offset') or 0))
+            if anchor and not self.st.db.one('SELECT id FROM shots WHERE id=?', (anchor,)):
+                raise ValueError('Anchor shot not found')
         uploaded = None
         try:
             if body.get('file'):
@@ -92,6 +110,8 @@ class Soundtrack:
                     aid = old['id']
                 else:
                     aid = self.st.db.x('INSERT INTO audio_cues(name,kind,path,start,offset,duration,volume,fade_in,fade_out,loop,enabled,source_seconds) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', vals)
+            if hasattr(self.st, 'editor'):
+                self.st.db.x('UPDATE audio_cues SET anchor_shot=?,anchor_offset=? WHERE id=?', (anchor, anchor_offset, aid))
             return {'ok': True, 'id': aid}
         except Exception:
             if uploaded:

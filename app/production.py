@@ -39,6 +39,13 @@ class Production:
         if common['workflow']:
             common['workflow'] = {k: v for k, v in common['workflow'].items() if k != 'updated'}
         if stage == 'keyframe':
+            context = st.editor.context(shot['scene']) if hasattr(st, 'editor') else {'variants': []}
+            common['continuity'] = context
+            for variant in context['variants']:
+                if variant['asset_id'] not in {a['id'] for a in assets if a}:
+                    assets.append(st.db.one('SELECT * FROM assets WHERE id=?', (variant['asset_id'],)))
+            overrides = {v['asset_id']: v for v in context['variants']}
+            assets = [dict(a, image=overrides[a['id']]['image']) if a and a['id'] in overrides else a for a in assets]
             common.update(prompt=shot['keyframe_prompt'], camera=shot['camera'], assets=[{k: a[k] for k in ('id', 'image', 'description', 'lora', 'lora_strength')} for a in assets if a],
                           image_stamps=[self.file_stamp(a['image']) for a in assets if a],
                           settings={k: settings[k] for k in ('style_prompt', 'keyframe_negative', 'kf_width', 'kf_height')})
@@ -286,18 +293,8 @@ class Production:
         api, st = self.api_type(self.st), self.st
         current = st.ordered_shots()
         token = digest(current)
-        blocks, scene = [], ''
-        for block in re.split(r'\n\s*\n', body.get('script', '')):
-            lines = block.strip().splitlines()
-            if not lines:
-                continue
-            if re.match(r'^(#+|INT\.|EXT\.|INT/EXT|SCENE\b)', lines[0], re.I):
-                scene = lines.pop(0).lstrip('#').strip()
-            text = ' '.join(lines).strip()
-            if not text:
-                continue
-            m = re.match(r"^([A-Z][A-Za-z0-9 .'-]{0,30})\s*(?:\([^)]*\))?\s*:\s*(.+)$", text)
-            blocks.append({'scene': scene, 'kind': 'still' if m else 'motion', 'text': text, 'speaker': m.group(1).strip() if m else ''})
+        from script_dialogue import script_blocks
+        blocks = script_blocks(body.get('script', ''))
         def canonical(text):
             return re.sub(r'^([^:]+):', lambda m: m.group(1).strip().casefold() + ':', text, count=1)
         def oldkey(s):
@@ -345,8 +342,9 @@ class Production:
                     seq.append(int(sid))
                 continue
             names = {a['name'].lower(): a['id'] for a in st.db.q('SELECT id,name FROM assets')}
-            if block['speaker'] and block['speaker'].lower() not in names:
-                names[block['speaker'].lower()] = api.asset_save({'name': block['speaker'].title(), 'kind': 'character'})['id']
+            for entry in block['entries']:
+                if entry['speaker'].lower() not in names:
+                    names[entry['speaker'].lower()] = api.asset_save({'name':entry['speaker'].title(),'kind':'character'})['id']
             cast = [v for k, v in names.items() if re.search(r'\b' + re.escape(k) + r'\b', block['text'], re.I)]
             values = {'scene': block['scene'], 'kind': block['kind'], 'asset_ids': cast}
             if block['speaker']:
@@ -358,6 +356,12 @@ class Production:
             if sid:
                 values['id'] = int(sid)
             saved = api.shot_save(values)
+            if block['entries']:
+                shot = st.db.one('SELECT * FROM shots WHERE id=?', (saved['id'],))
+                lines = st.shot_lines(shot)
+                for line,entry in zip(lines,block['entries']):
+                    if entry['direction']:line['direction']=entry['direction']
+                st.save_lines(shot['id'],lines)
             seq.append(int(sid) if sid else saved['id']); changed += 1
         if remove:
             api.shot_delete({'ids': remove})
