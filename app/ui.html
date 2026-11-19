@@ -289,6 +289,7 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
   <button data-t="cast"><span class="en">Cast</span><span class="jp">キャラ表</span><span class="n" id="n-cast"></span></button>
   <button data-t="voices"><span class="en">Voices</span><span class="jp">アフレコ</span><span class="n" id="n-voices"></span></button>
   <button data-t="shots" class="on"><span class="en">Shots</span><span class="jp">カット</span><span class="n" id="n-shots"></span></button>
+  <button data-t="production"><span class="en">Production</span><span class="jp">制作</span></button>
   <button data-t="queue"><span class="en">Render queue</span><span class="jp">進行</span><span class="n" id="n-queue"></span></button>
   <button data-t="assemble"><span class="en">Assemble</span><span class="jp">撮影</span></button>
   <button data-t="settings"><span class="en">Settings</span><span class="jp">設定</span></button>
@@ -301,7 +302,7 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
 <section class="tab" id="t-script">
  <div class="script-wrap">
   <div class="page"><textarea id="script" spellcheck="true" aria-label="Script" placeholder="# Rooftop at dusk&#10;&#10;Aiko leans on the fence while the wind moves her scarf. The city glows below.&#10;&#10;AIKO: You came after all.&#10;&#10;KENJI: I always do."></textarea>
-   <div class="acts"><button class="btn" onclick="saveScript()">Save script</button><button class="btn pri" onclick="draftShots()">Create shots from script</button><span style="flex:1"></span>
+   <div class="acts"><button class="btn" onclick="saveScript()">Save script</button><button class="btn pri" onclick="draftShots()">Create shots from script</button><button class="btn" onclick="previewRevision()">Review script revision</button><span style="flex:1"></span>
    <button class="btn ghost" onclick="pick('.csv,.tsv,.txt',f=>post('/api/csv/import',{file:f}).then(r=>r.ok!==false&&toast('Imported '+r.imported+' shots')))">Import shot list</button><a class="btn ghost" href="/api/csv/export">Export shot list</a></div></div>
   <div class="notes"><h3>How the script becomes shots</h3>
    <dl><dt>Blank lines separate blocks</dt><dd>Each block becomes one shot.</dd>
@@ -345,6 +346,14 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
  <div id="shotlist"></div>
 </section>
 
+<section class="tab" id="t-production">
+ <div class="toolbar"><label for="prodscene">Scene</label><select id="prodscene" onchange="PROD_SCENE=this.value;renderProduction()"></select><span id="prodsummary" class="muted"></span></div>
+ <div class="sec"><div><h2>Animatic</h2><p>Check the pacing with selected keyframes, dialogue and shot lengths before rendering animation. Static/hold camera notes hold the image; other camera notes use a slow push-in. Edit shot timing on the Shots page and rebuild the preview.</p><div class="toolbar"><button class="btn" onclick="previewAnimatic(false)">Preview scene</button><button class="btn" onclick="previewAnimatic(true)">Preview episode</button></div><p id="prodpreviewstatus" role="status"></p></div><div id="prodvideo" class="panel">Your animatic will appear here. Missing keyframes appear black.</div></div>
+ <div class="sec"><div><h2>Server readiness</h2><p>Inspect the node packs and model choices required by each server’s enabled workflows. No jobs or downloads are submitted by this check.</p><button class="btn" id="prodcheck" onclick="checkProduction()">Check readiness</button></div><div class="card" id="prodready"></div></div>
+ <div class="sec"><div><h2>Prepare this scene</h2><p>Generate missing voices and keyframes, pause for keyframe approval, then render animation and continuations. Optional finishing follows. Plans are saved and resume when the app reopens.</p><label class="f" for="prodpriority">Priority (−10 to 10; higher first)</label><input type="number" id="prodpriority" min="-10" max="10" value="0"><label class="check"><input type="checkbox" id="prodlip"> Lip sync after animation</label><label class="check"><input type="checkbox" id="produp"> Upscale after animation</label><div class="toolbar"><button class="btn pri" onclick="prepareScene()">Prepare this scene</button><button class="btn" onclick="regenerateScene()">Regenerate affected stages</button></div><p id="prodestimate" class="muted"></p></div><div class="card" id="prodplans"></div></div>
+ <h2>Scene review</h2><div class="card" id="prodshots"></div>
+</section>
+
 <section class="tab" id="t-queue">
  <div class="qstats" id="qstats"></div>
  <div class="toolbar"><button class="btn" onclick="jobs('retry_errors')">Retry failed jobs</button><button class="btn" onclick="jobs('cancel_pending')">Cancel waiting jobs</button><button class="btn ghost" onclick="jobs('clear')">Clear finished</button></div>
@@ -386,7 +395,7 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
 const $=s=>document.querySelector(s);
 let S=null,sel=new Set(),tab='shots',VOICES=null,FILTER='all',VIEW={},prevApproved={};
 const STAGES=['sheet','keyframe','animate','continue','lipsync','upscale','voice','voice_design'];
-const TITLES={script:['Script','Write or paste the episode, then turn it into shots.'],cast:['Cast','Characters and locations with their reference sheets.'],voices:['Voices','Generate every line in its character’s voice, choose the best take, and play scenes back.'],shots:['Shots','Keyframe, animate and finish each shot.'],queue:['Render queue','Everything sent to ComfyUI, newest first.'],assemble:['Assemble','Put the episode together and export it for Resolve.'],settings:['Settings','Servers, workflows and project defaults.']};
+const TITLES={production:['Production','Preview pacing, check servers, and prepare one scene at a time.'],script:['Script','Write or paste the episode, then turn it into shots.'],cast:['Cast','Characters and locations with their reference sheets.'],voices:['Voices','Generate every line in its character’s voice, choose the best take, and play scenes back.'],shots:['Shots','Keyframe, animate and finish each shot.'],queue:['Render queue','Everything sent to ComfyUI, newest first.'],assemble:['Assemble','Put the episode together and export it for Resolve.'],settings:['Settings','Servers, workflows and project defaults.']};
 const jsq=s=>esc(JSON.stringify((s??'').toString()));   // JS string literal, safe inside an onclick="…" attribute
 const esc=s=>(s??'').toString().replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function post(u,b){try{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.ok===false&&j.error)toast(j.error,1);await load();return j}catch(e){toast('Can’t reach the Anime Studio server. Reopen the app.',1);return {ok:false}}}
@@ -422,7 +431,7 @@ function render(force){if(!S)return;if(force)for(const k in SIG)delete SIG[k];
  $('#servers').innerHTML=S.instances.map(i=>`<div class="srv" title="${esc(i.health?i.health.info:'Checking')}"><span class="dot ${i.health?(i.health.ok?'ok':'bad'):''}"></span>${esc(i.name)}</div>`).join('')+(S.tools.ffmpeg?'':'<div class="srv err"><span class="dot bad"></span>ffmpeg missing</div>');
  $('#stats').innerHTML=tab==='shots'||tab==='assemble'?`<div class="stat"><b>${fmtT(total)}</b><span>runtime</span></div><div class="stat"><b>${S.shots.length}</b><span>shots</span></div><div class="stat"><b class="ok-t">${cn.done}</b><span>ready</span></div>`:'';
  if(tab==='script'&&(force||document.activeElement!==$('#script')))$('#script').value=S.settings.script||'';
- renderDesigned();if(tab==='cast')renderCast();if(tab==='voices'&&(force||!document.activeElement.closest('#t-voices input')))renderVoices();if(tab==='shots')renderShots();if(tab==='queue')renderQueue();if(tab==='assemble')renderAssemble();
+ if(tab==='production')renderProduction();renderDesigned();if(tab==='cast')renderCast();if(tab==='voices'&&(force||!document.activeElement.closest('#t-voices input')))renderVoices();if(tab==='shots')renderShots();if(tab==='queue')renderQueue();if(tab==='assemble')renderAssemble();
  if(tab==='settings'&&(force||!document.activeElement.closest('#t-settings')))renderSettings()}
 
 /* ---------- script ---------- */
@@ -567,7 +576,7 @@ function renderShots(){
   const stState=(has,act)=>act?'run':has?'ok':'hollow';
   return `<article class="cut" id="cut-${s.id}">
   <div class="cut-no"><label class="check"><input type="checkbox" ${sel.has(s.id)?'checked':''} onchange="tog(${s.id},this.checked)" aria-label="Select shot ${s.seq|0}"></label>
-   <div class="no"><small>Shot</small>${pad(s.seq)}</div><div class="dur">${(+s.duration).toFixed(1)} s</div><div class="kind">${s.kind==='still'?'Still':'Motion'}</div>
+   <div class="no"><small>Shot</small>${pad(s.seq)}</div><div class="dur">${(+s.duration).toFixed(1)} s</div><div class="kind">${s.kind==='still'?'Still':'Motion'}</div>${s.outdated.length?'<span class="err">Outdated renders</span>':''}
    <div class="mv"><button onclick="post('/api/shot/move',{id:${s.id},dir:-1})" title="Move up" aria-label="Move up">▲</button><button onclick="post('/api/shot/move',{id:${s.id},dir:1})" title="Move down" aria-label="Move down">▼</button></div></div>
   <div class="screen">${media}${viewing?`<span class="tag">${lab(viewing)}</span>`:''}${viewing&&(!approved||viewing.draft)?`<span class="use" style="display:flex;gap:6px">${viewing.draft?`<button class="btn sm" onclick="fullQuality(${viewing.id})" title="Render again at full quality with the same seed">Render full quality</button>`:''}${!approved?`<button class="btn sm red" onclick="approve(${viewing.id})">Use this take</button>`:''}</span>`:''}</div>
   <div class="info"><h3>${esc(s.scene)||'Untitled scene'}</h3>${names?`<div class="cast">${names}</div>`:''}
@@ -717,8 +726,8 @@ function renderQueue(){const inst=Object.fromEntries(S.instances.map(i=>[i.id,i.
  $('#jobrows').innerHTML=S.jobs.map(j=>{const t=j.finished&&j.started?fmtT(j.finished-j.started):j.started&&j.status==='running'?fmtT(Date.now()/1000-j.started):'';
   const who=j.stage==='sheet'?esc(an[j.asset_id]||'Deleted cast'):(seq[j.shot_id]!=null?`Shot ${pad(seq[j.shot_id])}`:'Deleted shot');
   return `<tr><td class="muted">${j.id}</td><td>${who}</td><td>${step[j.stage]||j.stage}${j.stage==='continue'?' (part '+((j.segment||0)+2)+')':''}${j.draft?' <span class="flag">draft</span>':''}</td><td><span class="pill p-${j.status}">${({running:'Rendering',pending:'Waiting',done:'Done',error:'Failed',cancelled:'Cancelled'})[j.status]||j.status}</span></td><td class="muted">${esc(inst[j.instance_id]||'')}</td>
-  <td>${j.error?`<details><summary class="err">${esc(j.error.slice(0,100))}</summary><pre>${esc(j.error)}</pre></details>`:`<span class="muted">${esc(j.progress||'')}</span>`}</td><td style="font-variant-numeric:tabular-nums">${t}</td>
-  <td>${['pending','running'].includes(j.status)?`<button class="btn sm" onclick="post('/api/jobs',{action:'cancel',ids:[${j.id}]})">Cancel</button>`:''}${['error','cancelled'].includes(j.status)?`<button class="btn sm" onclick="post('/api/jobs',{action:'retry',ids:[${j.id}]})">Retry</button>`:''}</td></tr>`}).join('')
+  <td>${j.error?`<details><summary class="err">${esc(j.error.slice(0,100))}</summary><pre>${esc(j.error)}</pre></details>`:`<span class="muted">${esc(j.progress||'')}${S.production.job_estimates[j.id]?' · ETA '+fmtT(S.production.job_estimates[j.id]):''}</span>`}</td><td style="font-variant-numeric:tabular-nums">${t}</td>
+  <td>${j.status==='pending'?`<label>Priority <input type="number" min="-10" max="10" value="${j.priority||0}" style="width:60px" aria-label="Priority for job ${j.id}" onchange="post('/api/jobs',{action:'priority',ids:[${j.id}],priority:+this.value})"></label>`:''}${['pending','running'].includes(j.status)?`<button class="btn sm" onclick="post('/api/jobs',{action:'cancel',ids:[${j.id}]})">Cancel</button>`:''}${['error','cancelled'].includes(j.status)?`<button class="btn sm" onclick="post('/api/jobs',{action:'retry',ids:[${j.id}]})">Retry</button>`:''}</td></tr>`}).join('')
   ||'<tr><td colspan="8" class="muted" style="padding:28px;text-align:center">No jobs yet. Generate keyframes from the Shots page and they’ll appear here.</td></tr>'}
 function jobs(a){post('/api/jobs',{action:a})}
 
@@ -762,5 +771,5 @@ function renderSettings(){
 function saveInst(id){post('/api/instance/save',{id,name:$('#in_n'+id).value,url:$('#in_u'+id).value,enabled:$('#in_e'+id).checked,roles:[...document.querySelectorAll('.in_r'+id+':checked')].map(x=>x.value)}).then(()=>toast('Server saved'))}
 function addInst(){post('/api/instance/save',{name:'RTX 3060 #2',url:'http://172.16.2.70:8189',roles:['keyframe','animate','continue','lipsync','sheet']})}
 function saveSettings(){const o={};document.querySelectorAll('#setform [data-k]').forEach(e=>o[e.dataset.k]=e.value);post('/api/settings',{settings:o}).then(()=>toast('Settings saved'))}
-load();setInterval(()=>{if(!$('#modal').classList.contains('on')||$('#a_designed'))load()},4000);   // the cast dialog follows its voice takes
-</script></body></html>
+window.addEventListener('DOMContentLoaded',()=>{load();setInterval(()=>{if(!$('#modal').classList.contains('on')||$('#a_designed'))load()},4000)});   // the cast dialog follows its voice takes
+</script><script src="/production.js"></script></body></html>

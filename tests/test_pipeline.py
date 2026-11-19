@@ -253,6 +253,43 @@ def main():
     post("/api/generate", {"stage": "upscale", "shot_ids": [long_id]})
     wait_jobs()
 
+    # Guided scene preparation uses the real dispatcher and stops before expensive animation.
+    guided = post("/api/shot/save", {"scene": "Guided test", "kind": "motion", "keyframe_prompt": "Empty pier",
+                                      "motion_prompt": "gentle waves", "duration": 6})["id"]
+    pid = post("/api/production/plan", {"scene": "Guided test", "priority": 4})["id"]
+    for _ in range(60):
+        p = next(p for p in state()["production"]["plans"] if p["id"] == pid)
+        if p["status"] in ("approval", "blocked"):
+            break
+        time.sleep(1)
+    check(p["status"] == "approval", "scene plan pauses for keyframe approval")
+    sh = shot(guided)
+    check(sh["keyframe_take"] and not sh["clip_take"], "scene plan does not animate before approval")
+    post("/api/approve", {"take_id": sh["keyframe_take"]})
+    for _ in range(100):
+        p = next(p for p in state()["production"]["plans"] if p["id"] == pid)
+        if p["status"] in ("done", "blocked"):
+            break
+        time.sleep(1)
+    check(p["status"] == "done", "scene plan completes animation and continuation: " + p["detail"])
+    sh = shot(guided)
+    check(sh["clip_take"] and sh["remaining"] < 0.25 and not sh["outdated"], "guided scene has a complete current animation chain")
+    post("/api/shot/save", {"id": guided, "motion_prompt": "stormy waves"})
+    check("animate" in shot(guided)["outdated"], "motion edits flag selected animation as outdated")
+    post("/api/shot/save", {"id": guided, "motion_prompt": "gentle waves"})
+    check(not shot(guided)["outdated"], "restoring original inputs restores render validity")
+    before_jobs = state()["job_counts"]
+    post("/api/assemble", {"preview": True, "scene": "Guided test", "use_music": False})
+    for _ in range(60):
+        A = state()["assembly"]
+        if not A["running"]:
+            break
+        time.sleep(1)
+    check(A.get("kind") == "animatic" and A["output"] and not any("ERROR" in x for x in A["log"]), "scene animatic renders successfully")
+    check(state()["job_counts"] == before_jobs, "animatic creates no GPU jobs")
+    check(abs(duration(RUN / "data" / A["output"]) - 6) < 0.15, "animatic respects shot timing")
+    post("/api/shot/delete", {"ids": [guided]})
+
     # ---------- review fixes (v2.5)
     r = post("/api/settings", {"settings": {"tts_language": "english", "tts_model": "1.7b"}})
     st_ = state()["settings"]

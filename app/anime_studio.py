@@ -39,7 +39,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "2.6"
+VERSION = "2.7"
 for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebrew/bin")):
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
@@ -226,6 +226,8 @@ MIGRATIONS = [  # columns added after v2.0 - existing projects get them on start
     ("shots", "cont_takes", "TEXT DEFAULT '[]'"), ("takes", "frames", "INTEGER"), ("takes", "segment", "INTEGER"),
     ("takes", "draft", "INTEGER DEFAULT 0"), ("jobs", "segment", "INTEGER"), ("jobs", "draft", "INTEGER DEFAULT 0"),
     ("shots", "line_audio", "TEXT DEFAULT '[]'"), ("shots", "audio_mode", "TEXT DEFAULT 'lines'"), ("jobs", "note", "TEXT"),
+    ("jobs", "priority", "INTEGER DEFAULT 0"),
+    ("takes", "input_signature", "TEXT"), ("voice_takes", "input_signature", "TEXT"),
     ("assets", "voice_desc", "TEXT DEFAULT ''"), ("assets", "voice_sample", "TEXT DEFAULT ''"),
 ]
 
@@ -358,6 +360,8 @@ class Studio:
         self.db.x("UPDATE jobs SET status='pending', instance_id=NULL, prompt_id=NULL, progress='requeued after restart' "
                   "WHERE status='running'")
         self.health = {}
+        from production import Production
+        self.production = Production(self, API, http_json)
         self.frame_lock = threading.Lock()
         self.assembly = {"running": False, "log": [], "output": None, "folder": None}
         self.tools_cache = None
@@ -882,6 +886,7 @@ class Worker(threading.Thread):
             try:
                 if time.time() - self.last_health > 15:
                     self.refresh_health()
+                self.st.production.tick()
                 self.dispatch()
             except Exception:
                 traceback.print_exc()
@@ -905,14 +910,27 @@ class Worker(threading.Thread):
 
     def dispatch(self):
         db = self.st.db
+        if db.one("SELECT id FROM jobs WHERE status='pending' LIMIT 1"):
+            self.st.production.inspect()
         busy = {r["instance_id"] for r in db.q("SELECT instance_id FROM jobs WHERE status='running'")}
         for inst in db.q("SELECT * FROM instances WHERE enabled=1"):
             if inst["id"] in busy or not self.st.health.get(inst["id"], {}).get("ok"):
                 continue
             roles = [r.strip() for r in (inst["roles"] or "").split(",") if r.strip() in JOB_STAGES]
+            inspected = self.st.production.readiness.get('servers', [])
+            readiness = next((s['stages'] for s in inspected if s['id'] == inst['id']), None)
+            if readiness is not None:
+                roles = [r for r in roles if readiness.get(r, {}).get('ready')]
             if not roles:
                 continue
-            job = db.one(f"SELECT * FROM jobs WHERE status='pending' AND stage IN ({','.join('?' * len(roles))}) ORDER BY id LIMIT 1", roles)
+            candidates = db.q(f"SELECT * FROM jobs WHERE status='pending' AND stage IN ({','.join('?' * len(roles))}) ORDER BY priority DESC,id", roles)
+            job = None
+            for candidate in candidates:
+                shot = db.one('SELECT end_next FROM shots WHERE id=?', (candidate['shot_id'],))
+                if candidate['stage'] in ('animate', 'continue') and shot and shot['end_next'] and not (readiness or {}).get('animate_flf', {}).get('ready'):
+                    continue
+                job = candidate
+                break
             if job and db.u("UPDATE jobs SET status='running', instance_id=?, started=?, progress='starting', error=NULL "
                             "WHERE id=? AND status='pending'", (inst["id"], time.time(), job["id"])):
                 busy.add(inst["id"])
@@ -1055,6 +1073,7 @@ class Worker(threading.Thread):
         base, pid = inst["url"].rstrip("/"), None
         try:
             job = db.one("SELECT * FROM jobs WHERE id=?", (job_id,))
+            st.production.capture(job)
             key, p = self.compose(job)
             row = st.wf_row(key)
             if not row:
@@ -1134,6 +1153,7 @@ class Worker(threading.Thread):
 
     def finish(self, job, key, local):
         st, stage = self.st, job["stage"]
+        signature = (st.db.one("SELECT signature FROM production_inputs WHERE job_id=?", (job["id"],)) or {}).get("signature")
         owner = (st.db.one("SELECT id FROM assets WHERE id=?", (job["asset_id"],)) if stage in ASSET_STAGES
                  else st.db.one("SELECT id FROM shots WHERE id=?", (job["shot_id"],)))
         if not owner:
@@ -1167,9 +1187,9 @@ class Worker(threading.Thread):
                 return
             lines = st.shot_lines(shot)
             line = next((l for l in lines if norm_text(l["text"]) == norm_text(job.get("note"))), None)
-            st.db.x("INSERT INTO voice_takes(shot_id,text,speaker,path,seed,job_id,seconds,created) VALUES(?,?,?,?,?,?,?,?)",
+            st.db.x("INSERT INTO voice_takes(shot_id,text,speaker,path,seed,job_id,seconds,created,input_signature) VALUES(?,?,?,?,?,?,?,?,?)",
                     (shot["id"], job.get("note"), (line or {}).get("speaker", ""), st.rel(dest), job["seed"], job["id"],
-                     round(media_seconds(dest), 2), time.time()))
+                     round(media_seconds(dest), 2), time.time(), signature))
             if line and not line["audio"]:
                 line.update(audio=st.rel(dest), src="tts", clip_id=None)
                 st.save_lines(shot["id"], lines)
@@ -1204,10 +1224,10 @@ class Worker(threading.Thread):
             made.append((dest, fps))
         nframes = len(imgs) if imgs and not vids else None
         for path, fps in made:
-            tid = st.db.x("INSERT INTO takes(shot_id,asset_id,stage,path,fps,seed,job_id,created,frames,segment,draft) "
-                          "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            tid = st.db.x("INSERT INTO takes(shot_id,asset_id,stage,path,fps,seed,job_id,created,frames,segment,draft,input_signature) "
+                          "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                           (job["shot_id"], job["asset_id"], stage, st.rel(path), fps, job["seed"], job["id"], time.time(),
-                           nframes if fps else None, job.get("segment"), 1 if job.get("draft") else 0))
+                           nframes if fps else None, job.get("segment"), 1 if job.get("draft") else 0, signature))
             if stage in TAKE_FIELD:
                 f = TAKE_FIELD[stage]
                 st.db.x(f"UPDATE shots SET {f}=? WHERE id=? AND {f} IS NULL", (tid, job["shot_id"]))
@@ -1226,19 +1246,22 @@ def tc(frames, fps, hour=0):
     return f"{hour + f // (fps * 3600):02d}:{f // (fps * 60) % 60:02d}:{f // fps % 60:02d}:{f % fps:02d}"
 
 
-def assemble(st, use_music, music_volume):
+def assemble(st, use_music, music_volume, preview=False, scene=None):
     A = st.assembly
-    A.update(running=True, log=[], output=None, folder=None)
+    A.update(running=True, log=[], output=None, folder=None, kind='animatic' if preview else 'episode')
     log = A["log"]
     try:
         if not st.tools(refresh=True)["ffmpeg"]:
             raise RuntimeError("ffmpeg not found. Install it with: brew install ffmpeg")
         S = st.settings()
         W, H, FPS = int(S["out_width"]), int(S["out_height"]), int(S["out_fps"])
-        shots = st.ordered_shots()
+        if preview:
+            W, H, FPS = 960, 540, 24
+        shots = [s for s in st.ordered_shots() if scene is None or s['scene'] == scene]
         if not shots:
             raise RuntimeError("No shots yet.")
         name = re.sub(r"[^A-Za-z0-9_-]+", "_", S.get("title") or "episode").strip("_") or "episode"
+        name += "_animatic" if preview else ""
         out = st.data / "exports" / f"{name}_{time.strftime('%Y%m%d_%H%M%S')}"
         (out / "shots").mkdir(parents=True)
         venc = ["-c:v", "libx264", "-crf", "16", "-preset", "medium", "-pix_fmt", "yuv420p", "-r", str(FPS)]
@@ -1253,6 +1276,8 @@ def assemble(st, use_music, music_volume):
             take = st.take(s["final_take"]) or (chain[0] if chain else None)
             if take and s["kind"] == "still" and take["stage"] not in ("lipsync", "upscale"):
                 take, chain = None, []   # still shots use the keyframe pan unless they were lip-synced
+            if preview:
+                take, chain = None, []
             kf = st.take_path(s["keyframe_take"])
             audio = st.abs(s["audio"]) if s["audio"] and st.abs(s["audio"]).exists() else None
             ain = ["-i", str(audio)] if audio else ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
@@ -1283,6 +1308,8 @@ def assemble(st, use_music, music_volume):
                 how, vin = "still pan", ["-loop", "1", "-framerate", str(FPS), "-i", str(kf)]
                 vf = (f"[0:v]scale={W * 2}:{H * 2}:force_original_aspect_ratio=increase,crop={W * 2}:{H * 2},"
                       f"zoompan=z='min(1+0.0010*on,1.2)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS},setsar=1[v]")
+                if preview and (s['camera'] or '').strip().lower() in ('static', 'hold', 'locked'):
+                    vf = f"[0:v]{fill}[v]"
             else:
                 how, vin = "MISSING - black", ["-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r={FPS}"]
                 vf = "[0:v]setsar=1[v]"
@@ -1399,6 +1426,7 @@ class API:
         jobs = db.q("SELECT * FROM jobs WHERE status IN ('pending','running') OR id IN (SELECT id FROM jobs ORDER BY id DESC LIMIT 300) "
                     "ORDER BY id DESC")
         counts = {r["status"]: r["n"] for r in db.q("SELECT status, COUNT(*) n FROM jobs GROUP BY status")}
+        production = st.production.snapshot(shots)
         A = dict(st.assembly, log=list(st.assembly["log"]))
         A["output_url"] = self.media(A.get("output"))
         S = st.settings()
@@ -1406,7 +1434,7 @@ class API:
         S["max_clip_seconds"] = round((st.max_frames() - 1) / float(st.wf_fps()), 2)
         return {"settings": S, "tts_languages": TTS_LANGUAGES, "voice_sample": VOICE_SAMPLE, "shots": shots, "assets": assets, "instances": insts, "workflows": wfs, "starters": starters,
                 "jobs": jobs, "job_counts": counts, "assembly": A, "tools": st.tools(), "music_url": self.media(S.get("music")),
-                "version": VERSION, "platform": sys.platform}
+                "version": VERSION, "platform": sys.platform, "production": production}
 
     # ---- settings / servers / workflows / tools
     def settings(self, b):
@@ -1591,6 +1619,7 @@ class API:
     def shot_delete(self, b):
         db = self.st.db
         for sid in b["ids"]:
+            db.x("DELETE FROM production_approvals WHERE shot_id=?", (sid,))
             db.x("DELETE FROM shots WHERE id=?", (sid,))
             db.x(f"DELETE FROM takes WHERE shot_id=? AND stage NOT IN {_ASSET_SQL}", (sid,))
             db.x("DELETE FROM voice_takes WHERE shot_id=?", (sid,))
@@ -1819,7 +1848,11 @@ class API:
 
     # ---- generation / takes / jobs
     def generate(self, b):
-        r = self._generate(b)
+        if not self.st.production.ready(b['stage'], b.get('shot_ids', [])):
+            return {'ok': False, 'queued': 0, 'skipped': ['No ready server for this workflow. Run Production → Check readiness for details.'],
+                    'error': 'No ready server for ' + b['stage']}
+        with self.st.production.lock:
+            r = self._generate(b)
         takers = [i for i in self.st.db.q("SELECT roles FROM instances WHERE enabled=1") if b["stage"] in (i["roles"] or "").split(",")]
         if r.get("queued") and not takers:
             r["skipped"] = [f"No server is set to take {b['stage']} jobs. Tick it under Settings, ComfyUI servers."] + r["skipped"]
@@ -1896,7 +1929,7 @@ class API:
                 if float(s["duration"]) - st.chain_seconds(chain[:segment + 1]) < 0.25:
                     skipped.append(f"{label}: already animated for its full length")
                     continue
-            if stage != "keyframe" and s["kind"] == "still" and stage != "lipsync":
+            if stage != "keyframe" and s["kind"] == "still" and stage != "lipsync" and not (stage == "upscale" and s["clip_take"]):
                 skipped.append(f"{label}: still shot")
                 continue
             if stage in ("animate", "lipsync") and not st.take_path(s["keyframe_take"]):
@@ -1932,6 +1965,8 @@ class API:
                     (t["id"], t["shot_id"], t["id"]))
         else:
             self.st.db.x(f"UPDATE shots SET {TAKE_FIELD[t['stage']]}=? WHERE id=?", (t["id"], t["shot_id"]))
+        if t['stage'] == 'keyframe':
+            st.production.approve(t['shot_id'])
         return {"ok": True}
 
     def take_delete(self, b):
@@ -1957,7 +1992,11 @@ class API:
 
     def job_action(self, b):
         db, act, now = self.st.db, b["action"], time.time()
-        if act == "cancel":
+        if act == 'priority':
+            priority = max(-10, min(10, int(b.get('priority', 0))))
+            for jid in b['ids']:
+                db.x("UPDATE jobs SET priority=? WHERE id=? AND status='pending'", (priority, jid))
+        elif act == "cancel":
             for jid in b["ids"]:
                 db.x("UPDATE jobs SET status='cancelled', finished=? WHERE id=? AND status IN ('pending','running')", (now, jid))
         elif act == "retry":
@@ -1977,14 +2016,46 @@ class API:
         self.st.db.x("INSERT OR REPLACE INTO settings(key,value) VALUES('music',?)", (val,))
         return {"ok": True}
 
+    def production_check(self, b):
+        return dict(self.st.production.inspect(refresh=True), ok=True)
+
+    def production_plan(self, b):
+        return self.st.production.plan(b)
+
+    def script_revision(self, b):
+        with self.st.production.lock:
+            return self.st.production.revision(b)
+
+    def regenerate(self, b):
+        selected = set(b.get('shot_ids', []))
+        result = []
+        for shot in self.state()['shots']:
+            if shot['id'] not in selected:
+                continue
+            stages = shot['outdated']
+            # Regenerate the earliest affected dependency; old takes remain available.
+            stage = next((s for s in ('voice','keyframe','animate','continue','lipsync','upscale') if s in stages), None)
+            if stage:
+                if stage == 'continue':
+                    stage = 'animate'
+                r = self.generate({'stage': stage, 'shot_ids': [shot['id']], 'takes': 1, 'replace': True})
+                result.append({'shot_id': shot['id'], 'stage': stage, **r})
+        return {'ok': True, 'results': result}
+
     def assemble(self, b):
         if self.st.assembly["running"]:
             return {"ok": False, "error": "Already assembling."}
-        threading.Thread(target=assemble, args=(self.st, b.get("use_music"), b.get("music_volume", 0.25)), daemon=True).start()
+        with self.st.production.lock:
+            if self.st.assembly['running']:
+                return {'ok': False, 'error': 'Already assembling.'}
+            self.st.assembly['running'] = True
+            threading.Thread(target=assemble, args=(self.st, b.get("use_music"), b.get("music_volume", 0.25), bool(b.get('preview')), b.get('scene')), daemon=True).start()
         return {"ok": True}
 
 
 ROUTES = {
+    '/api/production/check': 'production_check', '/api/production/plan': 'production_plan',
+    '/api/script/revision': 'script_revision', '/api/regenerate': 'regenerate',
     "/api/settings": "settings", "/api/instance/save": "instance_save", "/api/instance/delete": "instance_delete",
     "/api/instance/check": "instance_check", "/api/workflow": "workflow", "/api/workflow/meta": "workflow_meta",
     "/api/voices": "voices", "/api/reveal": "reveal", "/api/quit": "quit", "/api/script/draft": "script_draft",
@@ -2022,6 +2093,8 @@ def make_handler(st, api):
                 path = urllib.parse.urlparse(self.path).path
                 if path in ("/", "/index.html"):
                     return self._send(200, INDEX_HTML, "text/html; charset=utf-8")
+                if path == '/production.js':
+                    return self._send(200, (Path(__file__).resolve().parent / 'production.js').read_text(), 'text/javascript; charset=utf-8')
                 if path == "/api/ping":
                     return self._send(200, {"ok": True, "app": "anime-studio", "version": VERSION})
                 if path == "/api/state":
@@ -2049,7 +2122,10 @@ def make_handler(st, api):
                 fn = ROUTES.get(path)
                 if not fn:
                     return self._send(404, {"error": "not found"})
-                self._send(200, getattr(api, fn)(body))
+                result = getattr(api, fn)(body)
+                if path.startswith('/api/workflow') or path.startswith('/api/instance/'):
+                    st.production.readiness = {}
+                self._send(200, result)
             except (BrokenPipeError, ConnectionResetError):
                 pass
             except Exception as e:
