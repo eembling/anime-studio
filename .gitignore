@@ -1,0 +1,16 @@
+# build output
+dist/
+*.app/
+mac/AnimeStudioWindow
+
+# project data created by the app
+AnimeStudio Data/
+studio_data/
+*.db
+
+# python / test scratch
+__pycache__/
+*.pyc
+tests/_run/
+
+.DS_Store

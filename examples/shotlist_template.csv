@@ -1,0 +1,5 @@
+seq,scene,kind,cast,keyframe_prompt,motion_prompt,camera,dialogue,duration,retime,ref_prev,end_next,notes
+1,Rooftop - dusk,motion,Aiko;Rooftop,"Wide shot: Aiko leans on the rooftop fence, city lights below, orange dusk sky","Wind moves her scarf and hair, clouds drift",slow pan right,,4,hold,no,yes,establishing
+2,Rooftop - dusk,still,Aiko;Rooftop,"Medium close-up of Aiko, soft smile, looking over her shoulder",,slow push-in,"Aiko: You came after all.",3,hold,yes,no,
+3,Rooftop - dusk,still,Kenji;Rooftop,"Kenji at the rooftop door, hands in pockets, backlit",,static,"Kenji: I always do.",2.5,hold,yes,no,
+4,Street - night,motion,Kenji,"Kenji running through rain past neon signs, low angle","He sprints toward camera, splashing through puddles",tracking shot,,3,rife,no,no,action beat
