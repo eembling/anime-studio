@@ -7,3 +7,24 @@ test('generate requires an explicit character with a usable voice',async()=>{con
 test('unsaved words cannot select an old take against a different saved line',async()=>{const{ctx,elements,calls}=setup();elements['#sv-text-0']={value:'Unsaved edit'};elements['#sv-character-0']={value:'1'};elements['#sv-direction-0']={value:''};await ctx.useShotVoiceTake(0,12);assert.equal(calls.length,0);assert.match(elements.toast,/Save the dialogue/)});
 
 test('recognized dialogue in a shot prompt is offered for review without an automatic request',()=>{const{ctx,elements,calls}=setup();ctx.S.shots[0].lines=[];ctx.S.shots[0].voice_suggestion=[{speaker:'TOBI',text:'Tell no one.',direction:'quietly'}];ctx.editShotVoices(7);assert.match(elements.modal,/Review the words and character choices/);assert.match(elements['#sv-rows'].innerHTML,/Tell no one/);assert.match(elements['#sv-rows'].innerHTML,/value="1" selected/);assert.equal(calls.length,0)});
+
+test('switching lines preserves entered words and selected take count',()=>{
+ const{ctx,elements}=setup();ctx.S.shots[0].lines.push({...ctx.S.shots[0].lines[0],line_id:'line-2',text:'Second line.'});ctx.editShotVoices(7);
+ elements['#sv-text-0']={value:'Draft words'};elements['#sv-character-0']={value:'1'};elements['#sv-direction-0']={value:'softly'};
+ ctx.selectShotVoiceRow(1);assert.match(elements['#sv-rows'].innerHTML,/Second line/);delete elements['#sv-text-0'];ctx.selectShotVoiceRow(0);assert.match(elements['#sv-rows'].innerHTML,/Draft words/);assert.equal(ctx.shotVoiceDirty(),true);
+});
+test('choosing a take keeps unsaved changes in another line',async()=>{
+ const{ctx,elements,line}=setup();line.character_id=1;ctx.S.shots[0].lines.push({...line,line_id:'line-2',text:'Second line.'});ctx.editShotVoices(7);
+ elements['#sv-text-1']={value:'Unsaved second line.'};elements['#sv-character-1']={value:'1'};elements['#sv-direction-1']={value:''};
+ await ctx.useShotVoiceTake(0,12);delete elements['#sv-text-1'];ctx.selectShotVoiceRow(1);assert.match(elements['#sv-rows'].innerHTML,/Unsaved second line/);assert.equal(ctx.shotVoiceDirty(),true);
+});
+test('a failed save retains the draft and permits retry',async()=>{
+ const{ctx,elements}=setup();elements['#sv-text-0']={value:'Keep my draft'};elements['#sv-character-0']={value:'1'};elements['#sv-direction-0']={value:''};ctx.post=async()=>({ok:false,error:'Conflict: reload the shot'});
+ await ctx.submitShotVoices([]);assert.equal(ctx.shotVoiceDirty(),true);assert.match(elements['#sv-result'].textContent,/Conflict/);ctx.post=async()=>{throw Error('Offline')};await ctx.submitShotVoices([]);assert.match(elements.toast,/Your edits are still here/);
+});
+test('closing a dirty dialogue draft requires a discard choice; busy save cannot close',()=>{
+ const{ctx,elements}=setup();let options;ctx.modal=(_,o)=>options=o;ctx.editShotVoices(7);elements['#sv-text-0']={value:'Unsaved words'};elements['#sv-character-0']={value:'1'};elements['#sv-direction-0']={value:''};ctx.confirm=()=>false;assert.equal(options.beforeClose(),false);ctx.confirm=()=>true;assert.equal(options.beforeClose(),true);vm.runInContext('SHOT_VOICE_EDIT.busy=true',ctx);assert.equal(options.beforeClose(),false);
+});
+test('background results update matching lines without overwriting an edited line',()=>{
+ const{ctx,elements,line}=setup();line.character_id=1;ctx.editShotVoices(7);elements['#sv-text-0']={value:'Unsaved words'};elements['#sv-character-0']={value:'1'};elements['#sv-direction-0']={value:''};line.text='Different remote words';line.audio='remote.wav';ctx.refreshShotVoiceResults();delete elements['#sv-text-0'];ctx.renderShotVoiceRows();assert.match(elements['#sv-rows'].innerHTML,/Unsaved words/);assert.equal(ctx.shotVoiceDirty(),true);
+});
