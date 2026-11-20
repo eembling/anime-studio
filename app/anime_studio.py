@@ -42,7 +42,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "2.17"
+VERSION = "2.18"
 for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebrew/bin")):
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
@@ -438,6 +438,8 @@ class Studio:
         if not export_worker:
             from export_jobs import ExportJobs
             self.exports=ExportJobs(self)
+        from shot_previews import ShotPreviews
+        self.shot_previews=ShotPreviews(self)
 
     def tools(self, refresh=False):
         if self.tools_cache is None or refresh:
@@ -1777,6 +1779,7 @@ class API:
     def quit(self, _):
         self.st.alignment.shutdown()
         self.st.exports.shutdown()
+        self.st.shot_previews.shutdown()
         threading.Timer(0.5, lambda: os._exit(0)).start()
         return {"ok": True}
 
@@ -2380,6 +2383,9 @@ class API:
     def workspace_action(self,b):
         return self.st.workspace.action(b)
 
+    def shot_preview(self,b):
+        return self.st.shot_previews.request(b)
+
     def finishing_action(self,b):
         with self.st.production.lock:
             return self.st.finishing.action(b)
@@ -2428,6 +2434,7 @@ EDIT_ROUTES = {'/api/settings','/api/shot/save','/api/shot/delete','/api/shot/mo
 ROUTES = {
     '/api/export':'export_action',
     '/api/finishing':'finishing_action',
+    '/api/shot/preview':'shot_preview',
     '/api/creative': 'creative_action',
     '/api/section': 'section_action',
     '/api/workspace':'workspace_action',
@@ -2585,6 +2592,7 @@ def main():
     def stop_local(signum,frame):
         st.alignment.shutdown()
         st.exports.shutdown()
+        st.shot_previews.shutdown()
         raise SystemExit(0)
     signal.signal(signal.SIGTERM,stop_local)
     signal.signal(signal.SIGINT,stop_local)

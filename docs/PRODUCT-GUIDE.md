@@ -384,3 +384,11 @@ Exports run from a captured database and copies of their required media, while e
 Live mixer tracks feed summed buses. Bus meters measure the combined output, and Studio and exports use the same block RMS ducking parameters. **Export stems and loudness report** runs in the background and its downloads appear with the export job. New stems use the rendered episode's saved mix configuration, even if current controls have changed. Older exports without a saved recipe use the current mix and identify that fallback in the result.
 
 Scoped preview cache keys include the selected picture, audible dialogue and cues, media stamps and render settings. Changing unrelated script text does not invalidate the preview. Dissolve and fade boundaries render each affected shot once and then concatenate the results, avoiding repeated encoding of the accumulated episode.
+
+### Shot playback with sound
+
+In Shots, choose a clip take and press **Play with sound**. The app prepares a local MP4 containing that take's picture, selected shot dialogue, and overlapping timed music, ambience and effects. Preparation runs independently from episode exports and never submits a ComfyUI render. The same file supplies picture and sound to the native video controls, including seeking, volume, fullscreen and looping. **Save preview** downloads that combined file.
+
+The first play prepares and caches a preview up to 1280 pixels wide. Later plays reuse it; dialogue, timing, source files, cues or mixer changes produce a new cache entry. Source clip timing and frame rate are retained. Continuation previews use the corresponding section of shot dialogue, accounting for duplicate boundary frames. Previewing an alternate take does not approve it. Clip previews show the complete take; shot trims and the assembled continuation chain are applied by **Export with sound**.
+
+Assigned dialogue replaces embedded clip audio to avoid hearing voices twice. If no dialogue is assigned, existing embedded clip audio is retained. Timed cues and saved mixer gain, mute, solo, pan and ducking are applied; the separate episode-wide music bed is reserved for episode/scene playback and exports. Missing files produce a visible Retry action. The player identifies unassigned dialogue or a muted mix instead of silently running a second audio player.

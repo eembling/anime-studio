@@ -1,91 +1,58 @@
 const {test}=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs'),path=require('node:path');
 const code=fs.readFileSync(path.join(__dirname,'../app/shot_playback.js'),'utf8');
-function fixture(){
- const events={},timers=[],statuses=[],sync=[];
- const video={isConnected:true,paused:true,currentTime:0,dataset:{audio:'/line.wav'},
-  parentElement:{append:element=>statuses.push(element)},
-  addEventListener:(event,fn)=>events[event]=fn,removeEventListener:event=>delete events[event],
-  pause(){this.paused=true;events.pause?.()},
-  play(){this.paused=false;events.play?.();return Promise.resolve()}};
- const audio={currentTime:0,readyState:4,playbackRate:1,paused:true,play(){this.paused=false;this.currentTime+=.01;return Promise.resolve()},pause(){this.paused=true},removeAttribute(){},load(){}};
- const ctx={Audio:class{constructor(){return audio}},document:{body:{},createElement:()=>({setAttribute(){},remove(){}})},
-  MutationObserver:class{observe(){}},performance:{now:()=>0},setTimeout:fn=>{audio.currentTime+=.01;fn()},EDIT_DURATIONS:new Map(),
-  setInterval:fn=>{timers.push(fn);return 1},clearInterval(){},
-  syncEditMedia:(media,time,force)=>{sync.push({media,time,force});media.currentTime=time;return true},
-  runEditMedia:media=>media.play().catch(()=>{})};
- vm.createContext(ctx);vm.runInContext(code,ctx);
- return {ctx,video,audio,events,timers,statuses,sync};
+function fixture(results=[{ok:true,status:'ready',url:'/media/cache/combined.mp4',audio_label:'Dialogue'}]){
+ const nodes={};
+ for(const name of ['play','status','sound','loop','download'])nodes[name]={textContent:'',checked:true,hidden:true,events:{},addEventListener(e,fn){this.events[e]=fn},removeEventListener(e){delete this.events[e]}};
+ const classes=new Set(),host={querySelector:s=>nodes[s.replace('.shot-preview-','')],classList:{add:s=>classes.add(s),remove:s=>classes.delete(s)}};
+ let plays=0,requests=[];
+ const video={isConnected:true,paused:true,muted:true,events:{},closest:()=>host,load(){},pause(){this.paused=true;this.events?.pause?.()},removeAttribute(){},play(){plays++;this.paused=false;this.events.play?.();return Promise.resolve()},addEventListener(e,fn){this.events[e]=fn},removeEventListener(e){delete this.events[e]}};
+ const ctx={Audio:class{constructor(){throw Error('Separate audio decoder must never be created')}},document:{body:{}},MutationObserver:class{observe(){}},
+ setTimeout:fn=>fn(),fetch:async(url,options)=>{requests.push(JSON.parse(options.body));return{ok:true,json:async()=>results.shift()}}};
+ vm.createContext(ctx);vm.runInContext(code,ctx);ctx.bindShotPlayback(video,{id:1},{id:2});
+ return {ctx,video,nodes,requests,classes,plays:()=>plays};
 }
-test('continuation dialogue uses the preceding chain duration and duplicate frame',()=>{
- const {ctx}=fixture();
- const shot={clip_take:1,cont:[2],takes:[{id:1,frames:64,fps:16},{id:2,frames:65,fps:16}]};
- assert.equal(ctx.clipSourceOffset(shot,{stage:'continue',segment:1,fps:16}),7.9375);
+test('prepares and plays one unmuted file with native controls and sound',async()=>{
+ const f=fixture();await f.nodes.play.events.click();
+ assert.equal(f.video.src,'/media/cache/combined.mp4');assert.equal(f.video.controls,true);
+ assert.equal(f.video.muted,false);assert.equal(f.video.loop,true);assert.equal(f.plays(),1);
+ assert.equal(f.nodes.sound.textContent,'Dialogue');assert.equal(f.nodes.download.href,f.video.src);
+ assert.equal(f.requests[0].take_id,2);assert.equal(f.nodes.play.disabled,false);
 });
-test('an internal video resume does not force another synchronization seek',async()=>{
- const {ctx,video,timers,sync}=fixture();
- ctx.bindShotPlayback(video,{dialogue_offset:0},{stage:'animate'});
- video.play();
- await new Promise(resolve=>setImmediate(resolve));
- video.paused=true;
- sync.length=0;timers[0]();
- assert.equal(sync.length,1);
- assert.equal(sync[0].force,false);
+test('queued preparation polls without starting silent raw video',async()=>{
+ const f=fixture([{ok:true,status:'queued'},{ok:true,status:'preparing'},{ok:true,status:'ready',url:'/combined.mp4',audio_label:'Dialogue + timed sounds'}]);
+ await f.nodes.play.events.click();assert.equal(f.requests.length,3);assert.equal(f.requests[1].retry,false);
+ assert.equal(f.plays(),1);assert.equal(f.nodes.sound.textContent,'Dialogue + timed sounds');
 });
-test('audio playback rejection is visible and pauses the clip',async()=>{
- const {ctx,video,audio,statuses}=fixture();
- audio.play=()=>Promise.reject({name:'NotAllowedError'});
- ctx.bindShotPlayback(video,{dialogue_offset:0},{stage:'animate'});video.play();
- await new Promise(resolve=>setImmediate(resolve));
- assert.equal(video.paused,true);
- assert.match(statuses[0].textContent,/Dialogue could not play/);
+test('preparation errors stay visible and expose retry',async()=>{
+ const f=fixture([{ok:true,status:'error',error:'Dialogue file is missing'}]);await f.nodes.play.events.click();
+ assert.equal(f.plays(),0);assert.match(f.nodes.status.textContent,/Dialogue file is missing/);
+ assert.equal(f.nodes.play.textContent,'Retry preview');assert.equal(f.nodes.play.disabled,false);
 });
-
-test('steady playback does not restart audio or seek picture on transport ticks',async()=>{
- const {ctx,video,audio,timers}=fixture();
- let plays=0,original=audio.play;
- audio.play=function(){plays++;return original.call(this)};
- ctx.bindShotPlayback(video,{dialogue_offset:0},{stage:'animate'});
- video.play();
- await new Promise(resolve=>setImmediate(resolve));
- const initial=plays;
- for(let i=0;i<10;i++){video.currentTime+=.03;audio.currentTime=video.currentTime-.04;timers[0]()}
- assert.equal(plays,initial);
- assert.equal(video.paused,false);
- assert.equal(audio.playbackRate,1);
+test('replay uses the combined asset and loop control belongs to that asset',async()=>{
+ const f=fixture();await f.nodes.play.events.click();await f.nodes.play.events.click();
+ assert.equal(f.requests.length,1);assert.equal(f.video.paused,true);
+ await f.nodes.play.events.click();assert.equal(f.plays(),2);
+ f.nodes.loop.checked=false;f.nodes.loop.events.change();assert.equal(f.video.loop,false);
 });
-
-test('startup picture alignment does not force an audio seek on seeked',async()=>{
- const {ctx,video,audio,events}=fixture();
- video.duration=4;
- audio.play=function(){this.paused=false;this.currentTime+=.1;return Promise.resolve()};
- ctx.bindShotPlayback(video,{dialogue_offset:0},{stage:'animate'});video.play();
- await new Promise(resolve=>setImmediate(resolve));
- assert.ok(video.currentTime>.02);
- audio.currentTime=video.currentTime+.01;
- const before=audio.currentTime;events.seeked();
- assert.equal(audio.currentTime,before);
- events.seeked();
- assert.equal(audio.currentTime,video.currentTime);
+test('another shot pauses the previous combined player',async()=>{
+ const f=fixture();await f.nodes.play.events.click();
+ const other={paused:false,pause(){this.paused=true;this.events?.pause?.()}};vm.runInContext('SHOT_PLAYERS',f.ctx).add({video:other});
+ f.video.events.play();assert.equal(other.paused,true);
+});
+test('blocked playback exposes a manual play action without losing the prepared file',async()=>{
+ const f=fixture();f.video.play=()=>Promise.reject({name:'NotAllowedError'});await f.nodes.play.events.click();
+ assert.match(f.nodes.status.textContent,/Press Play/);assert.equal(f.video.src,'/media/cache/combined.mp4');
+});
+test('disposed preparation cannot attach media or start playback',async()=>{
+ const f=fixture();let reply;f.ctx.fetch=()=>new Promise(resolve=>reply=resolve);
+ const pending=f.nodes.play.events.click();f.video._shotPlayer.destroy();
+ reply({ok:true,json:async()=>({ok:true,status:'ready',url:'/late.mp4'})});await pending;
+ assert.equal(f.plays(),0);assert.equal(f.video.src,undefined);
 });
 
-test('large clock drift aligns picture without seeking or changing the audio rate',async()=>{
- const {ctx,video,audio,events,timers,statuses}=fixture();
- ctx.bindShotPlayback(video,{dialogue_offset:0},{stage:'animate'});video.play();
- await new Promise(resolve=>setImmediate(resolve));
- video.currentTime=1;audio.currentTime=.8;timers[0]();
- assert.equal(video.currentTime,.8);
- assert.equal(audio.currentTime,.8);
- assert.equal(audio.playbackRate,1);
- events.seeked();
- assert.equal(video.paused,false);
- assert.equal(statuses[0].textContent,'');
-});
-
-test('a delayed pause event does not stop already resumed playback',async()=>{
- const {ctx,video,audio,events,timers}=fixture();
- ctx.bindShotPlayback(video,{dialogue_offset:0},{stage:'animate'});video.play();
- await new Promise(resolve=>setImmediate(resolve));
- events.pause();
- video.currentTime=1;audio.currentTime=1;timers[0]();
- assert.equal(audio.paused,false);
+test('leaving Shots prevents background preparation from starting audio',async()=>{
+ const f=fixture();let reply;f.ctx.fetch=()=>new Promise(resolve=>reply=resolve);
+ const pending=f.nodes.play.events.click();f.video._shotPlayer.suspend();
+ reply({ok:true,json:async()=>({ok:true,status:'ready',url:'/late.mp4'})});await pending;
+ assert.equal(f.plays(),0);assert.equal(f.video._shotPlayer.isPreparing(),false);assert.equal(f.nodes.play.disabled,false);
 });

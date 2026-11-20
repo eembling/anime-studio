@@ -27,32 +27,55 @@ final class Check: NSObject, WKNavigationDelegate {
   }
  }
  func clip() {
-  web.evaluateJavaScript("document.querySelector('#shotlist video').play(); true") { _,error in
+  web.evaluateJavaScript("document.querySelector('.shot-preview-play').click();true") { _,error in
    if let error=error {print("FAIL clip start",error);exit(1)}
-   DispatchQueue.main.asyncAfter(deadline:.now()+1.5){
-    self.web.evaluateJavaScript("JSON.stringify({video:document.querySelector('#shotlist video').currentTime,vReady:document.querySelector('#shotlist video').readyState,aReady:document.querySelector('#shotlist video')._a?.readyState,vNet:document.querySelector('#shotlist video').networkState,aNet:document.querySelector('#shotlist video')._a?.networkState,aError:document.querySelector('#shotlist video')._a?.error?.message,audio:document.querySelector('#shotlist video')._a?.currentTime,paused:document.querySelector('#shotlist video')._a?.paused,status:document.querySelector('.clip-playback-status')?.textContent})"){result,error in
-     guard let text=result as? String,let bytes=text.data(using:.utf8),let value=(try? JSONSerialization.jsonObject(with:bytes)) as? [String:Any],
-           let video=value["video"] as? Double,let audio=value["audio"] as? Double,video>0.2,audio>0.2,abs(video-audio)<0.2 else {print("FAIL native clip",String(describing:result),String(describing:error));exit(1)}
-     print("Native clip synchronization passed",text);self.continuous(video)
+   self.prepared()
+  }
+ }
+ func prepared(){
+  web.evaluateJavaScript("!!document.querySelector('#shotlist video')?.src && document.querySelector('#shotlist video').readyState>=2") { result,error in
+   if (result as? Bool) != true {
+    self.tries+=1
+    if self.tries>100 {print("FAIL preview preparation",String(describing:error));exit(1)}
+    DispatchQueue.main.asyncAfter(deadline:.now()+0.2){self.prepared()};return
+   }
+   self.web.callAsyncJavaScript("window.probeContext=new AudioContext();window.probeMeter=probeContext.createAnalyser();probeContext.createMediaElementSource(document.querySelector('#shotlist video')).connect(probeMeter);probeMeter.connect(probeContext.destination);await probeContext.resume();window.audioPeak=()=>{const data=new Float32Array(probeMeter.fftSize);probeMeter.getFloatTimeDomainData(data);return Math.max(...data.map(Math.abs))};return true;",arguments:[:],in:nil,in:.page){result in
+    if case .failure(let error)=result {print("FAIL audio meter",error);exit(1)}
+    self.web.evaluateJavaScript("document.querySelector('#shotlist video').currentTime=0;document.querySelector('#shotlist video').play();true"){_,_ in
+     DispatchQueue.main.asyncAfter(deadline:.now()+1.5){self.sample()}
     }
    }
   }
  }
+ func sample(){
+  web.evaluateJavaScript("JSON.stringify({time:document.querySelector('#shotlist video').currentTime,muted:document.querySelector('#shotlist video').muted,peak:audioPeak(),src:document.querySelector('#shotlist video').src,paused:document.querySelector('#shotlist video').paused})"){result,error in
+   guard let text=result as? String,let bytes=text.data(using:.utf8),let state=(try? JSONSerialization.jsonObject(with:bytes)) as? [String:Any],let time=state["time"] as? Double,time>0.5,let peak=state["peak"] as? Double,peak>0.001,(state["muted"] as? Bool)==false,(state["paused"] as? Bool)==false else {print("FAIL audible combined playback",String(describing:result),String(describing:error));exit(1)}
+   print("Native combined MP4 has audible output",text);self.continuous(time)
+  }
+ }
  func continuous(_ start:Double){
   DispatchQueue.main.asyncAfter(deadline:.now()+1.5){
-   self.web.evaluateJavaScript("JSON.stringify({time:document.querySelector('#shotlist video').currentTime,paused:document.querySelector('#shotlist video').paused,status:document.querySelector('.clip-playback-status')?.textContent})"){result,error in
-    guard let text=result as? String,let bytes=text.data(using:.utf8),let state=(try? JSONSerialization.jsonObject(with:bytes)) as? [String:Any],
-          let time=state["time"] as? Double,time-start>1.1,(state["paused"] as? Bool)==false,(state["status"] as? String)=="" else {print("FAIL sustained playback",String(describing:result),String(describing:error));exit(1)}
-    print("Native sustained playback passed",text);self.looped()
+   self.web.evaluateJavaScript("JSON.stringify({time:document.querySelector('#shotlist video').currentTime,peak:audioPeak(),paused:document.querySelector('#shotlist video').paused})"){result,error in
+    guard let text=result as? String,let bytes=text.data(using:.utf8),let state=(try? JSONSerialization.jsonObject(with:bytes)) as? [String:Any],let time=state["time"] as? Double,time-start>1.1,let peak=state["peak"] as? Double,peak>0.001,(state["paused"] as? Bool)==false else {print("FAIL sustained playback",String(describing:result),String(describing:error));exit(1)}
+    print("Native sustained audible playback passed",text);self.looped()
    }
   }
  }
  func looped(){
   DispatchQueue.main.asyncAfter(deadline:.now()+2){
-   self.web.evaluateJavaScript("JSON.stringify({video:document.querySelector('#shotlist video').currentTime,audio:document.querySelector('#shotlist video')._a?.currentTime,paused:document.querySelector('#shotlist video').paused,status:document.querySelector('.clip-playback-status')?.textContent})"){result,error in
-    guard let text=result as? String,let bytes=text.data(using:.utf8),let state=(try? JSONSerialization.jsonObject(with:bytes)) as? [String:Any],
-          let video=state["video"] as? Double,let audio=state["audio"] as? Double,video>0.2,video<2,abs(video-audio)<0.2,(state["paused"] as? Bool)==false,(state["status"] as? String)=="" else {print("FAIL looping playback",String(describing:result),String(describing:error));exit(1)}
-    print("Native looping playback passed",text);self.studio()
+   self.web.evaluateJavaScript("JSON.stringify({time:document.querySelector('#shotlist video').currentTime,peak:audioPeak(),paused:document.querySelector('#shotlist video').paused})"){result,error in
+    guard let text=result as? String,let bytes=text.data(using:.utf8),let state=(try? JSONSerialization.jsonObject(with:bytes)) as? [String:Any],let time=state["time"] as? Double,time>0.2,time<2,let peak=state["peak"] as? Double,peak>0.001,(state["paused"] as? Bool)==false else {print("FAIL looping playback",String(describing:result),String(describing:error));exit(1)}
+    print("Native looping audible playback passed",text);self.seek()
+   }
+  }
+ }
+ func seek(){
+  web.evaluateJavaScript("document.querySelector('#shotlist video').currentTime=2;true"){_,_ in
+   DispatchQueue.main.asyncAfter(deadline:.now()+0.5){
+    self.web.evaluateJavaScript("JSON.stringify({time:document.querySelector('#shotlist video').currentTime,peak:audioPeak()})"){result,error in
+     guard let text=result as? String,let bytes=text.data(using:.utf8),let state=(try? JSONSerialization.jsonObject(with:bytes)) as? [String:Any],let time=state["time"] as? Double,time>=2,time<3,let peak=state["peak"] as? Double,peak>0.001 else {print("FAIL seeking with audio",String(describing:result),String(describing:error));exit(1)}
+     print("Native seeking retained audible output",text);self.studio()
+    }
    }
   }
  }

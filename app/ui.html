@@ -115,7 +115,7 @@ label.f{display:block;font-size:12px;color:var(--graphite);margin:12px 0 4px}
 .screen .tag{position:absolute;left:8px;top:8px;background:rgba(20,22,27,.78);color:#fff;font-size:11.5px;padding:2px 8px;border-radius:99px;pointer-events:none}
 .screen .use{position:absolute;right:8px;top:8px}
 .screen .delete-keyframe,.screen .delete-clip{position:absolute;left:8px;bottom:8px;background:var(--sheet);box-shadow:0 1px 6px #0005}
-.screen .delete-clip{bottom:48px}
+.screen .delete-clip{bottom:auto;top:40px}
 .info{padding:14px 18px 12px;min-width:0;display:flex;flex-direction:column}
 .info h3{margin:0 0 6px;font:600 17px/1.2 var(--f-display);letter-spacing:.2px}
 .cast{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
@@ -493,6 +493,7 @@ function preserveMainScroll(update){
  }
 }
 function go(t){const main=$('main');TAB_SCROLL[tab]={top:main.scrollTop,left:main.scrollLeft};
+ if(t!=='shots'&&typeof SHOT_PLAYERS!=='undefined')for(const player of SHOT_PLAYERS)player.suspend();
  tab=t;document.querySelectorAll('#nav button').forEach(x=>{x.classList.toggle('on',x.dataset.t===t);if(x.dataset.t===t)x.setAttribute('aria-current','page');else x.removeAttribute('aria-current')});document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x.id==='t-'+t));render(true);
  const position=TAB_SCROLL[t]||{top:0,left:0};++SCROLL_PAINT;main.scrollTop=position.top;main.scrollLeft=position.left;
 }
@@ -644,8 +645,10 @@ function updateShotCards(markup){
  const retained=new Set();let index=0;
  for(const fresh of [...template.content.children]){
   let node=existing.get(fresh.id);
+  const signature=fresh.outerHTML;
   if(!node)node=fresh;
-  else if(node.outerHTML!==fresh.outerHTML){node.replaceWith(fresh);node=fresh}
+  else if((node._shotMarkup||node.outerHTML)!==signature){node.replaceWith(fresh);node=fresh}
+  node._shotMarkup=signature;
   if(board.children[index]!==node)board.insertBefore(node,board.children[index]||null);
   retained.add(node);index++;
  }
@@ -653,8 +656,8 @@ function updateShotCards(markup){
 }
 function renderShots(){return preserveMainScroll(renderShotsContent)}
 function renderShotsContent(){
- if([...document.querySelectorAll('#shotlist video')].some(v=>!v.paused))return;
- if(same('shots',[S.shots,S.assets,S.settings,S.workflows,FILTER,[...sel],VIEW]))return;
+ if([...document.querySelectorAll('#shotlist video')].some(v=>!v.paused||v._shotPlayer?.isPreparing()))return;
+ if(same('shots',[S.shots,S.assets,S.settings,S.workflows,S.audio_cues,S.finishing?.mixer,S.settings.out_fps,FILTER,[...sel],VIEW]))return;
  const cn=counts();
  $('#strip').innerHTML=stripHTML();
  $('#filters').innerHTML=[['all','All',S.shots.length],['kf','Needs keyframe',cn.kf],['clip','Needs clip',cn.clip],['done','Ready',cn.done],['voice','Lines without audio',cn.lines]]
@@ -670,7 +673,7 @@ function renderShotsContent(){
   const approved=viewing&&([s.keyframe_take,s.clip_take,s.final_take].includes(viewing.id)||s.cont.includes(viewing.id));
   const lab=t=>(t.stage==='keyframe'?'Keyframe':t.stage==='upscale'?'Upscaled':t.stage==='lipsync'?'Lip sync':t.stage==='continue'?`Part ${(t.segment||0)+2}`:'Clip')+(t.draft?' draft':'');
   const media=!viewing?`<div class="empty">${s.active.keyframe?'Keyframe is rendering…':'No keyframe yet'}<br>${s.active.keyframe?'':`<button class="btn sm" style="margin-top:8px" onclick="gen('keyframe',[${s.id}])">Generate keyframes</button>`}</div>`
-   :viewing.stage==='keyframe'?`<img src="${viewing.url}" alt="Keyframe" ondblclick="lb('${viewing.url}')">`:`<video data-shot-id="${s.id}" data-take-id="${viewing.id}" src="${viewing.url}" controls muted loop preload="metadata" ${s.audio_url?`data-audio="${s.audio_url}"`:''}></video>`;
+   :viewing.stage==='keyframe'?`<img src="${viewing.url}" alt="Keyframe" ondblclick="lb('${viewing.url}')">`:`<div class="shot-preview" data-preview-edit="${esc(JSON.stringify([s.audio_url,s.dialogue_offset,s.dialogue_fade,s.trim_in,s.cont,S.audio_cues,S.finishing?.mixer]))}"><video data-shot-id="${s.id}" data-take-id="${viewing.id}" playsinline preload="metadata" ${take(s.keyframe_take)?.url?`poster="${take(s.keyframe_take).url}"`:''} aria-label="Shot ${pad(s.seq)} ${lab(viewing)} with sound"></video><div class="shot-preview-toolbar"><button type="button" class="btn sm pri shot-preview-play">Play with sound</button><label class="check"><input class="shot-preview-loop" type="checkbox" checked>Loop</label><a class="shot-preview-download" download hidden>Save preview</a></div><div class="shot-preview-detail"><span class="shot-preview-sound">Picture + shot audio</span><span class="shot-preview-status" role="status" aria-live="polite">Ready to prepare · original clip timing</span></div></div>`;
   const mark=(id,field)=>{const isNew=prevApproved[s.id+field]!==undefined&&prevApproved[s.id+field]!==id&&id;fresh[s.id+field]=id;return isNew?' just':''};
   const pend=st=>s.active[st]?`<div class="pending"><span class="dot"></span>${s.active[st].length} ${s.active[st].includes('running')?'rendering':'waiting'}</div>`:'';
   const chip=(t,isSel,label,field)=>`<span class="clip-take"><button class="take ${isSel?'sel'+mark(t.id,field):''} ${viewing&&viewing.id===t.id?'view':''} ${t.draft?'draft':''}" onclick="view(${s.id},${t.id})" title="${lab(t)}, seed ${t.seed}${t.fps?', '+t.fps+' fps':''}${t.frames&&t.fps?', '+(t.frames/t.fps).toFixed(1)+' s':''}">${label}</button><button type="button" class="kf-delete clip-delete" onclick="deleteClip(${s.id},${t.id},this)" title="Delete ${label}" aria-label="Delete clip ${label} from shot ${pad(s.seq)}">Delete</button></span>`;
@@ -706,14 +709,14 @@ function renderShotsContent(){
     <div class="st-b">${chips(ups,s.final_take,'U','u')}${pend('upscale')}</div></div>
   </div></article>`}).join(''));
  prevApproved=fresh;
- document.querySelectorAll('#shotlist video[data-audio]').forEach(video=>{
+ document.querySelectorAll('#shotlist video[data-take-id]').forEach(video=>{
   if(typeof bindShotPlayback!=='function')return;
   const shot=S.shots.find(item=>item.id===+video.dataset.shotId);
   const take=shot?.takes.find(item=>item.id===+video.dataset.takeId);
   if(shot&&take)bindShotPlayback(video,shot,take);
  });
 }
-function view(sid,tid){$('#cut-'+sid+' video')?.pause();VIEW[sid]=tid;renderShots()}
+function view(sid,tid){const video=$('#cut-'+sid+' video');if(+video?.dataset.takeId===tid){video.pause();return}video?._shotPlayer?.destroy();video?.pause();VIEW[sid]=tid;renderShots()}
 function fullQuality(tid){const t=take(tid);if(!t)return;gen(t.stage==='continue'?'continue':'animate',[t.shot_id],{draft:false,seed:t.seed,segment:t.stage==='continue'?(t.segment||0):undefined})}
 function tog(id,on){on?sel.add(id):sel.delete(id);$('#selinfo').textContent=sel.size?`${sel.size} selected`:'Selected shots'}
 function selAll(on){sel=new Set(on?S.shots.filter(matches).map(s=>s.id):[]);renderShots()}
@@ -793,7 +796,7 @@ async function deleteClip(sid,tid,button){
  if(!confirm(`Delete ${label} from shot ${pad(s.seq)}? It will be removed from this shot. Recover it through Studio history; other takes stay available.`+(selected?' This clip is currently used. Dependent continuation and upscale selections will be cleared where needed. Choose a replacement before assembling.':'')))return;
  const wasPreviewed=VIEW[sid]===tid||(!VIEW[sid]&&(s.final_take||s.clip_take||s.keyframe_take)===tid);
  button.disabled=true;
- if(wasPreviewed){const video=$('#cut-'+sid+' video');if(video)video.pause()}
+ if(wasPreviewed){const video=$('#cut-'+sid+' video');video?._shotPlayer?.destroy();if(video)video.pause()}
  try{const r=await post('/api/take/delete',{take_id:tid});if(r.ok===false)return;
   if(wasPreviewed){const remaining=group.filter(x=>x.id!==tid),next=remaining[Math.min(index,remaining.length-1)];if(next)VIEW[sid]=next.id;else delete VIEW[sid]}
   renderShots();toast('Deleted '+label);
