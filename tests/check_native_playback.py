@@ -27,8 +27,8 @@ def main():
         studio.db.x("UPDATE shots SET clip_take=?,audio='voices/test.wav',audio_mode='file' WHERE id=?",(tid,sid))
         studio.db.conn.close()
         executable=folder/'native-check'
-        env=dict(os.environ,CLANG_MODULE_CACHE_PATH=str(folder/'clang-cache'),
-                 SWIFT_MODULECACHE_PATH=str(folder/'swift-cache'))
+        env=dict(os.environ,CLANG_MODULE_CACHE_PATH='/tmp/anime-studio-clang-cache',
+                 SWIFT_MODULECACHE_PATH='/tmp/anime-studio-swift-cache')
         subprocess.run(['xcrun','swiftc',str(ROOT/'tests/native_playback.swift'),'-o',str(executable),
                         '-framework','AppKit','-framework','WebKit'],check=True,env=env)
         process=subprocess.Popen([sys.executable,str(ROOT/'app/anime_studio.py'),'--port','8871','--data',str(folder/'project')],

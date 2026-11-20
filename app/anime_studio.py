@@ -42,7 +42,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "2.16"
+VERSION = "2.17"
 for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebrew/bin")):
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")

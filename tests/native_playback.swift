@@ -13,7 +13,8 @@ final class Check: NSObject, WKNavigationDelegate {
   window=NSWindow(contentRect:NSRect(x:40,y:40,width:700,height:500),styleMask:[.titled],backing:.buffered,defer:false)
   window.contentView=web
   window.title="Anime Studio playback check"
-  window.orderFrontRegardless()
+  window.makeKeyAndOrderFront(nil)
+  NSApplication.shared.activate(ignoringOtherApps:true)
   web.load(URLRequest(url:URL(string:"http://127.0.0.1:8871")!))
  }
  func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { poll() }
@@ -32,8 +33,26 @@ final class Check: NSObject, WKNavigationDelegate {
     self.web.evaluateJavaScript("JSON.stringify({video:document.querySelector('#shotlist video').currentTime,vReady:document.querySelector('#shotlist video').readyState,aReady:document.querySelector('#shotlist video')._a?.readyState,vNet:document.querySelector('#shotlist video').networkState,aNet:document.querySelector('#shotlist video')._a?.networkState,aError:document.querySelector('#shotlist video')._a?.error?.message,audio:document.querySelector('#shotlist video')._a?.currentTime,paused:document.querySelector('#shotlist video')._a?.paused,status:document.querySelector('.clip-playback-status')?.textContent})"){result,error in
      guard let text=result as? String,let bytes=text.data(using:.utf8),let value=(try? JSONSerialization.jsonObject(with:bytes)) as? [String:Any],
            let video=value["video"] as? Double,let audio=value["audio"] as? Double,video>0.2,audio>0.2,abs(video-audio)<0.2 else {print("FAIL native clip",String(describing:result),String(describing:error));exit(1)}
-     print("Native clip synchronization passed",text);self.studio()
+     print("Native clip synchronization passed",text);self.continuous(video)
     }
+   }
+  }
+ }
+ func continuous(_ start:Double){
+  DispatchQueue.main.asyncAfter(deadline:.now()+1.5){
+   self.web.evaluateJavaScript("JSON.stringify({time:document.querySelector('#shotlist video').currentTime,paused:document.querySelector('#shotlist video').paused,status:document.querySelector('.clip-playback-status')?.textContent})"){result,error in
+    guard let text=result as? String,let bytes=text.data(using:.utf8),let state=(try? JSONSerialization.jsonObject(with:bytes)) as? [String:Any],
+          let time=state["time"] as? Double,time-start>1.1,(state["paused"] as? Bool)==false,(state["status"] as? String)=="" else {print("FAIL sustained playback",String(describing:result),String(describing:error));exit(1)}
+    print("Native sustained playback passed",text);self.looped()
+   }
+  }
+ }
+ func looped(){
+  DispatchQueue.main.asyncAfter(deadline:.now()+2){
+   self.web.evaluateJavaScript("JSON.stringify({video:document.querySelector('#shotlist video').currentTime,audio:document.querySelector('#shotlist video')._a?.currentTime,paused:document.querySelector('#shotlist video').paused,status:document.querySelector('.clip-playback-status')?.textContent})"){result,error in
+    guard let text=result as? String,let bytes=text.data(using:.utf8),let state=(try? JSONSerialization.jsonObject(with:bytes)) as? [String:Any],
+          let video=state["video"] as? Double,let audio=state["audio"] as? Double,video>0.2,video<2,abs(video-audio)<0.2,(state["paused"] as? Bool)==false,(state["status"] as? String)=="" else {print("FAIL looping playback",String(describing:result),String(describing:error));exit(1)}
+    print("Native looping playback passed",text);self.studio()
    }
   }
  }
@@ -54,7 +73,7 @@ final class Check: NSObject, WKNavigationDelegate {
  }
 }
 let app=NSApplication.shared
-app.setActivationPolicy(.prohibited)
+app.setActivationPolicy(.accessory)
 let check=Check()
 check.start()
 DispatchQueue.main.asyncAfter(deadline:.now()+30){print("FAIL native timeout");exit(1)}

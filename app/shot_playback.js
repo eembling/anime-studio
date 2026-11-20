@@ -13,7 +13,7 @@ function bindShotPlayback(video,shot,take){
  const status=document.createElement('span');
  status.className='clip-playback-status';status.setAttribute('role','status');
  video.parentElement.append(status);
- let wanted=false,timer=null,ownPause=false,starting=false;
+ let wanted=false,timer=null,ownPause=false,starting=false,internalSeek=false;
  const report=message=>{status.textContent=message};
  const stop=()=>{
   wanted=false;clearInterval(timer);timer=null;audio.pause();
@@ -27,11 +27,23 @@ function bindShotPlayback(video,shot,take){
   if(video.error||audio.error){stop();pauseVideo();report('Could not load clip audio or video. Check the source file.');return}
   const source=clipSourceOffset(shot,take)+video.currentTime-(shot.dialogue_offset||0);
   if(source<0){audio.pause();audio._editHold=true}
+  const drift=source-audio.currentTime;
+  // Keep the audio decoder at its original rate. WebKit can stall its
+  // clock when playbackRate changes; use audio as the steady playback clock.
+  if(internalSeek&&video.seeking)return;
+  if(!force&&wanted&&!video.paused&&!audio.paused&&!audio.seeking&&source>=0&&
+     (!Number.isFinite(audio.duration)||source<audio.duration)&&Math.abs(drift)>.12){
+   internalSeek=true;video.currentTime=Math.max(0,video.currentTime-drift);return;
+  }
+  const seekAudio=force||(video.paused&&Math.abs(drift)>.35);
+  const duration=audio.duration;
+  audio._editHold=source<0||(Number.isFinite(duration)&&(source>=duration||(audio.ended&&source>=duration-.08)));
+  if(!audio._editHold&&seekAudio&&!audio.seeking&&Math.abs(drift)>(force ? .001 : .35))audio.currentTime=Math.max(0,source);
   const ready=syncEditMedia(video,video.currentTime,false,true)&&
-    (source<0||syncEditMedia(audio,source,force));
+    (audio._editHold||(!audio.seeking&&audio.readyState>=2));
   if(wanted&&!ready){audio.pause();pauseVideo();report('Buffering picture and dialogue…');return}
   report('');
-  if(wanted&&!starting){
+  if(wanted&&(video.paused||(source>=0&&!audio._editHold&&audio.paused))){
    starting=true;
    const audioReady=source>=0&&!audio._editHold?audio.play():Promise.resolve();
    audioReady.then(async()=>{
@@ -47,7 +59,7 @@ function bindShotPlayback(video,shot,take){
      if(!wanted)return;
      const target=audio.currentTime-clipSourceOffset(shot,take)+(shot.dialogue_offset||0);
      if(Number.isFinite(video.duration)&&target<video.duration&&Math.abs(video.currentTime-target)>.02){
-      video.currentTime=Math.max(0,target);
+      internalSeek=true;video.currentTime=Math.max(0,target);
      }
     }
     return video.paused?video.play():Promise.resolve();
@@ -69,8 +81,8 @@ function bindShotPlayback(video,shot,take){
   wanted=true;pauseVideo();update(true);
   if(!timer)timer=setInterval(update,30);
  };
- const pause=()=>{if(ownPause){ownPause=false;return}stop()};
- const seek=()=>update(true);
+ const pause=()=>{if(ownPause){ownPause=false;return}if(!video.paused)return;stop()};
+ const seek=()=>{const force=!internalSeek;internalSeek=false;update(force)};
  const ended=()=>{stop();audio.pause()};
  const destroy=()=>{
   stop();video.removeEventListener('play',play);video.removeEventListener('pause',pause);
