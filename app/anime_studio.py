@@ -42,7 +42,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "2.18"
+VERSION = "2.19"
 for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebrew/bin")):
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
@@ -743,8 +743,9 @@ def detect_slots(wf, key):
         m["start_image"] = (_tagged(wf, "START_IMAGE") or loads)[:1]
         if key == "animate_flf":
             m["end_image"] = (_tagged(wf, "END_IMAGE") or [k for k in loads if k not in m["start_image"]])[:1]
-        if key == "lipsync":
-            m["audio_in"] = (_tagged(wf, "AUDIO_IN") or [k for k in keys if cls(k) == "LoadAudio"])[:1]
+        from clip_audio import audio_inputs
+        connected_audio=set(audio_inputs(wf))
+        m["audio_in"] = [k for k in _tagged(wf, "AUDIO_IN") if k in connected_audio] or [k for k in keys if k in connected_audio and cls(k)=="LoadAudio"]
         m["size"] = _tagged(wf, "SIZE") or [k for k in keys if {"width", "height", "length"} <= set(ins(k))][:1]
     elif key == "upscale":
         m["video_in"] = (_tagged(wf, "VIDEO_IN") or [k for k in keys if cls(k) in VIDEO_LOADERS])[:1]
@@ -851,7 +852,10 @@ def build_workflow(template, key, p):
         for k in m[slot]:
             wf[k]["inputs"]["image"] = imgs[field_name]
     for k in m["audio_in"]:
-        wf[k]["inputs"]["audio"] = imgs["audio"]
+        if imgs.get("audio"):
+            wf[k]["inputs"]["audio"] = imgs["audio"]
+        elif key in ("voice","lipsync"):
+            raise ValueError("This workflow requires an audio input.")
     for k in m.get("ref_text", []):
         _set_text(wf[k], p.get("ref_text", ""))
     if key in ("voice", "voice_design"):   # fill well-known TTS inputs wherever a node has them
@@ -1415,8 +1419,10 @@ class Worker(threading.Thread):
                     raise RuntimeError("ffmpeg is needed on this Mac to turn frames into video: brew install ffmpeg")
                 self._progress(job["id"], f"stitching {len(imgs)} frames at {fps} fps")
                 stitch_frames(imgs, fps, dest)
+            from clip_audio import embed as embed_clip_audio
+            dest = embed_clip_audio(st, job, dest)
             made.append((dest, fps))
-        nframes = len(imgs) if imgs and not vids else None
+        nframes = len(imgs) if imgs and not vids and not st.snapshots.meta(job).get('clip_audio') else None
         for path, fps in made:
             tid = st.db.x("INSERT INTO takes(shot_id,asset_id,stage,path,fps,seed,job_id,created,frames,segment,draft,input_signature) "
                           "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -2131,6 +2137,10 @@ class API:
                 result=self._generate_request(b)
                 for job in self.st.db.q("SELECT * FROM jobs WHERE id>? AND status='pending'",(before,)):
                     self.st.snapshots.capture(job)
+                audio_jobs=[self.st.snapshots.meta(job) for job in self.st.db.q("SELECT * FROM jobs WHERE id>? AND status='pending'",(before,)) if self.st.snapshots.meta(job).get('clip_audio')]
+                result['audio_conditioned']=sum(bool(meta.get('audio_conditioned')) for meta in audio_jobs)
+                result['audio_included']=len(audio_jobs)
+                result['audio_notes']=list(dict.fromkeys(meta['audio_note'] for meta in audio_jobs if meta.get('audio_note')))
                 return result
             except Exception:
                 for job in self.st.db.q("SELECT id FROM jobs WHERE id>? AND status='pending'",(before,)):
@@ -2146,7 +2156,8 @@ class API:
                 return self.st.creative.generate(b)
         if b['stage'] == 'keyframe' and any(self.st.creative.direction(sid).get('conditioning') for sid in b.get('shot_ids', [])):
             return {'ok':False,'queued':0,'skipped':[],'error':'Assign a compatible keyframe recipe in Generation lab before using pose/depth/layout conditioning.'}
-        if not self.st.production.ready(b['stage'], b.get('shot_ids', [])):
+        voiced_animation=b['stage']=='animate' and bool(b.get('shot_ids')) and all((self.st.db.one('SELECT audio FROM shots WHERE id=?',(sid,)) or {}).get('audio') for sid in b['shot_ids'])
+        if not voiced_animation and not self.st.production.ready(b['stage'], b.get('shot_ids', [])):
             return {'ok': False, 'queued': 0, 'skipped': ['No ready server for this workflow. Run Production → Check readiness for details.'],
                     'error': 'No ready server for ' + b['stage']}
         with self.st.production.lock:

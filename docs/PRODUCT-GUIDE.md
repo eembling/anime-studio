@@ -204,7 +204,7 @@ Draft generation uses the configured smaller dimensions and frame cap; defaults 
 
 ### Finish the picture
 
-Lip sync is optional. It needs dialogue audio, a keyframe and a compatible S2V workflow/server. It creates a talking clip; it does not replace the voice-generation step.
+Generate and select dialogue first. For motion shots with selected audio, **Animate with voice** automatically uses an audio-capable animation workflow or a ready Lip sync/S2V default. It sends the corresponding dialogue section to ComfyUI and embeds the selected voice in the generated take. The separate Lip sync action remains available, including for still shots.
 
 Upscaling is optional and needs the intended source clip. Choose finishing takes deliberately. Retiming is applied during assembly: hold frames, blend or RIFE when available. Workflow fps and episode output fps are separate settings.
 
@@ -392,3 +392,13 @@ In Shots, choose a clip take and press **Play with sound**. The app prepares a l
 The first play prepares and caches a preview up to 1280 pixels wide. Later plays reuse it; dialogue, timing, source files, cues or mixer changes produce a new cache entry. Source clip timing and frame rate are retained. Continuation previews use the corresponding section of shot dialogue, accounting for duplicate boundary frames. Previewing an alternate take does not approve it. Clip previews show the complete take; shot trims and the assembled continuation chain are applied by **Export with sound**.
 
 Assigned dialogue replaces embedded clip audio to avoid hearing voices twice. If no dialogue is assigned, existing embedded clip audio is retained. Timed cues and saved mixer gain, mute, solo, pan and ducking are applied; the separate episode-wide music bed is reserved for episode/scene playback and exports. Missing files produce a visible Retry action. The player identifies unassigned dialogue or a muted mix instead of silently running a second audio player.
+
+### Voice-aware clip generation
+
+The selected shot dialogue is copied into the render snapshot when you queue Animate, Continue or Lip sync. Editing or regenerating a voice afterward leaves the queued render unchanged. Repeat/retry uses the captured voice; generating a new take uses the new selection. Generation includes the voice in the take's own MP4, so opening the generated file outside Anime Studio also plays it. Upscaled takes retain the selected voice as well.
+
+Compatible workflows receive a bounded WAV aligned to that clip's source time, including dialogue offsets and fades. Continuations receive the later dialogue section with the duplicate boundary frame accounted for. The voice and picture keep their original time scale; audio is never sped up to change frame rate. S2V's required generation padding is trimmed to the requested frame count in the saved take.
+
+An explicitly assigned generation recipe and end-on-next-shot constraints are retained. Audio-aware assigned recipes receive the voice directly. If the selected recipe cannot use audio, or the default S2V workflow is unavailable on enabled servers, generation keeps the picture workflow and embeds the voice; the queue confirmation explains that audio-driven animation was unavailable. It never claims that attaching a soundtrack alone creates lip sync.
+
+For manual ComfyUI server setup, configure or verify **Settings → Workflows → Lip sync** and run **Production → Check readiness**. On the rendering server, run a compatible S2V template with its required nodes/models, then export its API workflow if it differs from the configured default. Label its connected image/audio loaders `START_IMAGE` and `AUDIO_IN`, and enter its actual generation fps and frame limit in the app. Enable the server for Clip/Continue jobs so automatically routed renders can use it. No server installation or remote GPU render is performed by an app rebuild.
