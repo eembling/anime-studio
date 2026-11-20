@@ -5,6 +5,8 @@ import subprocess
 import threading
 
 LOCAL=threading.local()
+LOCK=threading.Lock()
+PROCESSES={}
 
 
 class ExportCancelled(RuntimeError):
@@ -16,6 +18,8 @@ def run(command, timeout=3600, binary=False):
     if event and event.is_set():
         raise ExportCancelled('Export cancelled.')
     process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=not binary,start_new_session=True)
+    if event:
+        with LOCK:PROCESSES.setdefault(event,set()).add(process)
     elapsed=0
     try:
         while True:
@@ -30,9 +34,24 @@ def run(command, timeout=3600, binary=False):
                 if event and event.is_set():raise ExportCancelled('Export cancelled.')
                 if elapsed>=timeout:raise TimeoutError('Export media operation exceeded one hour.')
     finally:
+        if event:
+            with LOCK:
+                group=PROCESSES.get(event,set())
+                group.discard(process)
+                if not group:PROCESSES.pop(event,None)
         if process.poll() is None:
             try:os.killpg(process.pid,signal.SIGTERM)
             except ProcessLookupError:pass
             try:process.communicate(timeout=2)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid,signal.SIGKILL);process.communicate()
+
+
+def stop(event):
+    event.set()
+    with LOCK:
+        processes=list(PROCESSES.get(event,set()))
+    for process in processes:
+        if process.poll() is None:
+            try:os.killpg(process.pid,signal.SIGTERM)
+            except ProcessLookupError:pass

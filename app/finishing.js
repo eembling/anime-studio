@@ -172,6 +172,7 @@ function renderExportJobs(){
   <span>${job.operations} media operations completed</span>
   ${['queued','preparing','running'].includes(job.status)?`<button class="btn sm" onclick="post('/api/export',{action:'cancel',id:'${job.id}'})">Cancel export</button>`:''}
   ${['interrupted','error','cancelled'].includes(job.status)?`<button class="btn sm" onclick="post('/api/export',{action:'resume',id:'${job.id}'})">Resume captured export</button>`:''}
+  ${job.result?.recipe_source==='current'?'<p class="warn-t">This earlier export has no saved mix recipe. Stems used the current mixer settings.</p>':''}
   ${job.error?`<p class="err">${esc(job.error)}</p>`:''}
   ${job.result?.url?`<a class="btn sm" href="${esc(job.result.url)}" download>Download</a>`:''}
   ${Object.entries(job.result?.files||{}).map(([name,url])=>`<a class="btn sm" href="${esc(url)}" download>${esc(name)}</a>`).join('')}

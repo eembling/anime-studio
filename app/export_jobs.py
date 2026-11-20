@@ -65,7 +65,9 @@ class ExportJobs:
         if not job:raise ValueError('Export job no longer exists.')
         if body['action']=='cancel':
             event=self.events.get(ident)
-            if event:event.set()
+            if event:
+                from export_runtime import stop
+                stop(event)
             return {'ok':True}
         if body['action']=='resume':
             with self.lock:
@@ -218,4 +220,5 @@ class ExportJobs:
             self.st.assembly['running']=False
 
     def shutdown(self):
-        for event in list(self.events.values()):event.set()
+        from export_runtime import stop
+        for event in list(self.events.values()):stop(event)
