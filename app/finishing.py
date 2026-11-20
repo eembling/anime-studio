@@ -1,5 +1,6 @@
 """Shared picture, dialogue, mixer and reusable sound finishing tools."""
 import json
+from timeline import frames as timeline_frames, layout as timeline_layout
 import math
 import shutil
 import threading
@@ -40,6 +41,7 @@ class Finishing:
     def state(self):
         return {
             'mixer': self.mixer(),
+            'audio_config': __import__('audio_processing').CONFIG,
             'library': [dict(row, url='/media/'+row['path']) for row in
                         self.st.db.q('SELECT * FROM sound_library ORDER BY name,id')],
         }
@@ -119,63 +121,41 @@ class Finishing:
             options = {'use_music': bool(body.get('use_music', True)),
                        'use_timed': bool(body.get('use_timed', True)),
                        'music_volume': bounded(body.get('music_volume', .25), 0, 4)}
-            settings = st.settings()
-            mixer = self.mixer()
-            sources = []
-            for shot in shots:
-                takes = [st.take(shot[key]) for key in ('keyframe_take','clip_take','final_take')]
-                takes += st.chain(shot)
-                sources.extend(st.production.file_stamp(take['path']) for take in takes if take)
-                sources.append(st.production.file_stamp(shot['audio']))
-            cues = st.soundtrack.cues()
-            sources.extend(st.production.file_stamp(cue['path']) for cue in cues)
-            sources.append(st.production.file_stamp(settings.get('music')))
-            token = st.soundtrack.digest([shots, indices, settings, mixer, options, cues, sources,
-                                         [st.creative.direction(s['id']) for s in selected]])
+            settings=st.settings()
+            timeline=timeline_layout(shots,int(settings['out_fps']))
+            indices=[shots.index(shot) for shot in selected]
+            left=timeline[indices[0]]['start']
+            duration=sum(timeline[index]['duration'] for index in indices)
+            cues=self.window_tracks(st.soundtrack.cues() if options['use_timed'] else [],left,duration)
+            dialogue=self.window_tracks(self.dialogue_tracks(shots),left,duration)
+            sources=[st.production.file_stamp(track['path']) for track in cues+dialogue]
+            for shot in selected:
+                for take in [st.take(shot[key]) for key in ('keyframe_take','clip_take','final_take')]+st.chain(shot):
+                    if take:sources.append(st.production.file_stamp(take['path']))
+            bed=settings.get('music') if options['use_music'] else ''
+            sources.append(st.production.file_stamp(bed))
+            picture_fields=('id','kind','duration','trim_in','keyframe_take','clip_take','final_take','cont_takes',
+                            'retime','camera','transition','transition_seconds')
+            picture=[[shot.get(key) for key in picture_fields] for shot in selected]
+            token=st.soundtrack.digest([picture,cues,dialogue,sources,self.mixer(),options,left,
+                                       [settings[key] for key in ('out_width','out_height','out_fps')],
+                                       [st.creative.direction(shot['id']).get('camera') for shot in selected]])
             label = 'shot-'+str(int(selected[0]['seq'])).zfill(3) if body.get('shot_id') else 'scene'
             cache = st.data/'cache'/('rendered-'+label+'-'+token+'.mp4')
             if cache.is_file():
                 st.assembly.update(running=False, kind='shot' if body.get('shot_id') else 'scene',
                                    output=st.rel(cache), folder='cache', log=['Using cached picture and sound preview.'])
                 return {'ok': True, 'cached': True, 'url': '/media/'+st.rel(cache)}
-            st.assembly.update(running=True, output=None, log=['Rendering picture and sound…'],
-                               kind='shot' if body.get('shot_id') else 'scene')
-            threading.Thread(target=self.render, args=(selected, cache, bool(body.get('shot_id')), options), daemon=True).start()
-            return {'ok': True, 'cached': False}
+            return st.exports.submit(dict(options,kind='shot' if body.get('shot_id') else 'scene',
+                                          shot_ids=[shot['id'] for shot in selected],cache=cache.name,expected_sources=sources))
         raise ValueError('Unknown finishing action.')
-
-    def render(self, shots, cache, single, options):
-        from anime_studio import assemble
-        try:
-            # Serialize editorial writes while source selections and mix controls
-            # are read, so one preview never combines different edit revisions.
-            with self.st.production.lock:
-                self.st.assembly['running'] = True
-                assemble(self.st, options['use_music'], options['music_volume'],
-                         use_timed=options['use_timed'], shot_ids=[s['id'] for s in shots])
-                output = self.st.assembly['output']
-                if output:
-                    source = self.st.abs(output)
-                    temporary = cache.with_suffix('.tmp')
-                    shutil.copyfile(source, temporary)
-                    temporary.replace(cache)
-                    # Scoped previews only retain the cached result, not duplicate
-                    # per-shot intermediates and dialogue masters.
-                    work = self.st.abs(self.st.assembly['folder'])
-                    if work.parent == self.st.data/'exports':
-                        shutil.rmtree(work)
-                    self.st.assembly.update(output=self.st.rel(cache), folder='cache', kind='shot' if single else 'scene')
-        except Exception as exc:
-            self.st.assembly['log'].append('ERROR: '+str(exc))
-        finally:
-            self.st.assembly['running'] = False
 
     def dialogue_tracks(self, shots):
         from anime_studio import media_seconds
         rows, start = [], 0
         fps = int(self.st.settings()['out_fps'])
         for shot in shots:
-            duration = round(shot['duration']*fps)/fps
+            duration = timeline_frames(shot['duration'],fps)/fps
             if shot['audio'] and self.st.abs(shot['audio']).is_file():
                 source = media_seconds(self.st.abs(shot['audio']))
                 trim = float(shot.get('trim_in') or 0)
@@ -208,9 +188,9 @@ class Finishing:
         """Render a raw dialogue master without bus gain, preserving remixability."""
         self.mix_audio(master, output, tracks, '', 0, duration, raw=True)
 
-    def mix_audio(self, master, output, cues, bed, bed_volume, duration, raw=False):
+    def mix_audio(self, master, output, cues, bed, bed_volume, duration, raw=False, stem_dir=None, mixer_override=None, engine="block-rms-v1"):
         from anime_studio import ffmpeg
-        mixer = self.mixer()
+        mixer = mixer_override or self.mixer()
         inputs = ['-i', str(master)]
         filters = []
         buses = {name: [] for name in BUSES}
@@ -273,53 +253,80 @@ class Finishing:
             coefficients = (f'c0=c0+{cross}*c1|c1={keep}*c1' if pan < 0 else
                             f'c0={keep}*c0|c1=c1+{cross}*c0')
             filters.append(f'[sum{name}]volume={volume},pan=stereo|{coefficients}[{name}]')
-        if not raw and mixer['duck']:
-            filters += ['[dialogue]asplit=2[spoken][sidechain]',
-                        '[music][sidechain]sidechaincompress=threshold=0.025:ratio=8:attack=15:release=350[ducked]']
-            music, dialogue = 'ducked', 'spoken'
-        else:
-            music, dialogue = 'music', 'dialogue'
-        filters.append(f'[{dialogue}][{music}][ambience][sfx]amix=inputs=4:normalize=0:duration=longest,'
-                       f'alimiter=limit=0.95:level=0:latency=1,atrim=duration={duration}[mix]')
-        ffmpeg(inputs+['-filter_complex', ';'.join(filters), '-map','0:v:0','-map','[mix]',
-                       '-c:v','copy','-c:a','aac','-b:a','192k','-ar','48000','-ac','2','-t',str(duration),str(output)])
+        import tempfile
+        from audio_processing import write_envelope
+        with tempfile.TemporaryDirectory(prefix='audio-buses-',dir=self.st.data/'cache') as temporary:
+            folder=__import__('pathlib').Path(temporary)
+            # Render post-fader buses once; stems use these same files.
+            outputs=[]
+            for name in BUSES:
+                outputs += ['-map',f'[{name}]','-c:a','pcm_f32le','-ar','48000','-ac','2',
+                            '-t',str(duration),str(folder/(name+'.wav'))]
+            ffmpeg(inputs+['-filter_complex',';'.join(filters)]+outputs)
+            music=folder/'music.wav'
+            if not raw and mixer['duck']:
+                ducked=folder/'ducked.wav'
+                if engine=='legacy-sidechain':
+                    ffmpeg(['-i',str(music),'-i',str(folder/'dialogue.wav'),'-filter_complex',
+                            '[0:a][1:a]sidechaincompress=threshold=0.025:ratio=8:attack=15:release=350[out]',
+                            '-map','[out]','-c:a','pcm_f32le','-t',str(duration),str(ducked)])
+                else:
+                    gain=folder/'duck.wav'
+                    write_envelope(folder/'dialogue.wav',gain)
+                    ffmpeg(['-i',str(music),'-i',str(gain),'-filter_complex',
+                            '[1:a]aresample=48000,aformat=channel_layouts=stereo[g];[0:a][g]amultiply[out]',
+                            '-map','[out]','-c:a','pcm_f32le','-t',str(duration),str(ducked)])
+                music=ducked
+            files=[folder/'dialogue.wav',music,folder/'ambience.wav',folder/'sfx.wav']
+            if stem_dir:
+                for name,file in zip(BUSES,files):
+                    shutil.copyfile(file,stem_dir/(name+'.wav'))
+            bus_inputs=['-i',str(master)]
+            for file in files:bus_inputs+=['-i',str(file)]
+            ffmpeg(bus_inputs+['-filter_complex',
+                    '[1:a][2:a][3:a][4:a]amix=inputs=4:normalize=0:duration=longest,'
+                    'alimiter=limit=0.95:level=0:latency=1[out]',
+                    '-map','0:v:0','-map','[out]','-c:v','copy','-c:a','aac','-b:a','192k',
+                    '-ar','48000','-ac','2','-t',str(duration),str(output)])
         output.with_suffix('.audio.json').write_text(json.dumps({'cues': tracks,'mixer':mixer},indent=2))
         return duration
 
     def join_picture(self, shots, segments, joined, fps):
-        """Transitions begin at the cut, preserving shot and audio cue positions."""
+        """Render each affected shot once, then copy-concatenate its picture."""
         from anime_studio import ffmpeg
-        current = segments[0]
-        elapsed = round(shots[0]['duration']*fps)/fps
-        for index in range(1, len(segments)):
-            shot = shots[index]
-            previous = shots[index-1]
-            transition = previous.get('transition') or 'cut'
-            duration = min(float(previous.get('transition_seconds') or .5),
-                           round(shot['duration']*fps)/fps, elapsed)
-            duration = max(1/fps, round(duration*fps)/fps)
-            dest = joined.parent/f'join-{index}.mp4'
-            if transition == 'dissolve':
-                # Hold the outgoing edge while revealing the first frames of
-                # the incoming shot. No timeline shortening or cue movement.
-                graph = (f'[0:v]settb=AVTB,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={duration}[left];'
-                         f'[1:v]settb=AVTB,setpts=PTS-STARTPTS[right];'
-                         f'[left][right]xfade=transition=fade:duration={duration}:offset={elapsed}[v]')
-            elif transition == 'black':
-                half = duration/2
-                graph = (f'[0:v]fade=t=out:st={max(0,elapsed-half)}:d={half},setpts=PTS-STARTPTS[left];'
-                         f'[1:v]fade=t=in:st=0:d={half},setpts=PTS-STARTPTS[right];'
-                         '[left][right]concat=n=2:v=1:a=0[v]')
+        files=[]
+        for index,(shot,source) in enumerate(zip(shots,segments)):
+            duration=timeline_frames(shot['duration'],fps)/fps
+            previous=shots[index-1] if index else None
+            incoming=(previous or {}).get('transition') or 'cut'
+            outgoing=shot.get('transition') or 'cut' if index<len(shots)-1 else 'cut'
+            filters=['[0:v]setpts=PTS-STARTPTS']
+            if incoming=='black':
+                fade=min(float(previous.get('transition_seconds') or .5),duration)/2
+                filters[0]+=f',fade=t=in:st=0:d={fade}'
+            if outgoing=='black':
+                fade=min(float(shot.get('transition_seconds') or .5),duration)/2
+                filters[0]+=f',fade=t=out:st={duration-fade}:d={fade}'
+            inputs=['-i',str(source)]
+            if incoming=='dissolve':
+                last=joined.parent/f'edge-{index}.png'
+                ffmpeg(['-sseof',str(-1/fps),'-i',str(segments[index-1]),'-frames:v','1',str(last)])
+                fade=max(1/fps,min(float(previous.get('transition_seconds') or .5),duration))
+                inputs+=['-loop','1','-framerate',str(fps),'-i',str(last)]
+                filters[0]+='[picture]'
+                filters+= [f'[1:v]format=yuva420p,fade=t=out:st=0:d={fade}:alpha=1[edge]',
+                           f"[picture][edge]overlay=shortest=1:enable='lt(t,{fade})'[v]"]
             else:
-                graph = '[0:v]setpts=PTS-STARTPTS[left];[1:v]setpts=PTS-STARTPTS[right];[left][right]concat=n=2:v=1:a=0[v]'
-            elapsed += round(shot['duration']*fps)/fps
-            ffmpeg(['-i',str(current),'-i',str(segments[index]),'-filter_complex_threads','1',
-                    '-filter_complex',graph,'-map','[v]','-an','-c:v','libx264','-pix_fmt','yuv420p',
-                    '-r',str(fps),'-t',str(elapsed),str(dest)])
-            if current not in segments:
-                current.unlink()
-            current = dest
-        if len(segments)==1:
-            shutil.copyfile(current, joined)
-        else:
-            current.rename(joined)
+                filters[0]+='[v]'
+            if incoming=='cut' and outgoing=='cut':
+                files.append(source)
+                continue
+            target=joined.parent/f'transition-{index}.mp4'
+            ffmpeg(inputs+['-filter_complex_threads','1','-filter_complex',';'.join(filters),
+                           '-map','[v]','-an','-c:v','libx264','-crf','16','-pix_fmt','yuv420p',
+                           '-r',str(fps),'-t',str(duration),str(target)])
+            files.append(target)
+        listing=joined.parent/'picture-concat.txt'
+        listing.write_text(''.join(f"file '{file.relative_to(joined.parent).as_posix()}'\n" for file in files))
+        ffmpeg(['-f','concat','-safe','0','-i',str(listing),'-map','0:v:0','-an','-c','copy',str(joined)])
+        listing.unlink()

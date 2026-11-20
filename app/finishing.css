@@ -6,3 +6,7 @@
 .sound-item audio{width:100%;max-width:450px}
 @media(max-width:800px){.mix-buses{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:500px){.mix-buses{grid-template-columns:1fr}}
+
+.clip-playback-status{position:absolute;bottom:40px;left:10px;right:10px;background:var(--sheet);color:var(--ink);font-size:12px;padding:6px}.clip-playback-status:empty{display:none}
+
+.export-job{border:1px solid var(--line);padding:10px;margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}.export-job p{width:100%}

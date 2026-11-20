@@ -1,61 +1,58 @@
 /* Audio finishing controls use the existing dialogs and page layout. */
 const MIX_NAMES={dialogue:'Dialogue',music:'Music',ambience:'Ambience',sfx:'Effects'};
-let MIX_DRAFT=null, MIX_CONTEXT=null, MIX_FRAME=null;
-const MIX_NODES=new WeakMap();
-const MIX_ACTIVE=new Map();
-
-function finishingPost(action,body={}){
- return post('/api/finishing',{action,...body});
-}
-function startMixAudio(){
- if(!MIX_CONTEXT)MIX_CONTEXT=new AudioContext();
- if(!MIX_FRAME)measureMixAudio();
- MIX_CONTEXT.resume().catch(()=>toast('Audio mixer could not start.',true));
-}
-function effectiveMixer(){
- return MIX_DRAFT||S.finishing?.mixer;
+let MIX_DRAFT=null, MIX_CONTEXT=null, MIX_FRAME=null, MIX_READY=false, MIX_INIT=null;
+let MIX_PROCESSOR=null;
+const MIX_NODES=new WeakMap(), MIX_ACTIVE=new Map(), MIX_BUSES=new Map();
+function finishingPost(action,body={}){return post('/api/finishing',{action,...body})}
+function effectiveMixer(){return MIX_DRAFT||S.finishing?.mixer}
+async function startMixAudio(){
+ if(MIX_READY){await MIX_CONTEXT.resume();return}
+ if(MIX_INIT)return MIX_INIT;
+ MIX_INIT=(async()=>{
+  MIX_CONTEXT=new AudioContext();
+  await MIX_CONTEXT.audioWorklet.addModule('/mix_processor.js');
+  MIX_PROCESSOR=new AudioWorkletNode(MIX_CONTEXT,'studio-mixer',{
+   numberOfInputs:4,numberOfOutputs:1,outputChannelCount:[2],processorOptions:S.finishing.audio_config});
+  MIX_PROCESSOR.connect(MIX_CONTEXT.destination);
+  Object.keys(MIX_NAMES).forEach((name,index)=>{
+   const gain=MIX_CONTEXT.createGain(),pan=MIX_CONTEXT.createStereoPanner();
+   gain.connect(pan);pan.connect(MIX_PROCESSOR,0,index);MIX_BUSES.set(name,{gain,pan});
+  });
+  MIX_PROCESSOR.port.onmessage=event=>{
+   Object.keys(MIX_NAMES).forEach((name,index)=>{
+    const peak=event.data.peaks[index],meter=$('#mix-meter-'+name),label=$('#mix-level-'+name);
+    if(meter)meter.value=peak;
+    if(label)label.textContent=peak>0?(20*Math.log10(peak)).toFixed(1)+' dBFS':'−∞ dBFS';
+   });
+  };
+  MIX_READY=true;measureMixAudio();await MIX_CONTEXT.resume();
+ })().catch(error=>{MIX_INIT=null;throw error});
+ return MIX_INIT;
 }
 function wireMixAudio(audio,id,volume=1){
- if(!MIX_CONTEXT||!effectiveMixer())return;
+ if(!MIX_READY)return false;
+ const bus=id==='dialogue'||id.startsWith('dialogue-')?'dialogue':id==='bed'?'music':
+  S.audio_cues.find(cue=>'cue'+cue.id===id)?.kind||'sfx';
+ const old=MIX_ACTIVE.get(id);
+ if(old&&old.audio!==audio){old.gain.disconnect();old.source.disconnect();MIX_ACTIVE.delete(id)}
  let node=MIX_NODES.get(audio);
  if(!node){
   const source=MIX_CONTEXT.createMediaElementSource(audio),gain=MIX_CONTEXT.createGain();
-  const pan=MIX_CONTEXT.createStereoPanner(),meter=MIX_CONTEXT.createAnalyser();
-  meter.fftSize=256;
-  const cueGain=MIX_CONTEXT.createGain();
-  source.connect(cueGain).connect(gain).connect(pan).connect(meter).connect(MIX_CONTEXT.destination);
-  node={gain,pan,meter,cueGain,samples:new Float32Array(meter.fftSize),audio};
-  MIX_NODES.set(audio,node);
+  source.connect(gain);node={source,gain,bus:null,audio};MIX_NODES.set(audio,node);
  }
- node.cueGain.gain.setTargetAtTime(Math.max(0,volume),MIX_CONTEXT.currentTime,.01);
- node.bus=id==='dialogue'||id.startsWith('dialogue-')?'dialogue':id==='bed'?'music':
-   (S.audio_cues.find(cue=>'cue'+cue.id===id)?.kind||'sfx');
- MIX_ACTIVE.set(id,node);
- if(!MIX_FRAME)measureMixAudio();
- return true;
+ if(node.bus!==bus){node.gain.disconnect();node.gain.connect(MIX_BUSES.get(bus).gain);node.bus=bus}
+ node.gain.gain.setTargetAtTime(Math.max(0,volume),MIX_CONTEXT.currentTime,.01);
+ MIX_ACTIVE.set(id,node);return true;
 }
 function measureMixAudio(){
- const mixer=effectiveMixer();
- if(!mixer||!MIX_CONTEXT){MIX_FRAME=null;return}
- const peaks=Object.fromEntries(Object.keys(MIX_NAMES).map(bus=>[bus,0]));
- for(const[id,node]of MIX_ACTIVE){
-  if(node.audio.paused||!EDIT_AUDIOS.has(id)){MIX_ACTIVE.delete(id);continue}
-  node.meter.getFloatTimeDomainData(node.samples);
-  const peak=Math.max(...node.samples.map(Math.abs));
-  peaks[node.bus]=Math.max(peaks[node.bus],peak);
+ if(!MIX_READY)return;
+ const mixer=effectiveMixer(),solo=Object.keys(MIX_NAMES).some(name=>mixer[name].solo);
+ for(const[name,nodes]of MIX_BUSES){
+  const bus=mixer[name],value=bus.mute||(solo&&!bus.solo)?0:bus.volume;
+  nodes.gain.gain.setTargetAtTime(value,MIX_CONTEXT.currentTime,.015);
+  nodes.pan.pan.setTargetAtTime(bus.pan,MIX_CONTEXT.currentTime,.015);
  }
- const solo=Object.keys(MIX_NAMES).some(bus=>mixer[bus].solo);
- for(const node of MIX_ACTIVE.values()){
-  const bus=mixer[node.bus],muted=bus.mute||(solo&&!bus.solo);
-  const duck=node.bus==='music'&&mixer.duck&&peaks.dialogue>.025?.18:1;
-  node.gain.gain.setTargetAtTime(muted?0:bus.volume*duck,MIX_CONTEXT.currentTime,duck<1?.015:.35);
-  node.pan.pan.setTargetAtTime(bus.pan,MIX_CONTEXT.currentTime,.015);
- }
- for(const bus of Object.keys(MIX_NAMES)){
-  const meter=$('#mix-meter-'+bus),level=$('#mix-level-'+bus);
-  if(meter)meter.value=peaks[bus];
-  if(level)level.textContent=peaks[bus]>0?Math.max(-60,20*Math.log10(peaks[bus])).toFixed(1)+' dBFS':'−∞ dBFS';
- }
+ MIX_PROCESSOR.port.postMessage({duck:!!mixer.duck});
  MIX_FRAME=EDIT_PLAYING||MIX_DRAFT?requestAnimationFrame(measureMixAudio):null;
 }
 function openAudioMixer(){
@@ -166,4 +163,17 @@ function useLibrarySound(id){
  const sound=S.finishing.library.find(sound=>sound.id===id);
  if(!sound)return;
  editAudioCue(null,sound);
+}
+
+function renderExportJobs(){
+ const box=$('#export-job-controls');if(!box)return;
+ const jobs=S.export_jobs||[];
+ box.innerHTML=jobs.map(job=>`<div class="export-job"><b>${esc(job.spec.kind)} · ${esc(job.status)}</b>
+  <span>${job.operations} media operations completed</span>
+  ${['queued','preparing','running'].includes(job.status)?`<button class="btn sm" onclick="post('/api/export',{action:'cancel',id:'${job.id}'})">Cancel export</button>`:''}
+  ${['interrupted','error','cancelled'].includes(job.status)?`<button class="btn sm" onclick="post('/api/export',{action:'resume',id:'${job.id}'})">Resume captured export</button>`:''}
+  ${job.error?`<p class="err">${esc(job.error)}</p>`:''}
+  ${job.result?.url?`<a class="btn sm" href="${esc(job.result.url)}" download>Download</a>`:''}
+  ${Object.entries(job.result?.files||{}).map(([name,url])=>`<a class="btn sm" href="${esc(url)}" download>${esc(name)}</a>`).join('')}
+ </div>`).join('');
 }

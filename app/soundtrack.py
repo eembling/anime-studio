@@ -1,6 +1,7 @@
 """Timed episode audio cues and soundtrack-only exports. No GPU work is submitted."""
 import hashlib
 import json
+from timeline import frames as timeline_frames, layout as timeline_layout
 import math
 import shutil
 import subprocess
@@ -25,7 +26,8 @@ def seconds(value):
 
 
 def probe(path):
-    result = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration:stream=codec_type', '-of', 'json', str(path)], capture_output=True, text=True)
+    from export_runtime import run
+    result = run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration:stream=codec_type', '-of', 'json', str(path)])
     if result.returncode:
         raise ValueError('Cannot read this media file. Choose a valid audio/video file.')
     info = json.loads(result.stdout)
@@ -65,12 +67,19 @@ class Soundtrack:
                   'cont_takes', 'audio', 'retime', 'camera', 'transition', 'transition_seconds', 'dialogue_offset', 'dialogue_tail', 'dialogue_fade')
         cameras = {row['shot_id']: json.loads(row['json']).get('camera')
                    for row in self.st.db.q('SELECT shot_id,json FROM shot_direction')}
-        picture = [[shot.get(field) for field in fields] + [cameras.get(shot['id'])] for shot in shots]
+        picture=[]
+        for shot in shots:
+            media=[self.st.production.file_stamp(shot.get('audio'))]
+            for key in ('keyframe_take','clip_take','final_take'):
+                take=self.st.take(shot.get(key))
+                if take:media.append(self.st.production.file_stamp(take['path']))
+            media.extend(self.st.production.file_stamp(take['path']) for take in self.st.chain(shot))
+            picture.append([*[shot.get(field) for field in fields],cameras.get(shot['id']),media])
         return self.digest([picture, [settings.get(key) for key in ('out_width','out_height','out_fps')]])
 
     def mix_signature(self, cues, bed):
-        fields = ('path', 'start', 'offset', 'duration', 'volume', 'fade_in', 'fade_out', 'loop', 'window_skip', 'original_duration')
-        return self.digest([[[cue.get(field) for field in fields] for cue in cues if cue['enabled']], bed or '', self.st.finishing.mixer() if hasattr(self.st,'finishing') else {}])
+        fields = ('kind', 'path', 'start', 'offset', 'duration', 'volume', 'fade_in', 'fade_out', 'loop', 'window_skip', 'original_duration')
+        return self.digest([[[cue.get(field) for field in fields] for cue in cues if cue['enabled']], [self.st.production.file_stamp(cue['path']) for cue in cues if cue['enabled']], self.st.production.file_stamp(bed), self.st.finishing.mixer() if hasattr(self.st,'finishing') else {}])
 
     def export_states(self, settings, cues):
         rows = self.exports()
@@ -91,9 +100,10 @@ class Soundtrack:
     def cues(self):
         rows = self.st.db.q('SELECT * FROM audio_cues ORDER BY start,id')
         starts = {}; cursor = 0
+        fps=int(self.st.settings()['out_fps'])
         for shot in self.st.ordered_shots():
             starts[shot['id']] = cursor
-            cursor += shot['duration']
+            cursor += timeline_frames(shot['duration'],fps)/fps
         for row in rows:
             if row.get('anchor_shot'):
                 row['anchor_missing'] = row['anchor_shot'] not in starts
@@ -260,24 +270,11 @@ class Soundtrack:
         return duration
 
     def remix(self, body):
-        with self.st.production.lock:
-            if self.st.assembly['running']:
-                raise ValueError('Wait for the current export to finish.')
-            source = self.st.db.one('SELECT * FROM episode_audio_exports WHERE id=?', (body.get('export_id'),))
-            if not source:
-                raise ValueError('Choose a rendered episode, or use Find rendered episodes first.')
-            master = (self.st.data / source['master']).resolve()
-            if self.st.data not in master.parents or not master.is_file():
-                raise ValueError('The rendered episode source is missing.')
-            cues = self.cues()
-            settings = self.st.settings()
-            bed = settings.get('music', '') if body.get('use_music') else ''
-            volume = float(body.get('music_volume', .25))
-            if not math.isfinite(volume) or not 0 <= volume <= 4:
-                raise ValueError('Music volume must be between 0 and 4.')
-            self.st.assembly['running'] = True
-            threading.Thread(target=self._export, args=(source, master, cues, bed, volume, bool(body.get('use_music'))), daemon=True).start()
-        return {'ok': True}
+        if hasattr(self.st,'exports'):
+            if not self.st.db.one('SELECT id FROM episode_audio_exports WHERE id=?',(body.get('export_id'),)):
+                raise ValueError('Choose a rendered episode first.')
+            return self.st.exports.submit(dict(body,kind='soundtrack',id=body['export_id']))
+        raise ValueError('Export job manager unavailable.')
 
     def _export(self, source, master, cues, bed, volume, use_music=False):
         state = self.st.assembly
@@ -289,7 +286,8 @@ class Soundtrack:
             self.mix(master, output, cues, bed, volume, state['log'])
             build = json.loads(source.get('build_json') or '{}')
             if build:
-                build.update(timed=True, music=use_music, volume=volume, mix=self.mix_signature(cues, bed))
+                build.update(timed=True, music=use_music, volume=volume, mix=self.mix_signature(cues, bed),
+                             mix_recipe={'cues':cues,'bed':bed,'volume':volume,'mixer':self.st.finishing.mixer(),'engine':'block-rms-v1'})
             self.register(master, output, source['seconds'], bool(source['clean']), build)
             state.update(output=self.st.rel(output), folder=self.st.rel(output.parent))
             state['log'].append('Saved new soundtrack export: ' + output.name)

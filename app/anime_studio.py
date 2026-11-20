@@ -14,6 +14,7 @@ nodes built into ComfyUI, so nothing needs installing on the server - just model
 """
 from script_dialogue import dialogue_line, script_blocks, recovery_preview, recover_dialogue
 import hashlib
+from timeline import frames as timeline_frames, layout as timeline_layout
 import argparse
 import base64
 import copy
@@ -41,7 +42,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "2.15"
+VERSION = "2.16"
 for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebrew/bin")):
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
@@ -378,7 +379,7 @@ def find_rife():
 
 
 class Studio:
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, export_worker=False):
         self.data = Path(data_dir).expanduser().resolve()
         for sub in ("uploads", "shots", "cast", "jobs", "exports", "voices", "cache"):
             (self.data / sub).mkdir(parents=True, exist_ok=True)
@@ -434,6 +435,9 @@ class Studio:
         self.alignment=Alignment(self)
         self.storage=StorageManager(self)
         self.workspace=Workspace(self)
+        if not export_worker:
+            from export_jobs import ExportJobs
+            self.exports=ExportJobs(self)
 
     def tools(self, refresh=False):
         if self.tools_cache is None or refresh:
@@ -897,7 +901,8 @@ def collect_outputs(entry):
 # Media helpers (run on the Mac)
 # ======================================================================================
 def ffmpeg(args):
-    r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"] + args, capture_output=True, text=True)
+    from export_runtime import run
+    r = run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"] + args)
     if r.returncode != 0:
         raise RuntimeError("ffmpeg: " + (r.stderr or "")[-1500:])
 
@@ -1455,7 +1460,7 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
         start = 0
         for shot in all_shots:
             if shots and shot['id']==shots[0]['id']:break
-            start += round(shot['duration']*FPS)/FPS
+            start += timeline_frames(shot['duration'],FPS)/FPS
         if not shots:
             raise RuntimeError("No shots yet.")
         bed = S.get('music', '') if use_music else ''
@@ -1475,7 +1480,7 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
         for i, s in enumerate(shots, 1):
             dur = max(0.5, float(s["duration"] or 4))
             trim_in = float(s.get("trim_in") or 0)
-            nfr = int(round(dur * FPS))
+            nfr = timeline_frames(dur, FPS)
             seg = out / "shots" / f"{i:04d}_shot.mp4"
             chain = st.chain(s)
             take = st.take(s["final_take"]) or (chain[0] if chain else None)
@@ -1555,6 +1560,8 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
         else:
             joined.rename(master)
         log.append('Mixing episode audio...' if cues or use_music else 'Saving dialogue-only episode...')
+        if build is not None:
+            build['mix_recipe']={'cues':cues,'bed':bed,'volume':float(music_volume),'mixer':st.finishing.mixer(),'engine':'block-rms-v1'}
         st.soundtrack.mix(master, final, cues, bed, float(music_volume), log)
         if not preview and scene is None and shot_ids is None:
             st.soundtrack.register(master, final, rec / FPS, build=build)
@@ -1671,6 +1678,11 @@ class API:
             job['requires_flf'] = job['stage'] in ('animate','continue') and job['shot_id'] in end_next
         queue = queue_snapshot(jobs, history, insts, st.health, readiness)
         production = st.production.snapshot(shots)
+        timing = {row['id']: row for row in timeline_layout(shots, int(st.settings()['out_fps']))}
+        for shot in shots:
+            shot['timeline_start'] = timing[shot['id']]['start']
+            shot['timeline_duration'] = timing[shot['id']]['duration']
+            shot['timeline_frames'] = timing[shot['id']]['frames']
         A = dict(st.assembly, log=list(st.assembly["log"]))
         A["output_url"] = self.media(A.get("output"))
         S = st.settings()
@@ -1684,7 +1696,7 @@ class API:
                 "version": VERSION, "platform": sys.platform, "production": production, "render_queue": queue,
                 "audio_cues": [dict(c, url=self.media(c['path'])) for c in cues],
                 "audio_exports": [dict(e, url=self.media(e['output'])) for e in st.soundtrack.export_states(S, cues)],
-                "finishing": st.finishing.state(), "editor": st.editor.state(), "creative": st.creative.state(), "voice_recovery_count": len(voice_recovery_rows)}
+                "export_jobs": st.exports.rows() if hasattr(st,'exports') else [], "finishing": st.finishing.state(), "editor": st.editor.state(), "creative": st.creative.state(), "voice_recovery_count": len(voice_recovery_rows)}
 
     # ---- settings / servers / workflows / tools
     def settings(self, b):
@@ -1764,6 +1776,7 @@ class API:
 
     def quit(self, _):
         self.st.alignment.shutdown()
+        self.st.exports.shutdown()
         threading.Timer(0.5, lambda: os._exit(0)).start()
         return {"ok": True}
 
@@ -2393,7 +2406,7 @@ class API:
                    'timeline': self.st.editor.timeline, 'continuity': self.st.editor.continuity,
                    'library': self.st.editor.library, 'backup': self.st.editor.backup,
                    'import': self.st.editor.restore_backup, 'subtitles': self.st.editor.subtitles,
-                   'delivery': self.st.editor.delivery,
+                   'delivery': lambda body:self.st.exports.submit(dict(body,kind='stems')),
                    'qc': lambda _: {'ok': True, 'issues': self.st.editor.qc(self.state()['shots'])}}
         action = b.get('tool')
         if action not in actions:
@@ -2402,14 +2415,10 @@ class API:
             return actions[action](b)
 
     def assemble(self, b):
-        if self.st.assembly["running"]:
-            return {"ok": False, "error": "Already assembling."}
-        with self.st.production.lock:
-            if self.st.assembly['running']:
-                return {'ok': False, 'error': 'Already assembling.'}
-            self.st.assembly['running'] = True
-            threading.Thread(target=assemble, args=(self.st, b.get("use_music"), b.get("music_volume", 0.25), bool(b.get('preview')), b.get('scene'), bool(b.get('use_timed', True))), daemon=True).start()
-        return {"ok": True}
+        return self.st.exports.submit(dict(b,kind='episode'))
+
+    def export_action(self,b):
+        return self.st.exports.action(b)
 
 
 EDIT_ROUTES = {'/api/settings','/api/shot/save','/api/shot/delete','/api/shot/move',
@@ -2417,6 +2426,7 @@ EDIT_ROUTES = {'/api/settings','/api/shot/save','/api/shot/delete','/api/shot/mo
     '/api/voice_take/delete','/api/clip/delete','/api/line/set','/api/line/direction',
     '/api/audio/cue/save','/api/audio/cue/delete','/api/script/revision'}
 ROUTES = {
+    '/api/export':'export_action',
     '/api/finishing':'finishing_action',
     '/api/creative': 'creative_action',
     '/api/section': 'section_action',
@@ -2469,8 +2479,8 @@ def make_handler(st, api):
                     return self._send(200, INDEX_HTML, "text/html; charset=utf-8")
                 if path == '/shot_voices.js':
                     return self._send(200, (Path(__file__).resolve().parent / 'shot_voices.js').read_text(), 'text/javascript; charset=utf-8')
-                if path in ('/settings.js','/settings.css','/continuations.js','/workspace.js','/workspace.css','/finishing.js','/finishing.css'):
-                    return self._send(200, (Path(__file__).resolve().parent / path[1:]).read_text(), 'text/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8')
+                if path in ('/settings.js','/settings.css','/continuations.js','/workspace.js','/workspace.css','/finishing.js','/finishing.css','/shot_playback.js','/mix_processor.js','/audio_mix.json'):
+                    return self._send(200, (Path(__file__).resolve().parent / path[1:]).read_text(), 'application/json' if path.endswith('.json') else 'text/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8')
                 if path == '/creative.css':
                     return self._send(200, (Path(__file__).resolve().parent / 'creative.css').read_text(), 'text/css; charset=utf-8')
                 if path == '/creative.js':
@@ -2574,6 +2584,7 @@ def main():
     import signal
     def stop_local(signum,frame):
         st.alignment.shutdown()
+        st.exports.shutdown()
         raise SystemExit(0)
     signal.signal(signal.SIGTERM,stop_local)
     signal.signal(signal.SIGINT,stop_local)

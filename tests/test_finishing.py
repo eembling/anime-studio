@@ -113,6 +113,20 @@ class FinishingTests(unittest.TestCase):
         response=self.st.finishing.action({'action':'render','shot_id':self.shots[1]})
         self.assertTrue(response['cached'])
 
+    def test_stems_use_saved_pan_and_ducking_after_mixer_changes(self):
+        self.st.db.x("UPDATE shots SET audio='voices/tone.wav',audio_mode='file' WHERE id=?",(self.shots[0],))
+        mixer=self.st.finishing.mixer();mixer['dialogue']['pan']=-1;mixer['duck']=True
+        self.st.finishing.action({'action':'mixer','mixer':mixer})
+        output=self.build()
+        export=self.st.soundtrack.exports()[0]
+        mixer['dialogue']['pan']=1
+        self.st.finishing.action({'action':'mixer','mixer':mixer})
+        result=self.st.editor.delivery({'id':export['id']})
+        left,right=self.samples(self.st.abs(result['files']['dialogue.wav'].removeprefix('/media/')),.1,.5)
+        self.assertGreater(self.rms(left),.01)
+        self.assertLess(self.rms(right),.001)
+        self.assertEqual(result['recipe_source'],'saved')
+
     def test_window_keeps_loop_phase_and_fade_envelope(self):
         cue=dict(name='bell',kind='sfx',path='voices/tone.wav',start=1,duration=5,
                  offset=.2,volume=1,loop=1,enabled=1,fade_in=2,fade_out=1)

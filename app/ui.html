@@ -449,7 +449,7 @@ button:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var
    <div class="panel"><h3>Build the episode</h3>
     <p class="muted" style="font-size:13px;margin:0 0 12px">Each shot becomes a 1920×1080, 24 fps clip with its dialogue. Still shots get a slow push-in, and anything not ready yet is black. The output folder also holds every shot as a separate file, a <b>timeline.edl</b> for DaVinci Resolve and the shot list.</p>
     <button class="btn ink" style="width:100%;justify-content:center;padding:10px" onclick="post('/api/assemble',{use_music:$('#usemusic').checked,music_volume:+$('#mvol').value,use_timed:$('#usetimed').checked}).then(r=>r.ok!==false&&toast('Building the episode'))">Build episode</button>
-    <div id="arun" class="warn-t" style="margin-top:8px;font-size:13px"></div></div>
+    <div id="export-job-controls"></div><div id="arun" class="warn-t" style="margin-top:8px;font-size:13px"></div></div>
   </div>
  </div>
 
@@ -670,7 +670,7 @@ function renderShotsContent(){
   const approved=viewing&&([s.keyframe_take,s.clip_take,s.final_take].includes(viewing.id)||s.cont.includes(viewing.id));
   const lab=t=>(t.stage==='keyframe'?'Keyframe':t.stage==='upscale'?'Upscaled':t.stage==='lipsync'?'Lip sync':t.stage==='continue'?`Part ${(t.segment||0)+2}`:'Clip')+(t.draft?' draft':'');
   const media=!viewing?`<div class="empty">${s.active.keyframe?'Keyframe is rendering…':'No keyframe yet'}<br>${s.active.keyframe?'':`<button class="btn sm" style="margin-top:8px" onclick="gen('keyframe',[${s.id}])">Generate keyframes</button>`}</div>`
-   :viewing.stage==='keyframe'?`<img src="${viewing.url}" alt="Keyframe" ondblclick="lb('${viewing.url}')">`:`<video src="${viewing.url}" controls muted loop preload="metadata" ${s.audio_url?`data-audio="${s.audio_url}"`:''}></video>`;
+   :viewing.stage==='keyframe'?`<img src="${viewing.url}" alt="Keyframe" ondblclick="lb('${viewing.url}')">`:`<video data-shot-id="${s.id}" data-take-id="${viewing.id}" src="${viewing.url}" controls muted loop preload="metadata" ${s.audio_url?`data-audio="${s.audio_url}"`:''}></video>`;
   const mark=(id,field)=>{const isNew=prevApproved[s.id+field]!==undefined&&prevApproved[s.id+field]!==id&&id;fresh[s.id+field]=id;return isNew?' just':''};
   const pend=st=>s.active[st]?`<div class="pending"><span class="dot"></span>${s.active[st].length} ${s.active[st].includes('running')?'rendering':'waiting'}</div>`:'';
   const chip=(t,isSel,label,field)=>`<span class="clip-take"><button class="take ${isSel?'sel'+mark(t.id,field):''} ${viewing&&viewing.id===t.id?'view':''} ${t.draft?'draft':''}" onclick="view(${s.id},${t.id})" title="${lab(t)}, seed ${t.seed}${t.fps?', '+t.fps+' fps':''}${t.frames&&t.fps?', '+(t.frames/t.fps).toFixed(1)+' s':''}">${label}</button><button type="button" class="kf-delete clip-delete" onclick="deleteClip(${s.id},${t.id},this)" title="Delete ${label}" aria-label="Delete clip ${label} from shot ${pad(s.seq)}">Delete</button></span>`;
@@ -706,11 +706,14 @@ function renderShotsContent(){
     <div class="st-b">${chips(ups,s.final_take,'U','u')}${pend('upscale')}</div></div>
   </div></article>`}).join(''));
  prevApproved=fresh;
- document.querySelectorAll('#shotlist video[data-audio]').forEach(v=>{if(v._a)return;const a=new Audio(v.dataset.audio);v._a=a;
-  const sync=()=>{if(Math.abs(a.currentTime-v.currentTime)>0.15)a.currentTime=Math.min(v.currentTime,a.duration||v.currentTime)};
-  v.addEventListener('play',()=>{sync();a.play().catch(()=>{})});v.addEventListener('pause',()=>a.pause());v.addEventListener('seeked',sync);
-  v.addEventListener('timeupdate',()=>{if(v.currentTime<0.2&&a.currentTime>0.5)sync()})})}
-function view(sid,tid){VIEW[sid]=tid;renderShots()}
+ document.querySelectorAll('#shotlist video[data-audio]').forEach(video=>{
+  if(typeof bindShotPlayback!=='function')return;
+  const shot=S.shots.find(item=>item.id===+video.dataset.shotId);
+  const take=shot?.takes.find(item=>item.id===+video.dataset.takeId);
+  if(shot&&take)bindShotPlayback(video,shot,take);
+ });
+}
+function view(sid,tid){$('#cut-'+sid+' video')?.pause();VIEW[sid]=tid;renderShots()}
 function fullQuality(tid){const t=take(tid);if(!t)return;gen(t.stage==='continue'?'continue':'animate',[t.shot_id],{draft:false,seed:t.seed,segment:t.stage==='continue'?(t.segment||0):undefined})}
 function tog(id,on){on?sel.add(id):sel.delete(id);$('#selinfo').textContent=sel.size?`${sel.size} selected`:'Selected shots'}
 function selAll(on){sel=new Set(on?S.shots.filter(matches).map(s=>s.id):[]);renderShots()}
@@ -906,7 +909,7 @@ function jobs(a){post('/api/jobs',{action:a})}
 
 /* ---------- assemble ---------- */
 let LAST_ASSEMBLY_OUTPUT=null;
-function renderAssemble(){renderSoundtrack();const total=S.shots.reduce((a,s)=>a+(+s.duration||0),0),cn=counts();
+function renderAssemble(){renderSoundtrack();if(typeof renderExportJobs==='function')renderExportJobs();const total=S.shots.reduce((a,s)=>a+(+s.duration||0),0),cn=counts();
  const held=S.shots.filter(s=>s.kind==='motion'&&s.clip_take&&(s.remaining||0)>0.25).length,drafts=S.shots.filter(s=>s.draft_in_use).length;
  $('#readiness').innerHTML=`<li><span class="dot ${cn.done===S.shots.length&&S.shots.length?'ok':'run'}"></span>Shots ready<b>${cn.done} of ${S.shots.length}</b></li><li><span class="dot ${cn.kf?'bad':'ok'}"></span>Missing a keyframe<b>${cn.kf}</b></li><li><span class="dot ${cn.clip?'run':'ok'}"></span>Missing a clip<b>${cn.clip}</b></li><li><span class="dot ${cn.lines?'run':'ok'}"></span>Dialogue lines without audio<b>${cn.lines}</b></li><li><span class="dot ${held?'run':'ok'}"></span>Motion shots that freeze at the end<b>${held}</b></li><li><span class="dot ${drafts?'run':'ok'}"></span>Shots using draft clips<b>${drafts}</b></li><li><span class="dot hollow"></span>Runtime<b>${fmtT(total)}</b></li>`;
  $('#musicinfo').innerHTML=S.music_url?`<audio src="${S.music_url}" controls style="height:30px;width:100%"></audio><button class="btn sm ghost" style="margin-top:6px" onclick="post('/api/music',{clear:true})">Remove music</button>`:'No music chosen.';
@@ -944,4 +947,4 @@ function exportSoundtrack(){const id=+$('#audioexport').value;if(!id)return toas
 /* ---------- settings ---------- */
 const WFLAB={keyframe:'Keyframes and turnaround sheets',animate:'Animate',animate_flf:'Animate to the next shot (first and last frame)',lipsync:'Lip sync (optional)',upscale:'Upscale (optional)',voice:'Voices: text to speech (Qwen3-TTS)',voice_design:'Voice design: a new voice from a description (Qwen3-TTS)'};
 window.addEventListener('DOMContentLoaded',()=>{load();setInterval(()=>{if(!$('#modal').classList.contains('on')||$('#a_designed')||$('#sv-rows')||$('#creative-dialog'))load()},4000)});   // the cast dialog follows its voice takes
-</script><script src="/shot_voices.js"></script><script src="/editor.js"></script><script src="/production.js"></script><script src="/creative.js"></script><script src="/settings.js"></script><script src="/continuations.js"></script><script src="/workspace.js"></script><script src="/finishing.js"></script></body></html>
+</script><script src="/shot_voices.js"></script><script src="/editor.js"></script><script src="/shot_playback.js"></script><script src="/production.js"></script><script src="/creative.js"></script><script src="/settings.js"></script><script src="/continuations.js"></script><script src="/workspace.js"></script><script src="/finishing.js"></script></body></html>

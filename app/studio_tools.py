@@ -1,6 +1,7 @@
 """Editorial history, episode library, scene maintenance, continuity and delivery."""
 import hashlib
 import json
+from timeline import frames as timeline_frames, layout as timeline_layout
 import math
 import shutil
 import sqlite3
@@ -434,7 +435,7 @@ class StudioTools:
                 if right > left:
                     rows.append({'start':start+left,'end':start+right,'text':line['text'],'speaker':line.get('speaker','')})
                 cursor += length + timing.get('pause_after', float(self.st.settings().get('line_gap', .3)))
-            start += shot['duration']
+            start += timeline_frames(shot['duration'],int(self.st.settings()['out_fps']))/int(self.st.settings()['out_fps'])
         rows = [dict(row,end=min(start,row['end'])) for row in rows if row['start']<min(start,row['end'])]
         if body.get('rows') is not None:
             rows = body['rows']
@@ -459,25 +460,29 @@ class StudioTools:
         return {'ok':True,'rows':rows}
 
     def delivery(self, body):
-        self.idle()
         from anime_studio import ffmpeg
         from soundtrack import probe
         output = self.st.db.one('SELECT * FROM episode_audio_exports WHERE id=?',(body['id'],))
         if not output or not output['clean']: raise ValueError('Choose an episode with a dialogue-only master')
         folder=self.st.data/'exports'/('delivery-'+uuid.uuid4().hex[:8]);folder.mkdir()
         master=self.safe_path(output['master']);duration, _=probe(master)
-        ffmpeg(['-i',str(master),'-vn','-c:a','pcm_s24le',str(folder/'dialogue.wav')])
-        for kind in (['music','sfx','ambience'] if any(c['kind']=='ambience' for c in self.st.soundtrack.cues()) else ['music','sfx']):
-            silent=folder/('silent-'+kind+'.mp4')
-            ffmpeg(['-i',str(master),'-f','lavfi','-i','anullsrc=r=48000:cl=stereo','-map','0:v:0','-map','1:a:0','-c:v','copy','-c:a','aac','-t',str(duration),str(silent)])
-            mixed=folder/(kind+'.mp4')
-            self.st.soundtrack.mix(silent,mixed,[c for c in self.st.soundtrack.cues() if c['kind']==kind],self.st.settings().get('music','') if kind=='music' else '',float(body.get('music_volume',.25)))
-            ffmpeg(['-i',str(mixed),'-vn','-c:a','pcm_s24le',str(folder/(kind+'.wav'))])
-            silent.unlink();mixed.unlink()
-        analysis=subprocess.run(['ffmpeg','-hide_banner','-i',str(self.safe_path(output['output'])),'-af','loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json','-f','null','-'],capture_output=True,text=True)
+        recipe=json.loads(output.get('build_json') or '{}').get('mix_recipe')
+        recipe_source='saved'
+        if not recipe:
+            recipe_source='current'
+            recipe={'cues':self.st.soundtrack.cues(),'bed':self.st.settings().get('music',''),
+                    'volume':float(body.get('music_volume',.25)),'mixer':self.st.finishing.mixer(),'engine':'block-rms-v1'}
+        mixed=folder/'mix.mp4'
+        self.st.finishing.mix_audio(master,mixed,recipe['cues'],recipe['bed'],recipe['volume'],duration,
+                                   stem_dir=folder,mixer_override=recipe['mixer'],engine=recipe.get('engine','legacy-sidechain'))
+        mixed.unlink();mixed.with_suffix('.audio.json').unlink(missing_ok=True)
+        if not any(cue['kind']=='ambience' for cue in recipe['cues']):
+            (folder/'ambience.wav').unlink()
+        from export_runtime import run
+        analysis=run(['ffmpeg','-hide_banner','-i',str(self.safe_path(output['output'])),'-af','loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json','-f','null','-'])
         if analysis.returncode: raise ValueError('Loudness analysis failed: '+analysis.stderr[-1200:])
         (folder/'loudness.txt').write_text(analysis.stderr)
-        return {'ok':True,'files':{f.name:'/media/'+self.st.rel(f) for f in folder.iterdir() if f.suffix in ('.wav','.txt')}}
+        return {'ok':True,'recipe_source':recipe_source,'files':{f.name:'/media/'+self.st.rel(f) for f in folder.iterdir() if f.suffix in ('.wav','.txt')}}
 
     def state(self):
         db=self.st.db

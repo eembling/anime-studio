@@ -372,3 +372,15 @@ Choose **Render scene preview** in Studio, or **Render scene with sound** in Pro
 Open a shot's **Transitions & audio timing** dialog to choose a cut, dissolve or fade through black into the next shot. Transitions preserve shot lengths and absolute cue positions. A dissolve reveals the incoming picture over the outgoing final frame at the cut. Negative dialogue offsets start speech before the picture (J-cut). A dialogue tail allows the recording to continue into the next shot (L-cut). Overlap adjacent dialogue and set fades to crossfade it. The source recording must contain enough audio for a tail.
 
 **Sound library** stores reusable source recordings across episodes in the project. Import a sound, name it, choose a category and add comma-separated tags. Search by any of those fields, audition the sound and choose **Add to episode**. Select its track and timing in the existing audio cue dialog. Removing a library entry retains files referenced by existing cues, history and exports.
+
+## 19. Reliable playback and export jobs
+
+Shot clip playback now waits for the dialogue clock to start and synchronizes the video against the selected take's position in the shot. Continuation previews skip the duplicated boundary frame when finding their dialogue offset. Loading and playback failures appear on the preview. Replacing a take or leaving its player stops its audio.
+
+Studio, subtitles, anchored cues and export use output-frame boundaries for shot durations. For example, a 0.1-second edit at 24 fps occupies two frames. The saved editorial duration remains available for further editing.
+
+Exports run from a captured database and copies of their required media, while editing and render queue controls remain responsive. Assemble lists each export's status and completed media operations. **Cancel export** stops its local media subprocesses. **Resume captured export** retries its captured inputs after cancellation, an error or an app restart. A source changed before it could be captured produces an explicit error; start a new export to use changed inputs.
+
+Live mixer tracks feed summed buses. Bus meters measure the combined output, and Studio and exports use the same block RMS ducking parameters. **Export stems and loudness report** runs in the background and its downloads appear with the export job. New stems use the rendered episode's saved mix configuration, even if current controls have changed. Older exports without a saved recipe use the current mix and identify that fallback in the result.
+
+Scoped preview cache keys include the selected picture, audible dialogue and cues, media stamps and render settings. Changing unrelated script text does not invalidate the preview. Dissolve and fade boundaries render each affected shot once and then concatenate the results, avoiding repeated encoding of the accumulated episode.
