@@ -418,3 +418,9 @@ Reference: [ComfyUI CLIPLoader documentation](https://github.com/Comfy-Org/embed
 Studio and new episode exports default to 16 fps to match generated shots. The playhead, previous/next-frame actions, trim increments, frame timecode, animatics and camera previews use the project frame rate. Playback stays at normal speed: one source second remains one real second, with audio at its original rate.
 
 Existing projects and older saved episodes using the legacy 24 fps default are upgraded to 16 fps once. Source files, completed exports and captured render/export jobs retain their original media and timing. A later explicit output-setting change is preserved across restarts.
+
+### Studio audio playback
+
+With the mixer active, Studio decodes audio once and schedules buffered sources through its audio buses. Healthy playback does not repeatedly seek a separate dialogue media element. Seeking replaces scheduled sources at the new offset; pausing or leaving Studio stops them. Timed sounds, trimmed source loops, bus gain/pan/mute/solo, meters and ducking continue through the same mixer. Playback remains at 16 fps with audio at normal speed.
+
+The decode cache targets 128 MiB for inactive buffers, retaining active sources. First use of a long audio file requires decoding it; a rendered scene preview remains useful for reviewing a precombined export. Native acceptance checks now require sustained real-time timeline advancement, measured audible output, picture/audio agreement, seeking and silence after pause. Checking only the frame-rate label or a small amount of timeline advancement is insufficient.

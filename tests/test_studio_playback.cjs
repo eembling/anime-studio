@@ -53,3 +53,19 @@ test('an undecodable track stops the transport with an actionable error',()=>{co
 
 test('Studio uses a 16 fps transport cadence and frame timecode',()=>{const s=setup();s.ctx.playEdit();assert.equal(s.intervals[0],62.5);assert.equal(s.ctx.editTimecode(1.5),'00:00:01:08');assert.equal(s.ctx.editTimecode(1),'00:00:01:00')});
 test('frame stepping from a subframe lands on the next real 16 fps frame',()=>{const s=setup();s.ctx.seekEdit(.03);s.ctx.frameEdit(1);assert.equal(s.time(),1/16)});
+
+test('a stopped or abandoned audio initialization cannot start Studio later',async()=>{
+ const s=setup();let complete;s.ctx.MIX_READY=false;s.ctx.startMixAudio=()=>new Promise(resolve=>complete=resolve);
+ s.ctx.playEdit();s.ctx.stopEdit();s.ctx.MIX_READY=true;complete();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(s.playing(),false);
+});
+test('Studio resumes its suspended audio context before restarting transport',async()=>{
+ const s=setup();s.ctx.MIX_READY=true;s.ctx.MIX_CONTEXT={state:'suspended'};
+ s.ctx.startMixAudio=async()=>{s.ctx.MIX_CONTEXT.state='running'};
+ s.ctx.playEdit();await new Promise(resolve=>setImmediate(resolve));assert.equal(s.playing(),true);
+});
+
+test('paused Studio seeks do not create separate dialogue decoders before mixer startup',()=>{
+ const s=setup();s.ctx.syncStudioAudio=()=>true;s.ctx.MIX_READY=false;s.ctx.seekEdit(1);
+ assert.equal(s.audios.length,0);assert.equal(s.video().currentTime,1);
+});

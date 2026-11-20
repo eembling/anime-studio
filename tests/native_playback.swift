@@ -11,6 +11,7 @@ final class Check: NSObject, WKNavigationDelegate {
   web=WKWebView(frame:NSRect(x:0,y:0,width:1200,height:900),configuration:config)
   web.navigationDelegate=self
   window=NSWindow(contentRect:NSRect(x:40,y:40,width:700,height:500),styleMask:[.titled],backing:.buffered,defer:false)
+  window.level = .floating
   window.contentView=web
   window.title="Anime Studio playback check"
   window.makeKeyAndOrderFront(nil)
@@ -80,20 +81,50 @@ final class Check: NSObject, WKNavigationDelegate {
   }
  }
  func studio(){
-  web.callAsyncJavaScript("document.querySelector('#shotlist video').pause();go('studio');frameEdit(1);if(editFps()!==16||Math.abs(EDIT_TIME-1/16)>0.000001||+document.querySelector('#edit-playhead').step!==1/16)throw new Error('Studio is not using 16 fps frame timing');seekEdit(0);await startMixAudio();playEdit();return MIX_READY;",arguments:[:],in:nil,in:.page){result in
+  web.callAsyncJavaScript("document.querySelector('#shotlist video').pause();go('studio');frameEdit(1);if(editFps()!==16||Math.abs(EDIT_TIME-1/16)>0.000001||+document.querySelector('#edit-playhead').step!==1/16)throw new Error('Studio is not using 16 fps frame timing');seekEdit(0);await startMixAudio();window.studioMeter=MIX_CONTEXT.createAnalyser();MIX_PROCESSOR.connect(studioMeter);window.studioPeak=()=>{const data=new Float32Array(studioMeter.fftSize);studioMeter.getFloatTimeDomainData(data);return Math.max(...data.map(Math.abs))};playEdit();return MIX_READY;",arguments:[:],in:nil,in:.page){result in
    switch result {
    case .failure(let error):print("FAIL native mixer",error);exit(1)
    case .success:
     DispatchQueue.main.asyncAfter(deadline:.now()+1.5){
      self.web.evaluateJavaScript("JSON.stringify({time:EDIT_TIME,playing:EDIT_PLAYING,ready:MIX_READY,state:document.querySelector('#edit-state').textContent,hidden:document.hidden,toast:document.querySelector('#toast').textContent,error:document.querySelector('#edit-monitor video')?.error?.message})"){value,error in
       guard let text=value as? String,let bytes=text.data(using:.utf8),let state=(try? JSONSerialization.jsonObject(with:bytes)) as? [String:Any],
-            let time=state["time"] as? Double,time>0.2,(state["ready"] as? Bool)==true,(state["playing"] as? Bool)==true else {print("FAIL native Studio",String(describing:value),String(describing:error));exit(1)}
-      print("Native 16 fps Studio and AudioWorklet passed",text);exit(0)
+            let time=state["time"] as? Double,time>0.7,(state["ready"] as? Bool)==true,(state["playing"] as? Bool)==true else {print("FAIL native Studio",String(describing:value),String(describing:error));exit(1)}
+      print("Native 16 fps Studio startup passed",text);self.studioSustained(time)
      }
     }
    }
   }
  }
+ func studioSustained(_ start:Double){
+  let wallStart=ProcessInfo.processInfo.systemUptime
+  DispatchQueue.main.asyncAfter(deadline:.now()+1.5){
+   self.web.evaluateJavaScript("JSON.stringify({time:EDIT_TIME,video:document.querySelector('#edit-monitor video')?.currentTime,audio:(()=>{const node=STUDIO_AUDIO_SOURCES.get('dialogue');return node?node.offset+MIX_CONTEXT.currentTime-node.when:null})(),peak:studioPeak(),hidden:document.hidden,playing:EDIT_PLAYING,state:document.querySelector('#edit-state').textContent})"){value,error in
+    let elapsed=ProcessInfo.processInfo.systemUptime-wallStart
+    guard let text=value as? String,let bytes=text.data(using:.utf8),let state=(try? JSONSerialization.jsonObject(with:bytes)) as? [String:Any],let time=state["time"] as? Double,time-start>1.1,abs((time-start)-elapsed)<0.25,let video=state["video"] as? Double,abs(time-video)<0.15,let audio=state["audio"] as? Double,abs(video-audio)<0.12,let peak=state["peak"] as? Double,peak>0.001,(state["playing"] as? Bool)==true else {print("FAIL sustained Studio picture/audio",String(describing:value),String(describing:error));exit(1)}
+    print("Native sustained Studio playback and audible mixer passed",text);self.studioSeek()
+   }
+  }
+ }
+
+ func studioSeek(){
+  web.evaluateJavaScript("seekEdit(1);true"){_,_ in
+   DispatchQueue.main.asyncAfter(deadline:.now()+0.4){
+    self.web.evaluateJavaScript("JSON.stringify({time:EDIT_TIME,video:document.querySelector('#edit-monitor video')?.currentTime,peak:studioPeak()})"){value,error in
+     guard let text=value as? String,let bytes=text.data(using:.utf8),let state=(try? JSONSerialization.jsonObject(with:bytes)) as? [String:Any],let time=state["time"] as? Double,time>=1,time<1.8,let video=state["video"] as? Double,abs(time-video)<0.15,let peak=state["peak"] as? Double,peak>0.001 else {print("FAIL Studio seek",String(describing:value),String(describing:error));exit(1)}
+     print("Native Studio seek retained audible output",text)
+     self.web.evaluateJavaScript("stopEdit();true"){_,_ in
+      DispatchQueue.main.asyncAfter(deadline:.now()+0.2){
+       self.web.evaluateJavaScript("!EDIT_PLAYING && STUDIO_AUDIO_SOURCES.size===0 && studioPeak()<0.0001"){value,error in
+        guard (value as? Bool)==true else {print("FAIL Studio pause",String(describing:value),String(describing:error));exit(1)}
+        print("Native Studio pause stopped audio sources");exit(0)
+       }
+      }
+     }
+    }
+   }
+  }
+ }
+
 }
 let app=NSApplication.shared
 app.setActivationPolicy(.accessory)

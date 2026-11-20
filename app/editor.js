@@ -1,5 +1,5 @@
 /* Episode editing, scene cleanup, recovery, series library and delivery. */
-let EDIT_TIME=0,EDIT_PLAYING=false,EDIT_CLOCK=0,EDIT_TIMER=null,EDIT_DRAG=null,EDIT_MEDIA_KEY='',EDIT_AUDIOS=new Map(),EDIT_DURATIONS=new Map(),EDIT_WAITING=false;
+let EDIT_AUDIO_START=0,EDIT_TIME=0,EDIT_PLAYING=false,EDIT_CLOCK=0,EDIT_TIMER=null,EDIT_DRAG=null,EDIT_MEDIA_KEY='',EDIT_AUDIOS=new Map(),EDIT_DURATIONS=new Map(),EDIT_WAITING=false;
 const editorPost=(tool,data={})=>post('/api/editor',{tool,...data});
 const editFps=()=>+S.settings.out_fps||16;
 function editTimecode(seconds){const fps=editFps(),frame=Math.max(0,Math.floor(seconds*fps+1e-6));return [Math.floor(frame/(fps*3600)),Math.floor(frame/(fps*60))%60,Math.floor(frame/fps)%60,frame%fps].map(value=>String(value).padStart(2,'0')).join(':')}
@@ -18,16 +18,18 @@ function renderStudio(){
  }
  $('#edit-state').textContent=`${editTimecode(EDIT_TIME)} / ${editTimecode(S.shots.reduce((n,s)=>n+editDuration(s),0))} · ${editFps()} fps`;
 }
-function stopEdit(){EDIT_PLAYING=false;clearInterval(EDIT_TIMER);EDIT_TIMER=null;const v=$('#edit-monitor video');if(v)v.pause();for(const a of EDIT_AUDIOS.values())a.pause();$('#edit-play').textContent='Play episode'}
+function stopEdit(){EDIT_AUDIO_START++;EDIT_PLAYING=false;if(typeof stopStudioAudio==='function')stopStudioAudio();clearInterval(EDIT_TIMER);EDIT_TIMER=null;const v=$('#edit-monitor video');if(v)v.pause();for(const a of EDIT_AUDIOS.values())a.pause();$('#edit-play').textContent='Play episode'}
 function seekEdit(value){EDIT_TIME=Math.max(0,Math.min(+value,S.shots.reduce((n,s)=>n+editDuration(s),0)));EDIT_CLOCK=performance.now();updateEdit(true)}
 function frameEdit(direction){stopEdit();const fps=editFps();seekEdit((Math.round(EDIT_TIME*fps)+direction)/fps)}
 function playEdit(){
  if(EDIT_PLAYING)return stopEdit();
  const total=S.shots.reduce((n,s)=>n+editDuration(s),0);if(!total)return;
  if(EDIT_TIME>=total)seekEdit(0);
- if(typeof startMixAudio==='function'&&!MIX_READY){
+ const audioSuspended=typeof MIX_CONTEXT!=='undefined'&&MIX_CONTEXT?.state==='suspended';
+ if(typeof startMixAudio==='function'&&(!MIX_READY||audioSuspended)){
+  const token=++EDIT_AUDIO_START;
   $('#edit-play').textContent='Starting audio…';
-  startMixAudio().then(()=>playEdit()).catch(error=>{stopEdit();toast('Audio could not start: '+error.message,true)});
+  startMixAudio().then(()=>{if(token===EDIT_AUDIO_START&&(typeof tab==='undefined'||tab==='studio'))playEdit()}).catch(error=>{if(token===EDIT_AUDIO_START){stopEdit();toast('Audio could not start: '+error.message,true)}});
   return;
  }
  if(typeof measureMixAudio==='function'&&!MIX_FRAME)measureMixAudio();
@@ -110,8 +112,15 @@ function updateEdit(force){
   }
   dialogueStart+=editDuration(shot);
  }
- for(const cue of S.audio_cues||[]){if(!cue.enabled||EDIT_TIME<cue.start||EDIT_TIME>=cue.start+cue.duration)continue;let t=EDIT_TIME-cue.start,volume=cue.volume;if(cue.fade_in)volume*=Math.min(1,t/cue.fade_in);if(cue.fade_out)volume*=Math.min(1,(cue.duration-t)/cue.fade_out);t+=cue.offset;if(cue.loop)t=cue.offset+(t-cue.offset)%Math.max(.001,cue.source_seconds-cue.offset);tracks.push({id:'cue'+cue.id,url:cue.url,time:t,volume})}
+ for(const cue of S.audio_cues||[]){if(!cue.enabled||EDIT_TIME<cue.start||EDIT_TIME>=cue.start+cue.duration)continue;let t=EDIT_TIME-cue.start,volume=cue.volume;if(cue.fade_in)volume*=Math.min(1,t/cue.fade_in);if(cue.fade_out)volume*=Math.min(1,(cue.duration-t)/cue.fade_out);t+=cue.offset;if(cue.loop)t=cue.offset+(t-cue.offset)%Math.max(.001,cue.source_seconds-cue.offset);tracks.push({id:'cue'+cue.id,url:cue.url,time:t,volume,loop:!!cue.loop,loopStart:cue.offset,loopEnd:cue.source_seconds})}
  if(S.music_url&&$('#usemusic').checked)tracks.push({id:'bed',url:S.music_url,time:EDIT_TIME,volume:+$('#mvol').value,loop:true});
+ if(typeof syncStudioAudio==='function'){
+  for(const audio of EDIT_AUDIOS.values())audio.pause();
+  if(typeof MIX_READY!=='undefined'&&MIX_READY){
+   try{ready=syncStudioAudio(tracks,EDIT_PLAYING&&ready,force)&&ready}
+   catch(error){stopEdit();$('#edit-state').textContent='Audio could not play: '+error.message;toast('Audio could not play: '+error.message,true);return}
+  }else if(EDIT_PLAYING)ready=false;
+ }else{
  const active=new Set();for(const t of tracks){
   active.add(t.id);let a=EDIT_AUDIOS.get(t.id);if(!a||a.src!==new URL(t.url,location.href).href){if(a){a.onloadedmetadata=null;a.onerror=null;a.pause()}a=new Audio(t.url);a.preload='auto';EDIT_AUDIOS.set(t.id,a)}
   a.onerror=()=>editMediaError(a,t.id==='dialogue'?'Shot '+pad(s.seq)+' dialogue':'Audio track');
@@ -127,6 +136,7 @@ function updateEdit(force){
   ready=syncEditMedia(a,desired,force)&&ready;media.push(a);
  }
  for(const[id,a]of EDIT_AUDIOS)if(!active.has(id)){a.onloadedmetadata=null;a.onerror=null;a.pause()}
+ }
  for(const element of media)runEditMedia(element,EDIT_PLAYING&&ready);
  // A track can have its current frame buffered while play() is still waiting
  // for enough data to start. Keep the clock still without cancelling play().
