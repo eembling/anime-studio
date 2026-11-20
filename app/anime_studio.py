@@ -424,6 +424,8 @@ class Studio:
         self.sections = Continuations(self)
         from job_snapshots import JobSnapshots
         self.snapshots = JobSnapshots(self)
+        from finishing import Finishing
+        self.finishing = Finishing(self)
         from studio_tools import StudioTools
         self.editor = StudioTools(self)
         from alignment import Alignment
@@ -1436,11 +1438,11 @@ def tc(frames, fps, hour=0):
     return f"{hour + f // (fps * 3600):02d}:{f // (fps * 60) % 60:02d}:{f // fps % 60:02d}:{f % fps:02d}"
 
 
-def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=True):
+def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=True, shot_ids=None):
     A = st.assembly
     A.update(running=True, log=[], output=None, folder=None, kind='animatic' if preview else 'episode')
     log = A["log"]
-    cues = st.soundtrack.cues() if use_timed and not preview and scene is None else []
+    cues = st.soundtrack.cues() if use_timed and not preview else []
     try:
         if not st.tools(refresh=True)["ffmpeg"]:
             raise RuntimeError("ffmpeg not found. Install it with: brew install ffmpeg")
@@ -1448,7 +1450,12 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
         W, H, FPS = int(S["out_width"]), int(S["out_height"]), int(S["out_fps"])
         if preview:
             W, H, FPS = 960, 540, 24
-        shots = [s for s in st.ordered_shots() if scene is None or s['scene'] == scene]
+        all_shots = st.ordered_shots()
+        shots = [s for s in all_shots if (scene is None or s['scene']==scene) and (shot_ids is None or s['id'] in shot_ids)]
+        start = 0
+        for shot in all_shots:
+            if shots and shot['id']==shots[0]['id']:break
+            start += round(shot['duration']*FPS)/FPS
         if not shots:
             raise RuntimeError("No shots yet.")
         bed = S.get('music', '') if use_music else ''
@@ -1456,7 +1463,7 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
             'picture': st.soundtrack.picture_signature(shots, S), 'mix': st.soundtrack.mix_signature(cues, bed),
             'width': W, 'height': H, 'fps': FPS, 'music': bool(use_music), 'timed': bool(use_timed),
             'volume': float(music_volume),
-        } if not preview and scene is None else None
+        } if not preview and scene is None and shot_ids is None else None
         name = re.sub(r"[^A-Za-z0-9_-]+", "_", S.get("title") or "episode").strip("_") or "episode"
         name += "_animatic" if preview else ""
         out = st.data / "exports" / f"{name}_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
@@ -1528,10 +1535,28 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
         joined, final = out / "_joined.mp4", out / f"{name}.mp4"
         ffmpeg(["-f", "concat", "-safe", "0", "-i", str(out / "concat.txt"), "-c", "copy", str(joined)])
         master = out / '_dialogue_master.mp4'
-        joined.rename(master)
+        if not preview:
+            if any((shot.get('transition') or 'cut')!='cut' for shot in shots[:-1]):
+                joined.unlink()
+                st.finishing.join_picture(shots, segs, joined, FPS)
+            duration = rec / FPS
+            dialogue = st.finishing.window_tracks(st.finishing.dialogue_tracks(all_shots), start, duration)
+            st.finishing.audio(joined, master, dialogue, duration)
+            joined.unlink()
+            cues = st.finishing.window_tracks(cues, start, duration)
+            # Keep a music bed at the same source phase as the whole episode.
+            if bed:
+                from soundtrack import probe
+                seconds, _ = probe(st.abs(bed))
+                cues.append(dict(name='Music bed',kind='music',path=bed,start=0,offset=0,duration=duration,
+                                 source_seconds=seconds,window_skip=start,original_duration=start+duration,
+                                 volume=music_volume,fade_in=0,fade_out=0,loop=1,enabled=1))
+                bed = ''
+        else:
+            joined.rename(master)
         log.append('Mixing episode audio...' if cues or use_music else 'Saving dialogue-only episode...')
         st.soundtrack.mix(master, final, cues, bed, float(music_volume), log)
-        if not preview and scene is None:
+        if not preview and scene is None and shot_ids is None:
             st.soundtrack.register(master, final, rec / FPS, build=build)
         (out / "concat.txt").unlink()
         (out / "shotlist.csv").write_text(API(st).csv_export())
@@ -1659,7 +1684,7 @@ class API:
                 "version": VERSION, "platform": sys.platform, "production": production, "render_queue": queue,
                 "audio_cues": [dict(c, url=self.media(c['path'])) for c in cues],
                 "audio_exports": [dict(e, url=self.media(e['output'])) for e in st.soundtrack.export_states(S, cues)],
-                "editor": st.editor.state(), "creative": st.creative.state(), "voice_recovery_count": len(voice_recovery_rows)}
+                "finishing": st.finishing.state(), "editor": st.editor.state(), "creative": st.creative.state(), "voice_recovery_count": len(voice_recovery_rows)}
 
     # ---- settings / servers / workflows / tools
     def settings(self, b):
@@ -2342,6 +2367,10 @@ class API:
     def workspace_action(self,b):
         return self.st.workspace.action(b)
 
+    def finishing_action(self,b):
+        with self.st.production.lock:
+            return self.st.finishing.action(b)
+
     def alignment_action(self,b):
         return self.st.alignment.action(b)
 
@@ -2388,6 +2417,7 @@ EDIT_ROUTES = {'/api/settings','/api/shot/save','/api/shot/delete','/api/shot/mo
     '/api/voice_take/delete','/api/clip/delete','/api/line/set','/api/line/direction',
     '/api/audio/cue/save','/api/audio/cue/delete','/api/script/revision'}
 ROUTES = {
+    '/api/finishing':'finishing_action',
     '/api/creative': 'creative_action',
     '/api/section': 'section_action',
     '/api/workspace':'workspace_action',
@@ -2439,7 +2469,7 @@ def make_handler(st, api):
                     return self._send(200, INDEX_HTML, "text/html; charset=utf-8")
                 if path == '/shot_voices.js':
                     return self._send(200, (Path(__file__).resolve().parent / 'shot_voices.js').read_text(), 'text/javascript; charset=utf-8')
-                if path in ('/settings.js','/settings.css','/continuations.js','/workspace.js','/workspace.css'):
+                if path in ('/settings.js','/settings.css','/continuations.js','/workspace.js','/workspace.css','/finishing.js','/finishing.css'):
                     return self._send(200, (Path(__file__).resolve().parent / path[1:]).read_text(), 'text/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8')
                 if path == '/creative.css':
                     return self._send(200, (Path(__file__).resolve().parent / 'creative.css').read_text(), 'text/css; charset=utf-8')

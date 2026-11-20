@@ -1,0 +1,8 @@
+.mix-buses{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:18px}
+.mix-buses section{display:grid;gap:8px;border:1px solid var(--line);padding:12px;border-radius:5px}
+.mix-buses input[type=range],.mix-buses meter{width:100%}
+.mix-buses output{font-size:12px;font-variant-numeric:tabular-nums}
+.sound-item{border-bottom:1px solid var(--line);padding:12px 0}
+.sound-item audio{width:100%;max-width:450px}
+@media(max-width:800px){.mix-buses{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:500px){.mix-buses{grid-template-columns:1fr}}

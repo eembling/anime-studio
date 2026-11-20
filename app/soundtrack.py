@@ -62,15 +62,15 @@ class Soundtrack:
 
     def picture_signature(self, shots, settings):
         fields = ('id', 'seq', 'kind', 'duration', 'trim_in', 'keyframe_take', 'clip_take', 'final_take',
-                  'cont_takes', 'audio', 'retime', 'camera')
+                  'cont_takes', 'audio', 'retime', 'camera', 'transition', 'transition_seconds', 'dialogue_offset', 'dialogue_tail', 'dialogue_fade')
         cameras = {row['shot_id']: json.loads(row['json']).get('camera')
                    for row in self.st.db.q('SELECT shot_id,json FROM shot_direction')}
         picture = [[shot.get(field) for field in fields] + [cameras.get(shot['id'])] for shot in shots]
         return self.digest([picture, [settings.get(key) for key in ('out_width','out_height','out_fps')]])
 
     def mix_signature(self, cues, bed):
-        fields = ('path', 'start', 'offset', 'duration', 'volume', 'fade_in', 'fade_out', 'loop')
-        return self.digest([[[cue.get(field) for field in fields] for cue in cues if cue['enabled']], bed or ''])
+        fields = ('path', 'start', 'offset', 'duration', 'volume', 'fade_in', 'fade_out', 'loop', 'window_skip', 'original_duration')
+        return self.digest([[[cue.get(field) for field in fields] for cue in cues if cue['enabled']], bed or '', self.st.finishing.mixer() if hasattr(self.st,'finishing') else {}])
 
     def export_states(self, settings, cues):
         rows = self.exports()
@@ -121,6 +121,10 @@ class Soundtrack:
             if body.get('file'):
                 uploaded = self.st.save_upload(body['file'], 'soundtrack')
                 path = uploaded
+            elif body.get('library_id'):
+                sound = self.st.db.one('SELECT * FROM sound_library WHERE id=?',(body['library_id'],))
+                if not sound:raise ValueError('Library sound no longer exists.')
+                path = sound['path']
             elif old:
                 path = old['path']
             else:
@@ -145,8 +149,8 @@ class Soundtrack:
             if not math.isfinite(volume) or not 0 <= volume <= 4:
                 raise ValueError('Volume must be between 0 and 4.')
             kind = body.get('kind', 'sfx')
-            if kind not in ('music', 'sfx'):
-                raise ValueError('Choose Music or Sound effect.')
+            if kind not in ('music', 'sfx', 'ambience'):
+                raise ValueError('Choose Music, Ambience or Sound effect.')
             name = str(body.get('name') or (body.get('file') or {}).get('name') or (old or {}).get('name') or 'Audio cue').strip()[:160]
             vals = (name, kind, path, start, offset, duration, volume, fade_in, fade_out, int(loop), int(bool(body.get('enabled', True))), source_duration)
             with self.st.production.lock:
@@ -196,6 +200,12 @@ class Soundtrack:
     def mix(self, master, output, cues, bed='', bed_volume=.25, log=None):
         log = log if log is not None else []
         duration, streams = probe(master)
+        if hasattr(self.st,'finishing'):
+            mixer = self.st.finishing.mixer()
+            changed = mixer['duck'] or any(mixer[name] != {'volume':1,'pan':0,'mute':False,'solo':False}
+                                          for name in ('dialogue','music','ambience','sfx'))
+            if changed or any(c.get('kind')=='ambience' or 'window_skip' in c for c in cues):
+                return self.st.finishing.mix_audio(master, output, cues, bed, bed_volume, duration)
         inputs = ['-i', str(master)]
         if 'audio' in streams:
             base = '0:a'

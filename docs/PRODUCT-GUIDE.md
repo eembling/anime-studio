@@ -360,3 +360,15 @@ Selected media, retained render inputs, archived episodes, history and exports a
 Failed renders distinguish memory, model/file, node-pack, connection, timeout and input problems. Repair guidance links to the relevant shot or Settings section, with the full technical error in a disclosure. **Retry same inputs** retains the original configuration; use a new generation after changing resolution, models or prompts. **Reconnect render** uses the saved remote prompt when possible.
 
 The bottom-left badge shows **Anime Studio v2.11**. Click it for the source commit, branch and build time. A local build with uncommitted changes is labelled accordingly; the badge is not a claim that a release was published.
+
+## 18. Shot sound, mixing and transitions
+
+Use **Export with sound** on a shot, or **Export current shot with sound** in Studio, to render its selected picture, dialogue and cues within that shot's timeline range. Absolute and shot-anchored cues are cropped to the range, including sounds that began earlier. The result appears in Assemble with a download link.
+
+Choose **Render scene preview** in Studio, or **Render scene with sound** in Production. This uses the same picture conversion, transitions, dialogue timing and mixer as episode assembly. An unchanged scene reuses its cached MP4. Scene shots must be consecutive. Source selections, media stamps, timing, cues and mixer changes invalidate the cache.
+
+**Audio mixer**, available in Studio and Assemble, controls Dialogue, Music, Ambience and Effects independently. Gain, mute, solo and stereo pan preview immediately while Studio plays. Live meters show each bus's peak level. Save the mixer to apply it to renders. Automatic ducking lowers music while dialogue is audible. Use rendered previews for final mix review.
+
+Open a shot's **Transitions & audio timing** dialog to choose a cut, dissolve or fade through black into the next shot. Transitions preserve shot lengths and absolute cue positions. A dissolve reveals the incoming picture over the outgoing final frame at the cut. Negative dialogue offsets start speech before the picture (J-cut). A dialogue tail allows the recording to continue into the next shot (L-cut). Overlap adjacent dialogue and set fades to crossfade it. The source recording must contain enough audio for a tail.
+
+**Sound library** stores reusable source recordings across episodes in the project. Import a sound, name it, choose a category and add comma-separated tags. Search by any of those fields, audition the sound and choose **Add to episode**. Select its track and timing in the existing audio cue dialog. Removing a library entry retains files referenced by existing cues, history and exports.

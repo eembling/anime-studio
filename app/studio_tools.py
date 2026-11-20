@@ -10,11 +10,11 @@ import uuid
 import zipfile
 from pathlib import Path
 
-EDITORIAL = ('settings', 'shots', 'assets', 'takes', 'voice_takes', 'voice_clips',
+EDITORIAL = ('sound_library', 'settings', 'shots', 'assets', 'takes', 'voice_takes', 'voice_clips',
              'audio_cues', 'episode_audio_exports', 'production_approvals', 'production_plans', 'continuity',
              'asset_looks', 'scene_looks', 'continuity_reviews', 'shot_direction', 'generation_recipes',
              'shot_recipes', 'character_pronunciations', 'line_performances', 'performance_takes', 'creative_runs', 'shot_sections', 'section_takes')
-SHARED = {'assets', 'voice_clips', 'asset_looks', 'generation_recipes', 'character_pronunciations'}
+SHARED = {'sound_library', 'assets', 'voice_clips', 'asset_looks', 'generation_recipes', 'character_pronunciations'}
 
 
 def number(value, minimum=0):
@@ -99,7 +99,7 @@ class StudioTools:
             columns = {c['name'] for c in db.q('PRAGMA table_info(' + table + ')')}
             if any(not isinstance(r, dict) or not set(r).issubset(columns) for r in rows):
                 raise ValueError('Incompatible checkpoint columns')
-        paths = {'shots': ('audio',), 'assets': ('image',), 'takes': ('path',),
+        paths = {'sound_library': ('path',), 'shots': ('audio',), 'assets': ('image',), 'takes': ('path',),
                  'voice_takes': ('path',), 'voice_clips': ('path',), 'audio_cues': ('path',),
                  'episode_audio_exports': ('master','output')}
         for table, fields in paths.items():
@@ -423,18 +423,19 @@ class StudioTools:
         shots = self.st.ordered_shots()
         rows = []; start = 0
         for shot in shots:
-            trim = shot.get('trim_in') or 0
+            trim = (shot.get('trim_in') or 0) - (shot.get('dialogue_offset') or 0)
             cursor = 0
             for line in self.st.shot_lines(shot):
                 from anime_studio import media_seconds
                 length = media_seconds(self.st.abs(line['audio'])) if line.get('audio') else max(.5, len(line['text'])/14)
                 timing = self.st.creative.timing(shot['id'], line)
                 cursor += timing.get('lead_in', 0)
-                left, right = max(0,cursor-trim), min(shot['duration'],cursor+length-trim)
+                left, right = max(-start,cursor-trim), min(shot['duration']+(shot.get('dialogue_tail') or 0)+(shot.get('dialogue_offset') or 0),cursor+length-trim)
                 if right > left:
                     rows.append({'start':start+left,'end':start+right,'text':line['text'],'speaker':line.get('speaker','')})
                 cursor += length + timing.get('pause_after', float(self.st.settings().get('line_gap', .3)))
             start += shot['duration']
+        rows = [dict(row,end=min(start,row['end'])) for row in rows if row['start']<min(start,row['end'])]
         if body.get('rows') is not None:
             rows = body['rows']
         if body.get('rows') is None and self.st.settings().get('subtitle_rows') and not body.get('regenerate'):
@@ -466,7 +467,7 @@ class StudioTools:
         folder=self.st.data/'exports'/('delivery-'+uuid.uuid4().hex[:8]);folder.mkdir()
         master=self.safe_path(output['master']);duration, _=probe(master)
         ffmpeg(['-i',str(master),'-vn','-c:a','pcm_s24le',str(folder/'dialogue.wav')])
-        for kind in ('music','sfx'):
+        for kind in (['music','sfx','ambience'] if any(c['kind']=='ambience' for c in self.st.soundtrack.cues()) else ['music','sfx']):
             silent=folder/('silent-'+kind+'.mp4')
             ffmpeg(['-i',str(master),'-f','lavfi','-i','anullsrc=r=48000:cl=stereo','-map','0:v:0','-map','1:a:0','-c:v','copy','-c:a','aac','-t',str(duration),str(silent)])
             mixed=folder/(kind+'.mp4')
