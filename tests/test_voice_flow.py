@@ -89,7 +89,7 @@ class VoiceFlowTests(unittest.TestCase):
         jobs=self.st.db.q('SELECT * FROM jobs ORDER BY id')
         self.assertEqual([j['speaker'] for j in jobs],['TOBI','TOBI','PIPPA','PIPPA','TOBI','TOBI'])
         worker=app.Worker(self.st)
-        _,params=worker.compose(jobs[2]);self.assertEqual(params['files']['audio'],self.st.abs('voices/2.wav'))
+        _,params=worker.compose(jobs[2]);self.assertNotEqual(params['files']['audio'],self.st.abs('voices/2.wav'));self.assertEqual(params['files']['audio'].read_bytes(),self.st.abs('voices/2.wav').read_bytes())
         self.assertEqual(self.st.job_line(self.st.db.one('SELECT * FROM shots WHERE id=?',(sid,)),jobs[4])['index'],2)
 
     def test_take_selection_and_ui_are_scoped_to_exact_line(self):

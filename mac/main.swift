@@ -34,6 +34,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         buildMenu()
         restoreFolderAccess()
         let config = WKWebViewConfiguration()
+        // Studio starts the next dialogue/cue after an asynchronous media load.
+        // The transport still requires Play, but those later tracks must not
+        // require a separate WebKit user gesture at each shot boundary.
+        config.mediaTypesRequiringUserActionForPlayback = []
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
         webView = WKWebView(frame: .zero, configuration: config)
         webView.uiDelegate = self

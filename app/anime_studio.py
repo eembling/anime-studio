@@ -41,7 +41,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "2.10"
+VERSION = "2.12"
 for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebrew/bin")):
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
@@ -248,6 +248,7 @@ MIGRATIONS = [  # columns added after v2.0 - existing projects get them on start
     ("shots", "cont_takes", "TEXT DEFAULT '[]'"), ("takes", "frames", "INTEGER"), ("takes", "segment", "INTEGER"),
     ("takes", "draft", "INTEGER DEFAULT 0"), ("jobs", "segment", "INTEGER"), ("jobs", "draft", "INTEGER DEFAULT 0"),
     ("shots", "line_audio", "TEXT DEFAULT '[]'"), ("shots", "audio_mode", "TEXT DEFAULT 'lines'"), ("jobs", "note", "TEXT"),
+    ("jobs", "models_json", "TEXT"),
     ("jobs", "priority", "INTEGER DEFAULT 0"), ("jobs", "speaker", "TEXT DEFAULT ''"),
     ("voice_takes", "line_index", "INTEGER"),
     ("voice_takes", "character_id", "INTEGER"), ("voice_takes", "line_id", "TEXT"),
@@ -417,8 +418,20 @@ class Studio:
         self.frame_lock = threading.Lock()
         self.assembly = {"running": False, "log": [], "output": None, "folder": None}
         self.tools_cache = None
+        from creative import CreativeStudio
+        self.creative = CreativeStudio(self)
+        from continuations import Continuations
+        self.sections = Continuations(self)
+        from job_snapshots import JobSnapshots
+        self.snapshots = JobSnapshots(self)
         from studio_tools import StudioTools
         self.editor = StudioTools(self)
+        from alignment import Alignment
+        from storage_manager import StorageManager
+        from workspace import Workspace
+        self.alignment=Alignment(self)
+        self.storage=StorageManager(self)
+        self.workspace=Workspace(self)
 
     def tools(self, refresh=False):
         if self.tools_cache is None or refresh:
@@ -587,8 +600,10 @@ class Studio:
                     ins += ["-i", str(self.abs(l["audio"]))]
                 else:
                     ins += ["-f", "lavfi", "-t", f"{max(1.0, len(l['text'].split()) / 2.6):.2f}", "-i", "anullsrc=r=48000:cl=stereo"]
-                pad = gap if i < len(lines) - 1 else 0
-                graph += f"[{i}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad=pad_dur={pad}[a{i}];"
+                timing = self.creative.timing(shot_id, l)
+                pad = timing.get('pause_after', gap) if i < len(lines) - 1 else 0
+                delay = timing.get('lead_in', 0)*1000
+                graph += f"[{i}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay={delay}:all=1,apad=pad_dur={pad}[a{i}];"
             graph += "".join(f"[a{i}]" for i in range(len(lines))) + f"concat=n={len(lines)}:v=0:a=1[out]"
             dest = self.data / "voices" / f"shot{shot_id}_mix_{uuid.uuid4().hex[:6]}.wav"
             ffmpeg(ins + ["-filter_complex", graph, "-map", "[out]", "-ar", "48000", str(dest)])
@@ -612,7 +627,9 @@ class Studio:
 
     def last_frame(self, path):
         """Last frame of a clip as PNG. Locked and written atomically: parallel Continue jobs share it."""
-        out = self.data / "cache" / f"last_{Path(path).stem}.png"
+        source=Path(path).resolve();stat=source.stat()
+        identity=hashlib.sha256(f"{source}:{stat.st_mtime_ns}:{stat.st_size}".encode()).hexdigest()[:20]
+        out = self.data / "cache" / f"last_{identity}.png"
         with self.frame_lock:
             if not out.exists() or out.stat().st_mtime < Path(path).stat().st_mtime:
                 tmp = out.with_name(f".{out.stem}_{uuid.uuid4().hex[:6]}.png")
@@ -705,7 +722,7 @@ def detect_slots(wf, key):
     cls = lambda k: wf[k].get("class_type") or ""
     ins = lambda k: wf[k].get("inputs", {})
     encs = [k for k in keys if cls(k) in TEXT_ENCODERS]
-    loads = [k for k in keys if cls(k) == "LoadImage"]
+    loads = [k for k in keys if cls(k) == "LoadImage" and _title(wf[k]).upper() not in ("SOURCE", "MASK", "POSE", "DEPTH", "LAYOUT")]
     m = {"prompt": (_tagged(wf, "PROMPT") or [k for k in encs if "neg" not in _title(wf[k]).lower()])[:1],
          "negative": (_tagged(wf, "NEGATIVE") or [k for k in encs if "neg" in _title(wf[k]).lower()])[:1],
          "save": [k for k in keys if cls(k) in SAVE_NODES],
@@ -854,6 +871,13 @@ def build_workflow(template, key, p):
     for k in m["save"]:
         if "filename_prefix" in wf[k]["inputs"]:
             wf[k]["inputs"]["filename_prefix"] = p["prefix"]
+    # Explicit creative inputs never rely on the positional reference fallback.
+    for tag, value in imgs.items():
+        if tag.startswith('creative_'):
+            for node in wf.values():
+                if _title(node).upper() == tag[9:]:
+                    field = VIDEO_LOADERS.get(node['class_type'], 'image')
+                    node['inputs'][field] = value
     return wf
 
 
@@ -912,22 +936,41 @@ def retime(st, take, mode, out_fps, log=None):
         if log is not None:
             log.append("  (rife-ncnn-vulkan not found - using blend)")
     stamp = hashlib.sha256((str(src) + str(src.stat().st_mtime_ns)).encode()).hexdigest()[:12]
-    dst = st.data / "cache" / f"take{take['id']}_{stamp}_{mode}{out_fps}.mp4"
+    dst = st.data / "cache" / f"take{take['id']}_{stamp}_{mode}{out_fps}_v2.mp4"
     if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
         return dst
     enc = ["-c:v", "libx264", "-crf", "14", "-preset", "medium", "-pix_fmt", "yuv420p", "-an"]
     if mode == "hold":
         ffmpeg(["-i", str(src), "-vf", f"fps={out_fps}"] + enc + [str(dst)])
-    elif mode == "blend":
-        ffmpeg(["-i", str(src), "-vf", f"minterpolate=fps={out_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"] + enc + [str(dst)])
+        return dst
+
+    # Use the video stream's duration. Workflow metadata can disagree with
+    # the encoded file, and the container may contain a longer audio track.
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(src)],
+        capture_output=True, text=True,
+    )
+    try:
+        source_duration = float(probe.stdout.strip())
+    except ValueError:
+        source_duration = media_seconds(src)
+    if not 0 < source_duration < float("inf"):
+        raise ValueError(f"Cannot determine video duration for {src.name}.")
+    target = max(1, int(source_duration * out_fps + 0.5))
+    if mode == "blend":
+        # Interpolation looks ahead and drops the final frames without padding.
+        # Clone the edge for lookahead, then cap the output at source duration.
+        filters = f"tpad=stop_mode=clone:stop=3,minterpolate=fps={out_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"
+        ffmpeg(["-i", str(src), "-vf", filters, "-frames:v", str(target)] + enc + [str(dst)])
+    elif target == 1:
+        ffmpeg(["-i", str(src), "-vf", f"fps={out_fps}", "-frames:v", "1"] + enc + [str(dst)])
     else:
         work = st.data / "cache" / f"rife_{take['id']}"
         shutil.rmtree(work, ignore_errors=True)
         (work / "in").mkdir(parents=True)
         (work / "out").mkdir()
         ffmpeg(["-i", str(src), str(work / "in" / "%08d.png")])
-        count = len(list((work / "in").glob("*.png")))
-        target = max(2, int(round(count * out_fps / fps)))
         rp = Path(rife)
         model = next((m for m in ("rife-v4.6", "rife-v4") if (rp.parent / m).is_dir()), None)
         cmd = [str(rp), "-i", str(work / "in"), "-o", str(work / "out"), "-n", str(target)] + (["-m", model] if model else [])
@@ -985,11 +1028,15 @@ class Worker(threading.Thread):
             for d in j.get("devices", []):
                 nm = re.sub(r"^cuda:\d+\s*", "", d.get("name", "?")).split(" : ")[0]
                 parts.append(f"{nm} - {d.get('vram_free', 0) / 2**30:.1f} of {d.get('vram_total', 0) / 2**30:.1f} GB free")
-            self.st.health[inst["id"]] = {"ok": True, "info": "; ".join(parts), "t": time.time()}
+            self.st.health[inst["id"]] = {"ok": True, "info": "; ".join(parts), "t": time.time(), "hardware":[{k:d.get(k) for k in ("name","vram_total")} for d in j.get("devices",[])]}
         except Exception as e:
             self.st.health[inst["id"]] = {"ok": False, "info": str(e)[:200], "t": time.time()}
 
     def dispatch(self):
+        with self.st.production.lock:
+            return self._dispatch()
+
+    def _dispatch(self):
         db = self.st.db
         if db.one("SELECT id FROM jobs WHERE status='pending' LIMIT 1"):
             self.st.production.inspect()
@@ -1000,8 +1047,6 @@ class Worker(threading.Thread):
             roles = [r.strip() for r in (inst["roles"] or "").split(",") if r.strip() in JOB_STAGES]
             inspected = self.st.production.readiness.get('servers', [])
             readiness = next((s['stages'] for s in inspected if s['id'] == inst['id']), None)
-            if readiness is not None:
-                roles = [r for r in roles if readiness.get(r, {}).get('ready')]
             resumable = db.q("SELECT * FROM jobs WHERE status='pending' AND prompt_id IS NOT NULL AND instance_id=? ORDER BY id", (inst['id'],))
             if not roles and not resumable:
                 continue
@@ -1011,7 +1056,13 @@ class Worker(threading.Thread):
                 if candidate.get("prompt_id") and candidate.get("instance_id") != inst["id"]:
                     continue
                 shot = db.one('SELECT end_next FROM shots WHERE id=?', (candidate['shot_id'],))
-                if not candidate.get('prompt_id') and candidate['stage'] in ('animate', 'continue') and shot and shot['end_next'] and not (readiness or {}).get('animate_flf', {}).get('ready'):
+                if not candidate.get('prompt_id') and candidate.get('snapshot_json'):
+                    if not self.st.snapshots.compatible(candidate,inst):continue
+                elif not candidate.get('prompt_id') and candidate.get('creative_json'):
+                    if not self.st.creative.compatible(candidate, inst): continue
+                elif not candidate.get('prompt_id') and readiness is not None and not readiness.get(candidate['stage'], {}).get('ready'):
+                    continue
+                if not candidate.get('snapshot_json') and not candidate.get('creative_json') and not candidate.get('prompt_id') and candidate['stage'] in ('animate', 'continue') and shot and shot['end_next'] and not (readiness or {}).get('animate_flf', {}).get('ready'):
                     continue
                 job = candidate
                 break
@@ -1026,6 +1077,10 @@ class Worker(threading.Thread):
     def compose(self, job):
         """Returns (workflow_key, params)."""
         st, S = self.st, self.st.settings()
+        if job.get("snapshot_json"):
+            return st.snapshots.composed(job)
+        if job.get("creative_json"):
+            return st.creative.composed(job)
         stage = job["stage"]
         p = {"seed": job["seed"], "prefix": f"anime/j{job['id']:06d}_{stage}", "files": {}}
         if stage == "sheet":
@@ -1061,7 +1116,7 @@ class Worker(threading.Thread):
             if not ref or not st.abs(ref["path"]).exists():
                 raise RuntimeError(f"{line['speaker'] or 'The speaker'} has no voice clip to copy. Add one in Cast.")
             p["files"] = {"audio": st.abs(ref["path"])}
-            p["prompt"], p["negative"], p["ref_text"] = line["text"], None, ref["transcript"] or ""
+            p["prompt"], p["negative"], p["ref_text"] = st.creative.spoken(line["character_id"], line["text"]), None, ref["transcript"] or ""
             S = st.settings()
             p["direction"] = job.get("voice_direction") if job.get("voice_direction") is not None else line.get("direction") or ""
             p["language"] = norm_choice(S.get("tts_language"), TTS_LANGUAGES, "Auto")
@@ -1077,6 +1132,7 @@ class Worker(threading.Thread):
                     a = st.db.one('SELECT * FROM assets WHERE id=?', (v['asset_id'],))
                     if a: assets.append(a)
             assets = [dict(a, image=overrides[a['id']]['image']) if a['id'] in overrides else a for a in assets]
+            assets = st.creative.scene_assets(shot['scene'], assets)
             lines, refs, loras = [], [], []
             for a in assets:
                 if a["lora"]:
@@ -1092,7 +1148,7 @@ class Worker(threading.Thread):
                 if pp:
                     refs.append(pp)
                     lines.append(f"Picture {len(refs)} is the previous shot: keep the same location, lighting and outfits")
-            parts = [". ".join(lines), shot["keyframe_prompt"], shot["camera"], context["lighting"], context["notes"], ". ".join(v["notes"] for v in context["variants"]), S.get("style_prompt", "")]
+            parts = [". ".join(lines), shot["keyframe_prompt"], shot["camera"], st.creative.direction(shot["id"]).get("notes", ""), context["lighting"], context["notes"], ". ".join(v["notes"] for v in context["variants"]), S.get("style_prompt", "")]
             p["prompt"] = ". ".join(x.strip().rstrip(".") for x in parts if x and x.strip()) + "."
             p["negative"] = S.get("keyframe_negative", "")
             p["files"] = {f"ref{i + 1}": r for i, r in enumerate(refs)}
@@ -1134,23 +1190,7 @@ class Worker(threading.Thread):
             p["length"] = st.frames_for(shot["duration"], key, draft)
             return key, p
         if stage == "continue":
-            seg = int(job.get("segment") or 0)
-            chain = st.chain(shot)
-            if len(chain) < seg + 1:
-                raise RuntimeError("Choose a take for the previous part of this shot first.")
-            chain = chain[:seg + 1]
-            covered = st.chain_seconds(chain)
-            remaining = float(shot["duration"]) - covered
-            if remaining < 0.25:
-                raise RuntimeError(f"Already animated: {covered:.1f} of {float(shot['duration']):.1f} s. Make the shot longer to continue it.")
-            p["files"] = {"start": st.last_frame(st.abs(chain[-1]["path"]))}
-            key = end_on_next(remaining, "animate")
-            # +1 frame: the first frame repeats the previous segment's last frame and is dropped at assembly
-            p["length"] = st.frames_for(remaining + 1.0 / st.wf_fps(key), key, draft)
-            p["prompt"] = ", ".join(x for x in ("the motion continues seamlessly from the first frame", text) if x)
-            p["negative"] = S.get("video_negative", "")
-            p["width"], p["height"] = size
-            return key, p
+            return st.sections.compose(job)
         if stage == "upscale":
             clip = st.take_path(shot["clip_take"])
             if not clip:
@@ -1165,13 +1205,27 @@ class Worker(threading.Thread):
         events = None
         try:
             job = db.one("SELECT * FROM jobs WHERE id=?", (job_id,))
+            st.creative.started(job,inst)
+            job = db.one("SELECT * FROM jobs WHERE id=?", (job_id,))
             pid = job.get("prompt_id")
+            from render_queue import workflow_models, prompt_graph
+            if not pid:
+                db.x("UPDATE jobs SET models_json=NULL WHERE id=?",(job_id,))
+            elif job.get('models_json') is None:
+                try:
+                    queued=http_json('GET',base+'/queue',timeout=8)
+                    for entry in queued.get('queue_running',[])+queued.get('queue_pending',[]):
+                        graph=prompt_graph(entry,pid)
+                        if graph is not None:
+                            db.x('UPDATE jobs SET models_json=? WHERE id=?',(json.dumps(workflow_models(graph)),job_id));break
+                except Exception:
+                    pass  # Older servers may not expose their queued API graphs.
             key = 'animate' if job['stage'] == 'continue' else job['stage']
             if not pid:
                 if not db.one("SELECT job_id FROM production_inputs WHERE job_id=?",(job_id,)):
                     st.production.capture(job)
                 key, p = self.compose(job)
-                row = st.wf_row(key)
+                row = st.snapshots.workflow(job) or st.creative.workflow(job) or st.wf_row(key)
                 if not row:
                     raise RuntimeError(f"No '{key}' workflow set. Upload one in Settings > Workflows.")
                 tpl = json.loads(row["json"])
@@ -1193,6 +1247,7 @@ class Worker(threading.Thread):
                 p["images"] = {slot: comfy_upload(base, path, f"anime_j{job_id}_{slot}{Path(path).suffix.lower()}")
                                for slot, path in p["files"].items()}
                 wf = build_workflow(tpl, key, p)
+                wf = st.snapshots.patch(job,wf) if job.get("snapshot_json") else st.creative.patch_controls(job, wf)
                 try:
                     res = http_json("POST", base + "/prompt", {"prompt": wf, "client_id": f"anime-studio-{job_id}"}, 60)
                 except RuntimeError as e:
@@ -1200,7 +1255,7 @@ class Worker(threading.Thread):
                 if res.get("node_errors"):
                     raise RuntimeError("ComfyUI rejected the workflow: " + json.dumps(res["node_errors"])[:2500])
                 pid = res["prompt_id"]
-                db.x("UPDATE jobs SET prompt_id=?, progress='queued on ComfyUI' WHERE id=?", (pid, job_id))
+                db.x("UPDATE jobs SET prompt_id=?, models_json=?, progress='queued on ComfyUI' WHERE id=?", (pid, json.dumps(workflow_models(wf)), job_id))
             t0, timeout, fails, entry = time.time(), int(float(st.settings().get("job_timeout") or 3600)), 0, None
             while True:
                 if (db.one("SELECT status FROM jobs WHERE id=?", (job_id,)) or {}).get("status") != "running":
@@ -1216,6 +1271,9 @@ class Worker(threading.Thread):
                     hist = {}
                 if pid in hist:
                     entry = hist[pid]
+                    if (db.one('SELECT models_json FROM jobs WHERE id=?',(job_id,)) or {}).get('models_json') is None:
+                        graph=prompt_graph(entry.get('prompt'),pid)
+                        if graph is not None:db.x('UPDATE jobs SET models_json=? WHERE id=?',(json.dumps(workflow_models(graph)),job_id))
                     s = entry.get("status", {})
                     if s.get("completed") or s.get("status_str") in ("success", "error"):
                         break
@@ -1245,8 +1303,10 @@ class Worker(threading.Thread):
             with st.production.lock:
                 if (db.one("SELECT status FROM jobs WHERE id=?", (job_id,)) or {}).get("status") != "running":
                     return
-                self.finish(job, key, local)
+                if not st.creative.finish_special(job, key, local):
+                    self.finish(job, key, local)
             db.x("UPDATE jobs SET status='done', finished=?, progress='done' WHERE id=? AND status='running'", (time.time(), job_id))
+            st.creative.completed(db.one('SELECT * FROM jobs WHERE id=?', (job_id,)), 'done')
             from render_queue import remember_timings
             remember_timings(db)
             shutil.rmtree(out_dir, ignore_errors=True)
@@ -1254,6 +1314,8 @@ class Worker(threading.Thread):
             traceback.print_exc()
             db.x("UPDATE jobs SET status='error', error=?, finished=?, progress='' WHERE id=? AND status='running'",
                  (str(e)[:4000], time.time(), job_id))
+            failed = db.one('SELECT * FROM jobs WHERE id=?', (job_id,))
+            if failed: st.creative.completed(failed, 'error', str(e)[:4000])
 
         finally:
             if events:
@@ -1312,7 +1374,7 @@ class Worker(threading.Thread):
             st.db.x("INSERT INTO voice_takes(shot_id,text,speaker,path,seed,job_id,seconds,created,input_signature,line_index,character_id,line_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     (shot["id"], job.get("note"), (line or {}).get("speaker", ""), st.rel(dest), job["seed"], job["id"],
                      round(media_seconds(dest), 2), time.time(), signature, line["index"] if line else job.get("segment"), job.get("voice_character_id"), job.get("voice_line_id")))
-            if line and (not line["audio"] or (job.get("voice_autoselect") and line["audio"]==job.get("voice_previous_audio"))) and (not signature or signature==st.production.signature(shot,"voice")):
+            if not st.creative.meta(job).get("manual") and line and (not line["audio"] or (job.get("voice_autoselect") and line["audio"]==job.get("voice_previous_audio"))) and (not signature or signature==st.production.signature(shot,"voice")):
                 line.update(audio=st.rel(dest), src="tts", clip_id=None)
                 st.save_lines(shot["id"], lines)
                 st.rebuild_audio(shot["id"])
@@ -1324,16 +1386,17 @@ class Worker(threading.Thread):
         folder.mkdir(parents=True, exist_ok=True)
         made = []
         if stage in ("sheet", "keyframe"):
+            if job.get("creative_json") and not imgs: raise ValueError("The recipe saved no image candidate.")
             for i, f in enumerate(imgs or local):
                 dest = folder / f"{stage}_j{job['id']}_{output_id}_{i}{f.suffix.lower()}"
                 shutil.move(str(f), dest)
                 made.append((dest, 0))
         else:
-            if stage == "upscale":
+            if stage == "upscale" and not job.get("snapshot_json"):
                 src = st.db.one("SELECT t.fps FROM takes t JOIN shots s ON s.clip_take=t.id WHERE s.id=?", (job["shot_id"],))
                 fps = (src or {}).get("fps") or 16
             else:
-                fps = st.wf_fps(key)
+                fps = (st.snapshots.workflow(job) or st.creative.workflow(job) or {}).get("fps") or st.wf_fps(key)
             dest = folder / f"{stage}_j{job['id']}_{output_id}.mp4"
             if vids:
                 dest = dest.with_suffix(vids[0].suffix.lower())
@@ -1350,13 +1413,18 @@ class Worker(threading.Thread):
                           "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                           (job["shot_id"], job["asset_id"], stage, st.rel(path), fps, job["seed"], job["id"], time.time(),
                            nframes if fps else None, job.get("segment"), 1 if job.get("draft") else 0, signature))
+            st.sections.saved_take(tid,job)
+            if st.creative.meta(job).get("manual"):
+                continue
             if stage in TAKE_FIELD:
+                current=st.db.one("SELECT * FROM shots WHERE id=?",(job["shot_id"],))
+                if current and signature and signature!=st.production.signature(current,stage,job.get("segment")):continue
                 f = TAKE_FIELD[stage]
                 st.db.x(f"UPDATE shots SET {f}=? WHERE id=? AND {f} IS NULL", (tid, job["shot_id"]))
             elif stage == "continue":
                 shot = st.db.one("SELECT * FROM shots WHERE id=?", (job["shot_id"],))
                 cont = [t["id"] for t in st.chain(shot)[1:]] if shot else []
-                if shot and len(cont) == int(job.get("segment") or 0):
+                if shot and len(cont) == int(job.get("segment") or 0) and (not signature or signature==st.production.signature(shot,"continue",job.get("segment"))):
                     st.db.x("UPDATE shots SET cont_takes=? WHERE id=?", (json.dumps(cont + [tid]), shot["id"]))
 
 
@@ -1383,6 +1451,12 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
         shots = [s for s in st.ordered_shots() if scene is None or s['scene'] == scene]
         if not shots:
             raise RuntimeError("No shots yet.")
+        bed = S.get('music', '') if use_music else ''
+        build = {
+            'picture': st.soundtrack.picture_signature(shots, S), 'mix': st.soundtrack.mix_signature(cues, bed),
+            'width': W, 'height': H, 'fps': FPS, 'music': bool(use_music), 'timed': bool(use_timed),
+            'volume': float(music_volume),
+        } if not preview and scene is None else None
         name = re.sub(r"[^A-Za-z0-9_-]+", "_", S.get("title") or "episode").strip("_") or "episode"
         name += "_animatic" if preview else ""
         out = st.data / "exports" / f"{name}_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
@@ -1429,11 +1503,14 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
                     how += " DRAFT"
                 if motion and dur - motion > 0.25:
                     how += f", last frame held {dur - motion:.1f}s"
+                    log.append(f"  WARNING shot {i}: incomplete motion coverage; final frame will be held. Continue the shot for full animation.")
             elif kf:
                 how, vin = "still pan", ["-loop", "1", "-framerate", str(FPS), "-i", str(kf)]
                 vf = (f"[0:v]scale={W * 2}:{H * 2}:force_original_aspect_ratio=increase,crop={W * 2}:{H * 2},"
                       f"zoompan=z='min(1+0.0010*on,1.2)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS},setsar=1[v]")
-                if preview and (s['camera'] or '').strip().lower() in ('static', 'hold', 'locked'):
+                directed = st.creative.camera_filter(s, W, H, FPS)
+                if directed: vf = '[0:v]'+directed+'[v]'
+                if not directed and preview and (s['camera'] or '').strip().lower() in ('static', 'hold', 'locked'):
                     vf = f"[0:v]{fill}[v]"
             else:
                 how, vin = "MISSING - black", ["-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r={FPS}"]
@@ -1453,9 +1530,9 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
         master = out / '_dialogue_master.mp4'
         joined.rename(master)
         log.append('Mixing episode audio...' if cues or use_music else 'Saving dialogue-only episode...')
-        st.soundtrack.mix(master, final, cues, S.get('music', '') if use_music else '', float(music_volume), log)
+        st.soundtrack.mix(master, final, cues, bed, float(music_volume), log)
         if not preview and scene is None:
-            st.soundtrack.register(master, final, rec / FPS)
+            st.soundtrack.register(master, final, rec / FPS, build=build)
         (out / "concat.txt").unlink()
         (out / "shotlist.csv").write_text(API(st).csv_export())
         A["output"], A["folder"] = st.rel(final), st.rel(out)
@@ -1526,6 +1603,7 @@ class API:
             s['voice_token']=edit_token(st,s)
             s['voice_suggestion']=voice_suggestions.get(s['id'],[])
             s["lines"] = lines
+            s["continuation"] = st.sections.state(s)
             chain = st.chain(s)
             covered = st.chain_seconds(chain) if chain else 0.0
             s.update(asset_ids=json.loads(s["asset_ids"] or "[]"), takes=takes.get(s["id"], []), active=active.get(s["id"], {}),
@@ -1572,13 +1650,16 @@ class API:
         A["output_url"] = self.media(A.get("output"))
         S = st.settings()
         starters = {k: list(v.keys()) for k, v in STARTERS.items()}
+        cues = st.soundtrack.cues()
         S["max_clip_seconds"] = round((st.max_frames() - 1) / float(st.wf_fps()), 2)
-        return {"settings": S, "tts_languages": TTS_LANGUAGES, "voice_sample": VOICE_SAMPLE, "shots": shots, "assets": assets, "instances": insts, "workflows": wfs, "starters": starters,
+        try:build=json.loads((Path(__file__).parent/'build_info.json').read_text())
+        except (OSError,ValueError):build={'version':VERSION,'commit':'development','branch':'local source'}
+        return {"project_id":hashlib.sha256(str(st.data).encode()).hexdigest()[:24],"build":build,"alignment":st.alignment.state(),"settings": S, "tts_languages": TTS_LANGUAGES, "voice_sample": VOICE_SAMPLE, "shots": shots, "assets": assets, "instances": insts, "workflows": wfs, "starters": starters,
                 "jobs": jobs, "job_counts": counts, "assembly": A, "tools": st.tools(), "music_url": self.media(S.get("music")),
                 "version": VERSION, "platform": sys.platform, "production": production, "render_queue": queue,
-                "audio_cues": [dict(c, url=self.media(c['path'])) for c in st.soundtrack.cues()],
-                "audio_exports": [dict(e, url=self.media(e['output'])) for e in st.soundtrack.exports()],
-                "editor": st.editor.state(), "voice_recovery_count": len(voice_recovery_rows)}
+                "audio_cues": [dict(c, url=self.media(c['path'])) for c in cues],
+                "audio_exports": [dict(e, url=self.media(e['output'])) for e in st.soundtrack.export_states(S, cues)],
+                "editor": st.editor.state(), "creative": st.creative.state(), "voice_recovery_count": len(voice_recovery_rows)}
 
     # ---- settings / servers / workflows / tools
     def settings(self, b):
@@ -1600,8 +1681,8 @@ class API:
             self.st.db.x("UPDATE instances SET name=?, url=?, roles=?, enabled=? WHERE id=?",
                          (b["name"], url, roles, 1 if b.get("enabled", True) else 0, b["id"]))
         else:
-            self.st.db.x("INSERT INTO instances(name,url,roles,enabled) VALUES(?,?,?,1)", (b["name"], url, roles))
-        self.st.worker.last_health = 0
+            self.st.db.x("INSERT INTO instances(name,url,roles,enabled) VALUES(?,?,?,?)", (b["name"], url, roles,1 if b.get("enabled",True) else 0))
+        if hasattr(self.st, "worker"): self.st.worker.last_health = 0
         return {"ok": True}
 
     def instance_delete(self, b):
@@ -1657,6 +1738,7 @@ class API:
         return {"ok": True}
 
     def quit(self, _):
+        self.st.alignment.shutdown()
         threading.Timer(0.5, lambda: os._exit(0)).start()
         return {"ok": True}
 
@@ -1714,6 +1796,7 @@ class API:
         return {"ok": True, "id": aid}
 
     def asset_delete(self, b):
+        self.st.creative.delete_asset(b["id"])
         for c in self.st.db.q("SELECT id FROM voice_clips WHERE asset_id=?", (b["id"],)):
             self.clip_delete({"id": c["id"]})
         self.st.db.x("DELETE FROM takes WHERE asset_id=? AND stage='sheet'", (b["id"],))
@@ -1764,6 +1847,9 @@ class API:
     def shot_delete(self, b):
         db = self.st.db
         for sid in b["ids"]:
+            self.st.db.x("DELETE FROM shot_sections WHERE shot_id=?",(sid,))
+            self.st.db.x("DELETE FROM section_takes WHERE take_id IN (SELECT id FROM takes WHERE shot_id=?)",(sid,))
+            self.st.creative.delete_shot(sid)
             db.x("DELETE FROM production_approvals WHERE shot_id=?", (sid,))
             db.x("DELETE FROM shots WHERE id=?", (sid,))
             db.x(f"DELETE FROM takes WHERE shot_id=? AND stage NOT IN {_ASSET_SQL}", (sid,))
@@ -1998,6 +2084,27 @@ class API:
 
     # ---- generation / takes / jobs
     def generate(self, b):
+        with self.st.production.lock:
+            before=self.st.db.one('SELECT COALESCE(MAX(id),0) n FROM jobs')['n']
+            try:
+                result=self._generate_request(b)
+                for job in self.st.db.q("SELECT * FROM jobs WHERE id>? AND status='pending'",(before,)):
+                    self.st.snapshots.capture(job)
+                return result
+            except Exception:
+                for job in self.st.db.q("SELECT id FROM jobs WHERE id>? AND status='pending'",(before,)):
+                    for table,field in [('creative_runs','job_id'),('production_inputs','job_id'),('jobs','id')]:
+                        self.st.db.x('DELETE FROM '+table+' WHERE '+field+'=?',(job['id'],))
+                raise
+
+    def _generate_request(self, b):
+        if b["stage"] == "continue":
+            return self.st.sections.generate(b)
+        if self.st.creative.wants_recipe(b):
+            with self.st.production.lock:
+                return self.st.creative.generate(b)
+        if b['stage'] == 'keyframe' and any(self.st.creative.direction(sid).get('conditioning') for sid in b.get('shot_ids', [])):
+            return {'ok':False,'queued':0,'skipped':[],'error':'Assign a compatible keyframe recipe in Generation lab before using pose/depth/layout conditioning.'}
         if not self.st.production.ready(b['stage'], b.get('shot_ids', [])):
             return {'ok': False, 'queued': 0, 'skipped': ['No ready server for this workflow. Run Production → Check readiness for details.'],
                     'error': 'No ready server for ' + b['stage']}
@@ -2055,7 +2162,7 @@ class API:
                     if target in seen:continue
                     seen.add(target)
                     sp = st.line_character(l)
-                    if st.db.one("SELECT id FROM jobs WHERE shot_id=? AND stage='voice' AND status IN ('pending','running') AND ((voice_line_id=? AND voice_character_id IS ? AND note=? AND voice_direction=?) OR (voice_line_id IS NULL AND segment=? AND note=? AND speaker=? COLLATE NOCASE)) LIMIT 1", (sid,l['line_id'],sp['id'] if sp else None,l['text'],l.get('direction') or '',l['index'],l['text'],l['speaker'])):
+                    if not b.get('_creative_batch') and st.db.one("SELECT id FROM jobs WHERE shot_id=? AND stage='voice' AND status IN ('pending','running') AND ((voice_line_id=? AND voice_character_id IS ? AND note=? AND voice_direction=?) OR (voice_line_id IS NULL AND segment=? AND note=? AND speaker=? COLLATE NOCASE)) LIMIT 1", (sid,l['line_id'],sp['id'] if sp else None,l['text'],l.get('direction') or '',l['index'],l['text'],l['speaker'])):
                         skipped.append(f"Shot {int(s['seq'])}, line {l['index']+1}: voice generation already queued or running.")
                         continue
                     if not sp or not st.ref_clip(sp["id"]) or not st.abs(st.ref_clip(sp["id"])["path"]).is_file():
@@ -2086,7 +2193,7 @@ class API:
                 if segment > len(chain) - 1:
                     skipped.append(f"{label}: choose the previous part first")
                     continue
-                if float(s["duration"]) - st.chain_seconds(chain[:segment + 1]) < 0.25:
+                if float(s["duration"]) + float(s.get("trim_in") or 0) - st.chain_seconds(chain[:segment + 1]) < 1/max(1,st.wf_fps()):
                     skipped.append(f"{label}: already animated for its full length")
                     continue
             if stage != "keyframe" and s["kind"] == "still" and stage != "lipsync" and not (stage == "upscale" and s["clip_take"]):
@@ -2124,10 +2231,13 @@ class API:
             seg = int(t["segment"] or 0)
             if seg > len(cont):
                 raise RuntimeError("Choose a take for the earlier part of this shot first.")
-            # later parts were made from the old ending, so they no longer join up
-            st.db.x("UPDATE shots SET cont_takes=? WHERE id=?", (json.dumps(cont[:seg] + [t["id"]]), t["shot_id"]))
+            if seg<len(cont) and cont[seg]!=t["id"]: st.sections.legacy_review(cont[seg+1:])
+            # Retain later selections for review; their predecessor signatures become outdated.
+            st.db.x("UPDATE shots SET cont_takes=?, final_take=NULL WHERE id=?", (json.dumps(cont[:seg] + [t["id"]] + cont[seg+1:]), t["shot_id"]))
         elif t["stage"] == "lipsync" or t["stage"] == "animate":
-            st.db.x("UPDATE shots SET clip_take=?, final_take=NULL, cont_takes='[]' WHERE id=? AND (clip_take IS NULL OR clip_take<>?)",
+            shot=st.db.one("SELECT * FROM shots WHERE id=?",(t["shot_id"],))
+            if shot and shot["clip_take"]!=t["id"]: st.sections.legacy_review(json.loads(shot["cont_takes"] or "[]"))
+            st.db.x("UPDATE shots SET clip_take=?, final_take=NULL WHERE id=? AND (clip_take IS NULL OR clip_take<>?)",
                     (t["id"], t["shot_id"], t["id"]))
         else:
             self.st.db.x(f"UPDATE shots SET {TAKE_FIELD[t['stage']]}=? WHERE id=?", (t["id"], t["shot_id"]))
@@ -2143,18 +2253,21 @@ class API:
                 shot = st.db.one("SELECT * FROM shots WHERE id=?", (t["shot_id"],))
                 cont = json.loads((shot or {}).get("cont_takes") or "[]")
                 if t["id"] in cont:
-                    st.db.x("UPDATE shots SET cont_takes=? WHERE id=?", (json.dumps(cont[:cont.index(t["id"])]), t["shot_id"]))
+                    st.db.x("UPDATE shots SET cont_takes=?, final_take=NULL WHERE id=?", (json.dumps(cont[:cont.index(t["id"])]), t["shot_id"]))
             if t["stage"] in ("animate", "lipsync"):
-                st.db.x("UPDATE shots SET cont_takes='[]' WHERE id=? AND clip_take=?", (t["shot_id"], t["id"]))
+                st.db.x("UPDATE shots SET cont_takes='[]', final_take=NULL WHERE id=? AND clip_take=?", (t["shot_id"], t["id"]))
             if t["stage"] in TAKE_FIELD:
                 f = TAKE_FIELD[t["stage"]]
                 st.db.x(f"UPDATE shots SET {f}=NULL WHERE id=? AND {f}=?", (t["shot_id"], t["id"]))
+            st.db.x("DELETE FROM section_takes WHERE take_id=?",(t["id"],))
             st.db.x("DELETE FROM takes WHERE id=?", (t["id"],))
             # Retain media for recovery history and existing exports.
         return {"ok": True}
 
     def job_action(self, b):
         db, act, now = self.st.db, b["action"], time.time()
+        if act == 'repeat':
+            return {'ok':True,'job_ids':[self.st.snapshots.repeat(jid) for jid in b['ids']]}
         if act == 'priority':
             priority = max(-10, min(10, int(b.get('priority', 0))))
             for jid in b['ids']:
@@ -2172,9 +2285,11 @@ class API:
         elif act == "cancel_pending":
             db.x("UPDATE jobs SET status='cancelled', finished=? WHERE status='pending'", (now,))
         elif act == "clear":
+            self.st.creative.sync_runs()
             from render_queue import remember_timings
             remember_timings(db)
             db.x("DELETE FROM jobs WHERE status IN ('done','cancelled')")
+        self.st.creative.sync_runs()
         if act in ('retry', 'retry_errors'):
             db.x("UPDATE jobs SET started=NULL WHERE status='pending' AND prompt_id IS NULL")
         return {"ok": True}
@@ -2216,11 +2331,33 @@ class API:
             # Regenerate the earliest affected dependency; old takes remain available.
             stage = next((s for s in ('voice','keyframe','animate','continue','lipsync','upscale') if s in stages), None)
             if stage:
-                if stage == 'continue':
-                    stage = 'animate'
-                r = self.generate({'stage': stage, 'shot_ids': [shot['id']], 'takes': 1, 'replace': True})
+                request={'stage':stage,'shot_ids':[shot['id']],'takes':1,'replace':True}
+                if stage=='continue':
+                    stale=next((t for t in self.st.chain(shot)[1:] if self.st.production.provenance(t,shot)=='outdated'),None)
+                    if stale:request['segment']=stale['segment']
+                r = self.generate(request)
                 result.append({'shot_id': shot['id'], 'stage': stage, **r})
         return {'ok': True, 'results': result}
+
+    def workspace_action(self,b):
+        return self.st.workspace.action(b)
+
+    def alignment_action(self,b):
+        return self.st.alignment.action(b)
+
+    def storage_action(self,b):
+        with self.st.production.lock:
+            return self.st.storage.action(b)
+
+    def section_action(self, b):
+        with self.st.production.lock:
+            return self.st.sections.action(b)
+
+    def creative_action(self, b):
+        before=self.st.db.one('SELECT COALESCE(MAX(id),0) n FROM jobs')['n']
+        result=self.st.creative.action(b)
+        for job in self.st.db.q("SELECT * FROM jobs WHERE id>? AND status='pending'",(before,)):self.st.snapshots.capture(job)
+        return result
 
     def editor_action(self, b):
         actions = {'scene': self.st.editor.scene, 'history': self.st.editor.history,
@@ -2251,6 +2388,11 @@ EDIT_ROUTES = {'/api/settings','/api/shot/save','/api/shot/delete','/api/shot/mo
     '/api/voice_take/delete','/api/clip/delete','/api/line/set','/api/line/direction',
     '/api/audio/cue/save','/api/audio/cue/delete','/api/script/revision'}
 ROUTES = {
+    '/api/creative': 'creative_action',
+    '/api/section': 'section_action',
+    '/api/workspace':'workspace_action',
+    '/api/alignment':'alignment_action',
+    '/api/storage':'storage_action',
     '/api/shot/voices': 'shot_voices',
     '/api/voice/recover': 'voice_recover',
     '/api/editor': 'editor_action',
@@ -2297,6 +2439,12 @@ def make_handler(st, api):
                     return self._send(200, INDEX_HTML, "text/html; charset=utf-8")
                 if path == '/shot_voices.js':
                     return self._send(200, (Path(__file__).resolve().parent / 'shot_voices.js').read_text(), 'text/javascript; charset=utf-8')
+                if path in ('/settings.js','/settings.css','/continuations.js','/workspace.js','/workspace.css'):
+                    return self._send(200, (Path(__file__).resolve().parent / path[1:]).read_text(), 'text/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8')
+                if path == '/creative.css':
+                    return self._send(200, (Path(__file__).resolve().parent / 'creative.css').read_text(), 'text/css; charset=utf-8')
+                if path == '/creative.js':
+                    return self._send(200, (Path(__file__).resolve().parent / 'creative.js').read_text(), 'text/javascript; charset=utf-8')
                 if path == '/editor.js':
                     return self._send(200, (Path(__file__).resolve().parent / 'editor.js').read_text(), 'text/javascript; charset=utf-8')
                 if path == '/production.js':
@@ -2393,6 +2541,12 @@ def main():
         print("Wrote starter workflows to", d)
         return
     st = Studio(args.data)
+    import signal
+    def stop_local(signum,frame):
+        st.alignment.shutdown()
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM,stop_local)
+    signal.signal(signal.SIGINT,stop_local)
     st.worker = Worker(st)
     st.worker.start()
     try:

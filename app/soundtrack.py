@@ -1,4 +1,5 @@
 """Timed episode audio cues and soundtrack-only exports. No GPU work is submitted."""
+import hashlib
 import json
 import math
 import shutil
@@ -40,8 +41,52 @@ class Soundtrack:
         studio.db.x('''CREATE TABLE IF NOT EXISTS audio_cues(id INTEGER PRIMARY KEY, name TEXT, kind TEXT, path TEXT,
             start REAL, offset REAL, duration REAL, volume REAL, fade_in REAL, fade_out REAL, loop INTEGER, enabled INTEGER,
             source_seconds REAL)''')
-        studio.db.x('''CREATE TABLE IF NOT EXISTS episode_audio_exports(id INTEGER PRIMARY KEY, title TEXT, master TEXT UNIQUE,
-            output TEXT, seconds REAL, clean INTEGER, created REAL)''')
+        schema = '''CREATE TABLE IF NOT EXISTS episode_audio_exports(
+            id INTEGER PRIMARY KEY, title TEXT, master TEXT, output TEXT UNIQUE,
+            seconds REAL, clean INTEGER, created REAL, build_json TEXT)'''
+        db = studio.db
+        db.x(schema)
+        if 'build_json' not in {row['name'] for row in db.q('PRAGMA table_info(episode_audio_exports)')}:
+            # Keep existing IDs and masters. Multiple exports can share one master.
+            with db.lock, db.conn:
+                db.conn.execute('BEGIN IMMEDIATE')
+                db.conn.execute('ALTER TABLE episode_audio_exports RENAME TO episode_audio_exports_old')
+                db.conn.execute(schema)
+                db.conn.execute('''INSERT OR IGNORE INTO episode_audio_exports(id,title,master,output,seconds,clean,created)
+                    SELECT id,title,master,output,seconds,clean,created FROM episode_audio_exports_old ORDER BY id DESC''')
+                db.conn.execute('DROP TABLE episode_audio_exports_old')
+
+    @staticmethod
+    def digest(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+    def picture_signature(self, shots, settings):
+        fields = ('id', 'seq', 'kind', 'duration', 'trim_in', 'keyframe_take', 'clip_take', 'final_take',
+                  'cont_takes', 'audio', 'retime', 'camera')
+        cameras = {row['shot_id']: json.loads(row['json']).get('camera')
+                   for row in self.st.db.q('SELECT shot_id,json FROM shot_direction')}
+        picture = [[shot.get(field) for field in fields] + [cameras.get(shot['id'])] for shot in shots]
+        return self.digest([picture, [settings.get(key) for key in ('out_width','out_height','out_fps')]])
+
+    def mix_signature(self, cues, bed):
+        fields = ('path', 'start', 'offset', 'duration', 'volume', 'fade_in', 'fade_out', 'loop')
+        return self.digest([[[cue.get(field) for field in fields] for cue in cues if cue['enabled']], bed or ''])
+
+    def export_states(self, settings, cues):
+        rows = self.exports()
+        picture = self.picture_signature(self.st.ordered_shots(), settings) if any(row['build_json'] for row in rows) else None
+        mixes = {}
+        for row in rows:
+            build = json.loads(row.pop('build_json') or '{}')
+            if not build:
+                row['edit_status'] = 'unknown'
+                continue
+            options = (build['timed'], build['music'])
+            if options not in mixes:
+                mixes[options] = self.mix_signature(cues if options[0] else [], settings.get('music') if options[1] else '')
+            row['edit_status'] = 'current' if build['picture']==picture and build['mix']==mixes[options] else 'changed'
+            row['build'] = build
+        return rows
 
     def cues(self):
         rows = self.st.db.q('SELECT * FROM audio_cues ORDER BY start,id')
@@ -123,10 +168,10 @@ class Soundtrack:
         self.st.db.x('DELETE FROM audio_cues WHERE id=?', (body['id'],))
         return {'ok': True}
 
-    def register(self, master, output, duration, clean=True):
-        self.st.db.x('INSERT INTO episode_audio_exports(title,master,output,seconds,clean,created) VALUES(?,?,?,?,?,?) '
-                     'ON CONFLICT(master) DO UPDATE SET output=excluded.output',
-                     (Path(output).name, self.st.rel(master), self.st.rel(output), duration, int(clean), time.time()))
+    def register(self, master, output, duration, clean=True, build=None, *, created=None):
+        self.st.db.x('INSERT OR IGNORE INTO episode_audio_exports(title,master,output,seconds,clean,created,build_json) VALUES(?,?,?,?,?,?,?)',
+                     (Path(output).name, self.st.rel(master), self.st.rel(output), duration, int(clean), time.time() if created is None else created,
+                      json.dumps(build) if build else None))
 
     def discover(self):
         """Explicitly discover older app exports; never scan the user's other folders."""
@@ -142,9 +187,9 @@ class Soundtrack:
             try:
                 duration, streams = probe(master if master.exists() else p)
                 if 'video' in streams:
-                    self.register(master if master.exists() else p, p, duration, master.exists())
+                    self.register(master if master.exists() else p, p, duration, master.exists(), created=p.stat().st_mtime)
                     found += 1
-            except ValueError:
+            except (ValueError, OSError):
                 continue
         return {'ok': True, 'found': found}
 
@@ -221,10 +266,10 @@ class Soundtrack:
             if not math.isfinite(volume) or not 0 <= volume <= 4:
                 raise ValueError('Music volume must be between 0 and 4.')
             self.st.assembly['running'] = True
-            threading.Thread(target=self._export, args=(source, master, cues, bed, volume), daemon=True).start()
+            threading.Thread(target=self._export, args=(source, master, cues, bed, volume, bool(body.get('use_music'))), daemon=True).start()
         return {'ok': True}
 
-    def _export(self, source, master, cues, bed, volume):
+    def _export(self, source, master, cues, bed, volume, use_music=False):
         state = self.st.assembly
         state.update(kind='soundtrack', log=['Mixing soundtrack; video will be copied without rendering.'], output=None)
         output = master.parent / f'soundtrack_{time.strftime("%Y%m%d_%H%M%S")}_{uuid.uuid4().hex[:6]}.mp4'
@@ -232,7 +277,10 @@ class Soundtrack:
             if not source['clean']:
                 state['log'].append('This older source includes its existing soundtrack; it cannot be removed automatically.')
             self.mix(master, output, cues, bed, volume, state['log'])
-            self.register(master, output, source['seconds'], bool(source['clean']))
+            build = json.loads(source.get('build_json') or '{}')
+            if build:
+                build.update(timed=True, music=use_music, volume=volume, mix=self.mix_signature(cues, bed))
+            self.register(master, output, source['seconds'], bool(source['clean']), build)
             state.update(output=self.st.rel(output), folder=self.st.rel(output.parent))
             state['log'].append('Saved new soundtrack export: ' + output.name)
         except Exception as exc:

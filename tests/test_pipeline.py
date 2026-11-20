@@ -116,7 +116,7 @@ def main():
     sh = shot(long_id)
     check(abs(sh["remaining"] - 4.94) < 0.05, "10 s shot: 4.9 s left after one clip")
 
-    post("/api/generate", {"stage": "continue", "shot_ids": [long_id], "takes": 2})
+    post("/api/generate", {"stage": "continue", "shot_ids": [long_id], "takes": 2, "use_shared_prompt": True})
     wait_jobs()
     sh = shot(long_id)
     check(len(sh["cont"]) == 1 and sh["remaining"] == 0, "Continue fills the rest of the shot")
@@ -274,7 +274,7 @@ def main():
     # Guided scene preparation uses the real dispatcher and stops before expensive animation.
     guided = post("/api/shot/save", {"scene": "Guided test", "kind": "motion", "keyframe_prompt": "Empty pier",
                                       "motion_prompt": "gentle waves", "duration": 6})["id"]
-    pid = post("/api/production/plan", {"scene": "Guided test", "priority": 4})["id"]
+    pid = post("/api/production/plan", {"scene": "Guided test", "priority": 4, "continue_shared": True})["id"]
     for _ in range(60):
         p = next(p for p in state()["production"]["plans"] if p["id"] == pid)
         if p["status"] in ("approval", "blocked"):
@@ -388,6 +388,45 @@ def main():
     response=post('/api/line/set', {'shot_id':bound,'index':0,'src':'take','take_id':old_take})
     check(response.get('ok') is False, 'a take from the previous character cannot be selected on the changed line')
     post('/api/shot/delete', {'ids':[bound]})
+
+
+    # Creative production: immutable looks, directed previews, recipe comparisons,
+    # masked repair collection and phrase retakes use the same remote queue.
+    look = post('/api/creative', {'action':'look_save','asset_id':aiko['id'],'name':'Pilot outfit','notes':'Preserve the coat'})
+    check(look.get('version') == 1, 'reference collection creates an immutable first version')
+    post('/api/creative', {'action':'look_bind','scene':shot(long_id)['scene'],'asset_id':aiko['id'],'look_id':look['id']})
+    wf = json.loads(op.open(B+'/api/workflow/keyframe').read())
+    cfg = next(k for k,n in wf.items() if isinstance(n['inputs'].get('cfg'),(int,float)))
+    recipe = post('/api/creative', {'action':'recipe_save','name':'Pilot comparison','stage':'keyframe','controls':[{'node':cfg,'field':'cfg','label':'Guidance'}]})
+    comparison = post('/api/creative', {'action':'experiment','shot_id':long_id,'recipe_id':recipe['id'],'seed':77,'vary_seed':False,'variants':[{cfg+'.cfg':3},{cfg+'.cfg':5}]})
+    check(comparison.get('queued') == 2, 'generation lab queues two controlled candidates')
+    wait_jobs()
+    runs = [r for r in state()['creative']['runs'] if r['recipe_id']==recipe['id']]
+    check(len(runs)==2 and all(r['status']=='done' and r['takes'] for r in runs), 'recipe runs collect candidates with frozen graph controls')
+    chosen = runs[0]
+    post('/api/creative', {'action':'use_result','run_id':chosen['id'],'take_id':chosen['takes'][0]['id']})
+    check(shot(long_id)['keyframe_take']==chosen['takes'][0]['id'], 'choosing a comparison applies the result and its shot recipe')
+    post('/api/creative', {'action':'direction_save','shot_id':long_id,'notes':'Eye level','camera':{'start':{'x':.5,'y':.5,'zoom':1},'end':{'x':.6,'y':.5,'zoom':1.1}}})
+    preview=post('/api/creative', {'action':'direction_preview','shot_id':long_id})
+    check(preview.get('url') and (RUN/'data'/preview['url'].removeprefix('/media/')).is_file(), 'director camera preview renders locally')
+    creative=state()['creative']; source=shot(long_id)['keyframe_take']
+    repair_recipe=next(r for r in creative['recipes'] if r['purpose']=='image_repair')
+    from PIL import Image
+    original=Image.open(RUN/'data'/next(t['path'] for t in shot(long_id)['takes'] if t['id']==source)).convert('RGB')
+    mask=Image.new('RGBA', original.size,(255,255,255,255));mask.putpixel((0,0),(255,255,255,0));buf=io.BytesIO();mask.save(buf,'PNG')
+    repair=post('/api/creative', {'action':'repair','shot_id':long_id,'take_id':source,'recipe_id':repair_recipe['id'],'source_token':creative['source_tokens'][str(source)],'prompt':'Repair one pixel','mask':b64('mask.png',buf.getvalue())})
+    check(repair.get('queued')==1, 'masked repair queues through the existing render workers')
+    wait_jobs();repair_run=next(r for r in state()['creative']['runs'] if r['job_id']==repair['job_ids'][0]);repaired=Image.open(RUN/'data'/repair_run['takes'][0]['path']).convert('RGB')
+    check(original.getpixel((10,10))==repaired.getpixel((10,10)) and shot(long_id)['keyframe_take']==source, 'repair preserves unmasked source and does not select the candidate automatically')
+    line=shot(three)['lines'][0]
+    perf=post('/api/creative', {'action':'performance','shot_id':three,'line_id':line['line_id']})
+    saved=post('/api/creative', {'action':'performance_save','shot_id':three,'line_id':line['line_id'],'token':perf['token'],'words':perf['words'],'source':'estimated','lead_in':.1,'pause_after':.4})
+    phrase=post('/api/creative', {'action':'phrase_generate','shot_id':three,'line_id':line['line_id'],'token':saved['token'],'first':0,'last':0})
+    check(phrase.get('queued')==1, 'performance editor queues a phrase using the character reference')
+    wait_jobs();candidate=next(t for t in state()['creative']['phrase_takes'] if t['job_id']==phrase['job_ids'][0])
+    before=shot(three)['lines'][0]['audio']
+    applied=post('/api/creative', {'action':'performance_apply','shot_id':three,'line_id':line['line_id'],'take_id':candidate['id'],'fit':True})
+    check(applied.get('ok') and shot(three)['lines'][0]['audio']!=before, 'phrase retake creates a selected full-line performance with explicit application')
 
 
 if __name__ == "__main__":

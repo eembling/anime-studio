@@ -29,3 +29,10 @@ test('queued priority field is preserved while typing while active renders still
  ctx.document.activeElement={closest:s=>s==='#queuequeued input'};ctx.renderQueue();
  assert.equal(elements['#queuequeued'].innerHTML,'editing priority');assert.match(elements['#queueactive'].innerHTML,/No active/);
 });
+test('active render lists exact model assets beneath its progress bar',()=>{
+ const{ctx,elements}=setup();ctx.S.render_queue.active=[{id:8,stage:'animate',shot_id:1,status:'running',estimated_progress:25,models:[{kind:'Diffusion',name:'wan_high.safetensors'},{kind:'LoRA',name:'anime.safetensors'}],models_source:'submitted'}];ctx.renderQueue();const html=elements['#queueactive'].innerHTML;assert.match(html,/Diffusion:.*wan_high.safetensors/);assert.match(html,/LoRA:.*anime.safetensors/);assert.ok(html.indexOf('queue-models')>html.indexOf('</progress>'));
+});
+test('model names are escaped and captured workflow fallback is labelled',()=>{
+ const{ctx}=setup();ctx.esc=s=>String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');const html=ctx.queueModels({status:'running',models:[{kind:'Model',name:'<script>model</script>'}],models_source:'captured'});assert.ok(!html.includes('<script>'));assert.match(html,/&lt;script&gt;/);assert.match(html,/From captured workflow/);
+});
+test('older active renders show unavailable details rather than a guessed model',()=>{const{ctx}=setup();assert.match(ctx.queueModels({status:'running',models:[],models_source:'unknown'}),/unavailable/);assert.equal(ctx.queueModels({status:'done',models:[{name:'model'}]}),'')});

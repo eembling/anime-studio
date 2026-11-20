@@ -51,7 +51,8 @@ class ShotVoiceTests(unittest.TestCase):
         self.assertEqual(job['voice_character_id'],self.pippa);self.assertEqual(job['voice_line_id'],line['line_id'])
         _,params=app.Worker(self.st).compose(job)
         self.assertEqual(params['prompt'],'These are the words.')
-        self.assertEqual(params['files']['audio'],self.st.abs(f'voices/ref-{self.pippa}.wav'))
+        self.assertNotEqual(params['files']['audio'],self.st.abs(f'voices/ref-{self.pippa}.wav'))
+        self.assertEqual(params['files']['audio'].read_bytes(),self.st.abs(f'voices/ref-{self.pippa}.wav').read_bytes())
         self.assertEqual(params['ref_text'],'Pippa reference words');self.assertEqual(params['direction'],'softly')
         self.assertEqual(self.shot()['lines'][0]['pending'],['pending','pending'])
 

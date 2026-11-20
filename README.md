@@ -9,6 +9,16 @@ The app talks to ComfyUI over its HTTP API. The core image/video workflows use n
 | ComfyUI server | character turnaround sheets, keyframes (Qwen-Image-Edit 2509 + Lightning), animation (Wan 2.2 I2V 14B + Lightning, normal, first/last-frame and continuation), optional lip sync (Wan 2.2 S2V), optional upscaling (RealESRGAN anime) |
 | Mac | script → shot list, shot board and choosing takes, temporary voices (`say`), 16 → 24 fps, assembly, music mix, Resolve export |
 
+## Documentation
+
+Start with the [documentation index](docs/README.md). The [product guide](docs/PRODUCT-GUIDE.md) covers every workspace and production workflow; the [design guide](docs/DESIGN-GUIDE.md) defines the visual system, interaction rules and accessibility targets. Developers can use the [architecture guide](docs/ARCHITECTURE.md), and maintainers can use the [setup and operations guide](docs/OPERATIONS.md).
+
+The guides describe the current 2.11 interface. Older version sections below are release history.
+
+## Creative production tools
+
+The [creative tools guide](docs/CREATIVE-TOOLS.md) covers the Reference library, per-shot Direction and Repair tools, dialogue Performance editor and Generation lab. It includes compatible ComfyUI workflow inputs, mask conventions, word-timing import and manual server setup notes.
+
 ## Repository layout
 
 | Path | What |
@@ -75,7 +85,7 @@ Add each copy under **Settings → ComfyUI servers** and tick which jobs it take
    - **Reference voice (Cast → Add or Edit).** Upload 5–15 seconds of clean speech for each character and type exactly what is said. Qwen3-TTS copies this voice.
    - **The Voices tab** lists every dialogue line in script order, grouped by scene.
      - **Generate all missing lines** (or selected lines) makes 1–4 takes per line in the speaker's voice on the ComfyUI server.
-     - Play a take with ▶ and click its number to use it. The chosen take is circled in red.
+     - Play a take with ▶ and click its number to use it. The chosen take has a selected state and check mark.
      - **Play scene** plays the chosen takes back to back, with the pause between lines.
      - An optional **delivery note** (for example "whispering" or "angry") is passed to the model as a style hint. How much it changes the delivery varies.
      - Filters: lines that need audio, all lines, or one character's lines.
@@ -234,7 +244,7 @@ Do not delete `studio.db`, create a blank replacement project, or change broad d
 
 Audio cues can follow a **shot plus an offset**, rather than an absolute episode time. Anchored cues ripple when shots move or change length. A missing anchor disables the cue until it is reassigned. Absolute cues retain their existing behavior.
 
-**Production → Delete scene clips** previews and removes animation, continuation, lip-sync and upscale takes from the selected scene. It keeps keyframes, dialogue audio and the script. **Reset scene settings** keeps scene membership, shot rows/order/kind, dialogue and the saved script; it clears generation prompts, cast links, camera/notes, duration overrides, retiming, source-in, continuity rules, selected/generated takes and shot-anchored audio cues. It returns shot duration to the project default. Both operations create a recovery checkpoint, retain underlying files for history, and reject a stale preview or a scene with queued/running renders. Existing exports remain intact. Finish/cancel jobs and preparation plans through their normal controls first.
+**Production → Scene actions → Delete scene clips** previews and removes animation, continuation, lip-sync and upscale takes from the selected scene. It keeps keyframes, dialogue audio and the script. **Reset scene settings** keeps scene membership, shot rows/order/kind, dialogue and the saved script; it clears generation prompts, cast links, camera/notes, duration overrides, retiming, source-in, continuity rules, selected/generated takes and shot-anchored audio cues. It returns shot duration to the project default. Both operations create a recovery checkpoint, retain underlying files for history, and reject a stale preview or a scene with queued/running renders. Existing exports remain intact. Finish/cancel jobs and preparation plans through their normal controls first.
 
 **Studio → History** provides undo/restore through labeled editorial checkpoints. Restoring creates another checkpoint so the change can be reversed. Daily startup checkpoints also save a standalone SQLite copy under `history/`. Deleted takes, reference clips and prior dialogue mixes retain their source media for recovery. History and archived episodes consume disk space; these controls remove items from the active edit rather than permanently purging their files. Running renders/exports and active preparation plans must finish or be cancelled before restoring. Restored preparation plans are blocked until explicitly reviewed/resumed.
 
@@ -253,17 +263,26 @@ Validation includes unit and UI behavior suites, FFmpeg checks for source trims 
 
 Script import and script revision recognize plain speaker labels (`TOBI: ...`) and Markdown labels (`**TOBI:** ...`, `**TOBI**: ...`, `__TOBI:__ ...`). Bold scene headings such as `**EXT. ROAD — DAWN**` start scenes. Script metadata and montage/sequence headings are not speakers. Italic parenthetical stage directions become delivery notes instead of spoken text. Several labeled lines in one paragraph remain separate speaker lines.
 
-For an existing project imported before this fix, open **Voices → Recover dialogue from shot prompts**. Review the checked rows and apply them to the original shots. This action adds dialogue/cast links and preserves shot IDs, scene membership, duration, picture prompts, existing dialogue and generated takes. It creates a history checkpoint and does not submit TTS jobs. New speakers need reference audio uploaded or designed in Cast before their lines can be generated. Whole-shot audio overrides are excluded from recovery.
+For an existing project imported before this fix, open **Voices → Dialogue recovery → Recover dialogue from shot prompts**. Review the checked rows and apply them to the original shots. This action adds dialogue/cast links and preserves shot IDs, scene membership, duration, picture prompts, existing dialogue and generated takes. It creates a history checkpoint and does not submit TTS jobs. New speakers need reference audio uploaded or designed in Cast before their lines can be generated. Whole-shot audio overrides are excluded from recovery.
 
 Voice jobs and new takes are bound to the speaker and line occurrence, preventing identical words from routing to another character or repeated line. A changed speaker does not inherit the previous speaker’s selected audio. Duplicate clicks do not queue more work for lines already waiting/rendering. **More takes** remains available once the current batch finishes. Legacy takes without a saved line position are still matched by speaker and text; review ambiguous repeated lines manually.
 
 
 ## Generate a character's dialogue directly from a shot
 
-In **Shots**, choose **Dialogue & character voices**. Each dialogue row has its spoken words, a **Character** selector, a delivery note and a generation button. Only character assets can provide a voice; locations are excluded. Choose a character with an uploaded or designed reference voice, then use **Save & generate this line** or **Save & generate character voices**. Changes to the words and selected character are saved in the same request before queuing. The reference recording establishes voice identity; generation synthesizes the shot's exact words rather than selecting a similar recording.
+In **Shots**, choose **Dialogue**. In Voices, **Edit dialogue** opens the same editor on that exact line. A line navigator shows the ordered dialogue; the focused editor contains **Character**, reference preview, **Spoken words**, optional **Delivery**, and compact voice takes. Use **Save dialogue**, **Generate this line**, or **Generate all lines**. Both generation actions save all entered dialogue before queuing their requested lines. Only character assets can provide a voice; locations are excluded. The reference recording establishes voice identity, while generation speaks the shot's exact words.
+
+The footer shows save state. Line navigation preserves the draft, closing guards unsaved changes, and selecting a take for one line keeps edits to other lines. See the [detailed dialogue workflow](docs/PRODUCT-GUIDE.md#6-dialogue-and-character-voices).
 
 The first new take is applied to the shot automatically, including replacement of a temporary voice, unless another take was selected while it rendered. Preview alternatives and choose **Use take** to change the shot's dialogue audio. Results update while the panel is open without replacing text being edited. In the main shot editor, **Save shot & choose character voices** saves unsaved dialogue before opening these controls. Add missing reference voices in Cast first. Replacing a whole-shot audio file requires checking the explicit switch to line voices.
 
 Character IDs and persistent per-shot line IDs bind generated takes to dialogue, so renaming a character or reordering repeated lines does not route a voice by guessing from text. Jobs capture the reference audio, reference transcript and delivery note when queued. Changed words, punctuation, character or delivery clear the selected audio but keep previous takes/files. A changed line cannot receive a stale job's audio. Multi-character shots without speaker labels require an explicit choice; no location or arbitrary first cast member is used as a voice. Legacy takes without stable IDs still use their existing speaker/text binding.
 
 **Use matching recordings** remains an explicit option for recorded dialogue. It only searches the selected character's recordings and never falls back to another character's clips. It is separate from generating a new performance. Single-character legacy shots and speaker labels such as `TOBI: ...` can prefill the character choice, which is visible and editable in the shot voice panel.
+
+
+## Version 2.11 — reliability and editing
+
+Settings is organized by task. Studio adds fitted, synchronized playback, visible picture/dialogue/music/effects tracks, waveform scrubbing, trim handles and cut-boundary previews. Continuations have independent saved prompts, boundary previews, audio coverage and captured generation inputs (issue #9). All newly queued jobs capture workflows, parameters and media; completed jobs can repeat their recorded inputs. Local speech timing, recovery drafts, reviewed storage cleanup and actionable render errors support longer editing sessions. Active renders list their submitted models beneath the progress bar. The bottom-left version badge opens source/build information.
+
+See the [product workflows](docs/PRODUCT-GUIDE.md#17-reliable-rendering-recovery-and-workspace-tools-211) and [operations guide](docs/OPERATIONS.md#local-speech-alignment-211). ComfyUI remains manually maintained; these Mac features do not update the server.

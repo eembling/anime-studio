@@ -1,5 +1,7 @@
 # Anime Studio interaction standards
 
+This is the implementation quick reference. Use the [detailed design guide](DESIGN-GUIDE.md) for tokens, component contracts, accessibility targets and acceptance criteria, and the [product guide](PRODUCT-GUIDE.md) for user workflows.
+
 Keep the existing white paper, blue selection, red destructive actions, condensed headings and quiet grid background. Use the same controls across Script, Cast, Voices, Shots, Production, Queue, Studio, Assemble and Settings.
 
 - Organize navigation by Plan, Produce and Finish, with workspace settings separate. Keep the sidebar fixed and scroll the main content independently. Preserve each page’s scroll position during refreshes and tab changes.

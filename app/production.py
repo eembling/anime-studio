@@ -30,11 +30,15 @@ class Production:
         except OSError:
             return [path, 'missing']
 
-    def signature(self, shot, stage, segment=0):
+    def signature(self, shot, stage, segment=0, recipe_override=None):
         st = self.st
         settings = st.settings()
         assets = [st.db.one('SELECT * FROM assets WHERE id=?', (i,)) for i in (json.loads(shot['asset_ids'] or '[]') if isinstance(shot['asset_ids'], str) else shot['asset_ids'])]
         common = {'stage': stage, 'workflow': st.wf_row('animate_flf' if stage == 'continue' and shot['end_next'] else 'animate' if stage == 'continue' else stage)}
+        assignment = recipe_override if recipe_override is not None else (st.creative.assignment(shot['id'], stage) if hasattr(st,'creative') else None)
+        if assignment and assignment.get('recipe_id') and not assignment.get('missing'):
+            pinned = st.creative.recipe(assignment['recipe_id'])
+            common['workflow'] = {'id':pinned['id'],'json':pinned['workflow'],'fps':pinned['fps'],'max_frames':pinned['max_frames']}
         # Metadata timestamps do not change what a workflow renders.
         if common['workflow']:
             common['workflow'] = {k: v for k, v in common['workflow'].items() if k != 'updated'}
@@ -68,9 +72,16 @@ class Production:
                 nxt = st.neighbor(shot, 1)
                 common['next'] = nxt and nxt['keyframe_take']
                 flf = st.wf_row('animate_flf')
-                common['flf_workflow'] = flf and flf['json']
+                common['flf_workflow'] = pinned['workflow'] if assignment and assignment.get('recipe_id') and not assignment.get('missing') else flf and flf['json']
             if stage == 'continue':
                 chain = st.chain(shot)
+                if hasattr(st,'sections'):
+                    common['section_direction'] = st.sections.row(shot['id'],int(segment or 0))
+                    if common['section_direction']:
+                        common['motion']=common['section_direction']['prompt']
+                        common['camera']=common['section_direction']['camera'] or shot['camera']
+                        common['duration']=None
+                    common['source_stamps'] = [self.file_stamp(t['path']) for t in chain[:int(segment or 0)+1]]
                 common['previous_parts'] = [t['id'] for t in chain[:int(segment or 0) + 1]]
                 if shot['end_next']:
                     nxt = st.neighbor(shot, 1)
@@ -79,6 +90,8 @@ class Production:
                 common['clips'] = [t['id'] for t in st.chain(shot)]
             if stage == 'lipsync':
                 common['audio'] = self.file_stamp(shot['audio'])
+        creative = st.creative.signature_data(shot, stage, recipe_override) if hasattr(st, 'creative') else None
+        if creative: common['creative'] = creative
         return digest(common)
 
     def capture(self, job):
@@ -90,6 +103,8 @@ class Production:
                          (job['id'], self.signature(shot, job['stage'], job.get('segment'))))
 
     def provenance(self, take, shot):
+        if take['stage']=='continue' and hasattr(self.st,'sections') and self.st.sections.needs_review(take['id']):
+            return 'outdated'
         row = {'signature': take.get('input_signature')} if take.get('input_signature') else None
         if not row:
             return 'unknown'
@@ -200,7 +215,7 @@ class Production:
                 raise RuntimeError('Choose a scene containing shots.')
             if self.st.db.one("SELECT id FROM production_plans WHERE scene=? AND status IN ('active','blocked','approval')", (scene,)):
                 raise RuntimeError('This scene already has a production plan.')
-            options = {'lipsync': bool(body.get('lipsync')), 'upscale': bool(body.get('upscale'))}
+            options = {'lipsync': bool(body.get('lipsync')), 'upscale': bool(body.get('upscale')), 'continue_shared':bool(body.get('continue_shared'))}
             pid = self.st.db.x("INSERT INTO production_plans(scene,status,phase,detail,priority,options) VALUES(?,'active','voices','',?,?)", (scene, max(-10, min(10, int(body.get('priority', 0)))), json.dumps(options)))
             return {'ok': True, 'id': pid}
 
@@ -234,6 +249,10 @@ class Production:
                 if j['stage'] in ('animate', 'continue', 'lipsync', 'upscale'):
                     t = db.one('SELECT id FROM takes WHERE job_id=? ORDER BY id LIMIT 1', (j['id'],))
                     if t:
+                        full=db.one('SELECT * FROM takes WHERE id=?',(t['id'],))
+                        shot=db.one('SELECT * FROM shots WHERE id=?',(j['shot_id'],))
+                        if j['stage']=='continue' and self.provenance(full,shot)=='outdated':
+                            db.x("UPDATE production_plans SET status='blocked',jobs='[]',detail='Continuation inputs changed during generation. Review section direction and resume.' WHERE id=?",(p['id'],));return
                         api.approve({'take_id': t['id']})
             db.x("UPDATE production_plans SET jobs='[]' WHERE id=?", (p['id'],))
             shots = [s for s in api.state()['shots'] if s['scene'] == p['scene']]
@@ -261,11 +280,7 @@ class Production:
                     if not s['clip_take'] or 'animate' in s['outdated']:
                         tasks.append(('animate', s['id']))
                     elif (s['remaining'] and s['remaining'] > .1) or 'continue' in s['outdated']:
-
-                        if 'continue' in s['outdated']:
-                            tasks.append(('animate', s['id']))
-                        else:
-                            tasks.append(('continue', s['id']))
+                        tasks.append(('continue', s['id']))
                 following = 'animation' if tasks else 'lipsync'
             elif phase in ('lipsync', 'upscale'):
                 opts = json.loads(p['options'])
@@ -279,13 +294,21 @@ class Production:
             jobs = []
             for stage, sid in tasks:
                 before = db.one('SELECT COALESCE(MAX(id),0) n FROM jobs')['n']
-                result = api.generate({'stage': stage, 'shot_ids': [sid], 'takes': 2 if stage == 'keyframe' else 1, 'replace': True})
+                request={'stage': stage, 'shot_ids': [sid], 'takes': 2 if stage == 'keyframe' else 1, 'replace': True}
+                if stage=='continue':
+                    shot=next(s for s in shots if s['id']==sid)
+                    if shot['continuation']['coverage']['needs_extension']:
+                        db.x("UPDATE production_plans SET status='blocked',detail=? WHERE id=?",('Shot '+str(sid)+': extend the shot to fit dialogue before continuing.',p['id']));return
+                    stale=next((t for t in self.st.chain(shot)[1:] if self.provenance(t,shot)=='outdated'),None)
+                    if stale:request['segment']=stale['segment']
+                    request['use_shared_prompt']=json.loads(p['options']).get('continue_shared',False)
+                result = api.generate(request)
                 new = [j['id'] for j in db.q('SELECT id FROM jobs WHERE id>? AND shot_id=? AND stage=?', (before, sid, stage))]
                 for jid in new:
                     db.x('UPDATE jobs SET priority=? WHERE id=?', (p['priority'], jid))
                 jobs.extend(new)
                 if not new or result.get('ok') is False:
-                    db.x("UPDATE production_plans SET status='blocked',detail=?,jobs=? WHERE id=?", ('Cannot prepare shot: ' + ' '.join(result.get('skipped', [])), json.dumps(jobs), p['id'])); return
+                    db.x("UPDATE production_plans SET status='blocked',detail=?,jobs=? WHERE id=?", ('Cannot prepare shot: ' + (result.get('error') or ' '.join(result.get('skipped', []))), json.dumps(jobs), p['id'])); return
             db.x('UPDATE production_plans SET phase=?,jobs=?,detail=? WHERE id=?',
                  (following, json.dumps(jobs), 'Waiting for ' + phase if jobs else '', p['id']))
 
