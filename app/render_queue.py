@@ -1,7 +1,58 @@
 """Render queue grouping and clearly labelled estimates from successful job history."""
 import math
+import json
 import statistics
 import time
+
+
+def workflow_models(workflow):
+    """Model assets referenced by the submitted graph, not a guess from the stage."""
+    result=[];seen=set()
+    if not isinstance(workflow,dict):return result
+    fields={'unet_name':'Diffusion','ckpt_name':'Checkpoint','checkpoint_name':'Checkpoint',
+            'clip_name':'Text encoder','clip_name1':'Text encoder','clip_name2':'Text encoder','clip_name3':'Text encoder',
+            'vae_name':'VAE','lora_name':'LoRA','audio_encoder_name':'Audio encoder',
+            'model_name':'Model','model_choice':'Model','model_id':'Model','model_path':'Model'}
+    for node in workflow.values():
+        if not isinstance(node,dict):continue
+        cls=str(node.get('class_type',''));inputs=node.get('inputs') or {}
+        if not isinstance(inputs,dict):continue
+        for field,kind in fields.items():
+            name=inputs.get(field)
+            if not isinstance(name,str) or not name.strip() or name.lower() in ('none','auto','default'):continue
+            if field=='model_choice' and 'Qwen3TTS' in cls:
+                kind='Voice model';name='Qwen3-TTS '+('Voice Design' if 'Design' in cls else 'Voice Clone')+' · '+name
+            elif field=='model_name' and 'Upscale' in cls:kind='Upscaler'
+            key=(kind,name)
+            if key not in seen:result.append({'kind':kind,'name':name});seen.add(key)
+    return result
+
+
+def models_for_job(job):
+    """Prefer the accepted graph; a frozen recipe is a safe older-job fallback."""
+    try:
+        if job.get('models_json') is not None:return json.loads(job['models_json']), 'submitted'
+        if job.get('snapshot_json'):
+            from anime_studio import build_workflow
+            meta=json.loads(job['snapshot_json']);graph=build_workflow(meta['workflow'],meta['key'],meta['params'])
+            for key,value in meta.get('controls',{}).items():
+                node,field=key.split('.',1);graph[node]['inputs'][field]=value
+            return workflow_models(graph),'captured'
+        if job.get('creative_json'):
+            from anime_studio import build_workflow
+            meta=json.loads(job['creative_json']);recipe=meta['recipe']
+            graph=build_workflow(recipe['workflow'],meta['key'],meta['params'])
+            for key,value in meta.get('values',{}).items():
+                node,field=key.split('.',1);graph[node]['inputs'][field]=value
+            return workflow_models(graph),'captured'
+    except (ValueError,KeyError,TypeError):pass
+    return [],'unknown'
+
+
+def prompt_graph(entry, prompt_id):
+    # ComfyUI queue entries and history.prompt share this representation.
+    if isinstance(entry,(list,tuple)) and len(entry)>2 and entry[1]==prompt_id and isinstance(entry[2],dict):return entry[2]
+    return None
 
 
 def remember_timings(db):
@@ -42,6 +93,9 @@ def queue_snapshot(jobs, history, instances, health=None, readiness=None, now=No
         result = dict(job, estimated_progress=None, estimated_start_seconds=None, estimated_finish_seconds=None,
                       remaining_seconds=None, typical_seconds=None, sample_count=0, elapsed_seconds=None, overdue=False,
                       estimated_server_id=None, wait_reason='')
+        result['models'],result['models_source']=models_for_job(job)
+        from render_diagnostics import diagnose
+        result['diagnostic']=diagnose(job) if job['status']=='error' else None
         if job.get('started') and job['status'] != 'pending':
             result['elapsed_seconds'] = max(0, round((job.get('finished') or now) - job['started']))
         return result
@@ -75,7 +129,7 @@ def queue_snapshot(jobs, history, instances, health=None, readiness=None, now=No
             if job['stage'] not in server.get('roles', '').split(',') or health.get(sid, {}).get('ok') is False:
                 continue
             checked = readiness.get(sid)
-            if checked is not None and (not checked.get(job['stage'], {}).get('ready') or (job.get('requires_flf') and not checked.get('animate_flf', {}).get('ready'))):
+            if not job.get('snapshot_json') and checked is not None and (not checked.get(job['stage'], {}).get('ready') or (job.get('requires_flf') and not checked.get('animate_flf', {}).get('ready'))):
                 continue
             eligible.append(sid)
         if not eligible:

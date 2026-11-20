@@ -116,7 +116,7 @@ def main():
     sh = shot(long_id)
     check(abs(sh["remaining"] - 4.94) < 0.05, "10 s shot: 4.9 s left after one clip")
 
-    post("/api/generate", {"stage": "continue", "shot_ids": [long_id], "takes": 2})
+    post("/api/generate", {"stage": "continue", "shot_ids": [long_id], "takes": 2, "use_shared_prompt": True})
     wait_jobs()
     sh = shot(long_id)
     check(len(sh["cont"]) == 1 and sh["remaining"] == 0, "Continue fills the rest of the shot")
@@ -274,7 +274,7 @@ def main():
     # Guided scene preparation uses the real dispatcher and stops before expensive animation.
     guided = post("/api/shot/save", {"scene": "Guided test", "kind": "motion", "keyframe_prompt": "Empty pier",
                                       "motion_prompt": "gentle waves", "duration": 6})["id"]
-    pid = post("/api/production/plan", {"scene": "Guided test", "priority": 4})["id"]
+    pid = post("/api/production/plan", {"scene": "Guided test", "priority": 4, "continue_shared": True})["id"]
     for _ in range(60):
         p = next(p for p in state()["production"]["plans"] if p["id"] == pid)
         if p["status"] in ("approval", "blocked"):

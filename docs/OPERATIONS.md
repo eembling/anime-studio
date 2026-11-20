@@ -296,3 +296,14 @@ For a documentation-only edit, check links, headings, examples, source reference
 For UI changes, use isolated sample data and test wide/narrow layouts, keyboard focus, scroll preservation, asynchronous result updates and error retention. HTML changes require restarting the preview backend; reload the page after source changes. Native WebKit and hardware/GPU output remain separate acceptance checks.
 
 After a native build, verify both plist version fields against `VERSION`, executable permissions and copied resources. New Python/JavaScript modules must be added to the explicit copy list. Do not commit bundles, project databases, generated media, logs, test fixture outputs, distribution archives or personal skill files.
+
+
+## Local speech alignment (2.11)
+
+The optional engine uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper) for CPU word timestamps, then matches recognized characters to the saved script and exposes mismatches/confidence. Runtime audio decoding is normalized through the app’s existing FFmpeg dependency. The setup pins faster-whisper 1.2.1 and a compatible PyAV range rather than relying on an untested decoder update.
+
+Use Settings → Tools & storage → Set up local alignment. The environment, downloaded base model, readiness marker and setup log live under `~/Library/Application Support/AnimeStudio/Alignment/`. Setup needs network access for packages/model files; recognition uses cached local files and never uploads project audio. A source-checkout installation can also run `bash mac/install_alignment.sh`; the script writes the readiness marker only after the model loads. If setup fails, inspect `setup.log` and use Repair alignment setup. Speech jobs interrupted by restart are marked for rerun. App shutdown terminates owned local alignment/setup processes without cancelling ComfyUI renders.
+
+Validate with a short clean recorded line, inspect the recognized words and listen before saving suggestions. Model recognition quality varies with language, names, background music and delivery. Low-confidence or mismatched words require correction/import rather than silent acceptance.
+
+The Settings storage manager is a project-scoped inventory. Moving candidates into its trash does not free disk space. Permanent deletion is a separate reviewed action and blocks referenced media/history/exports. Restore trash before restoring a checkpoint that newly references moved media.

@@ -13,7 +13,7 @@ The app talks to ComfyUI over its HTTP API. The core image/video workflows use n
 
 Start with the [documentation index](docs/README.md). The [product guide](docs/PRODUCT-GUIDE.md) covers every workspace and production workflow; the [design guide](docs/DESIGN-GUIDE.md) defines the visual system, interaction rules and accessibility targets. Developers can use the [architecture guide](docs/ARCHITECTURE.md), and maintainers can use the [setup and operations guide](docs/OPERATIONS.md).
 
-The guides describe the current 2.10 interface. Older version sections below are release history.
+The guides describe the current 2.11 interface. Older version sections below are release history.
 
 ## Creative production tools
 
@@ -279,3 +279,10 @@ The first new take is applied to the shot automatically, including replacement o
 Character IDs and persistent per-shot line IDs bind generated takes to dialogue, so renaming a character or reordering repeated lines does not route a voice by guessing from text. Jobs capture the reference audio, reference transcript and delivery note when queued. Changed words, punctuation, character or delivery clear the selected audio but keep previous takes/files. A changed line cannot receive a stale job's audio. Multi-character shots without speaker labels require an explicit choice; no location or arbitrary first cast member is used as a voice. Legacy takes without stable IDs still use their existing speaker/text binding.
 
 **Use matching recordings** remains an explicit option for recorded dialogue. It only searches the selected character's recordings and never falls back to another character's clips. It is separate from generating a new performance. Single-character legacy shots and speaker labels such as `TOBI: ...` can prefill the character choice, which is visible and editable in the shot voice panel.
+
+
+## Version 2.11 — reliability and editing
+
+Settings is organized by task. Studio adds fitted, synchronized playback, visible picture/dialogue/music/effects tracks, waveform scrubbing, trim handles and cut-boundary previews. Continuations have independent saved prompts, boundary previews, audio coverage and captured generation inputs (issue #9). All newly queued jobs capture workflows, parameters and media; completed jobs can repeat their recorded inputs. Local speech timing, recovery drafts, reviewed storage cleanup and actionable render errors support longer editing sessions. Active renders list their submitted models beneath the progress bar. The bottom-left version badge opens source/build information.
+
+See the [product workflows](docs/PRODUCT-GUIDE.md#17-reliable-rendering-recovery-and-workspace-tools-211) and [operations guide](docs/OPERATIONS.md#local-speech-alignment-211). ComfyUI remains manually maintained; these Mac features do not update the server.

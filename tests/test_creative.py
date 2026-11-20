@@ -265,7 +265,7 @@ class CreativeTests(unittest.TestCase):
     def test_missing_recipe_from_an_old_episode_does_not_break_state(self):
         recipe=self.recipe();self.assign(recipe)
         self.st.db.x('DELETE FROM generation_recipes WHERE id=?',(recipe['id'],))
-        self.assertEqual(self.api.state()['version'],'2.10')
+        self.assertEqual(self.api.state()['version'],app.VERSION)
         with self.assertRaisesRegex(ValueError,'not found'):self.api.generate({'stage':'keyframe','shot_ids':[self.sid]})
 
     @unittest.skipUnless(shutil.which('ffmpeg'),'FFmpeg required')

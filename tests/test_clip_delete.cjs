@@ -23,7 +23,7 @@ test('busy control cannot queue duplicate deletion',async()=>{const{ctx,calls,bu
 test('deleting a playing preview pauses it so the board can refresh',async()=>{const{ctx,button}=setup();let paused=0;ctx.$=selector=>{assert.equal(selector,'#cut-1 video');return{pause:()=>paused++}};await ctx.deleteClip(1,21,button);assert.equal(paused,1)});
 test('shot cards render delete controls for every video stage and the preview',()=>{
  const{ctx,shot}=setup();let markup='';Object.assign(shot,{active:{},outdated:[],asset_ids:[],lines:[],kind:'motion',duration:7,covered:7});
- Object.assign(ctx,{FILTER:'all',sel:new Set(),prevApproved:{},same:()=>false,counts:()=>({}),stripHTML:()=>'',matches:()=>true,esc:x=>x||'',wfOK:()=>true,take:id=>shot.takes.find(t=>t.id===id),updateShotCards:html=>markup=html,document:{querySelectorAll:()=>[]},$:()=>({})});ctx.S.assets=[];ctx.S.settings={};
+ Object.assign(ctx,{continuationCard:()=>'',FILTER:'all',sel:new Set(),prevApproved:{},same:()=>false,counts:()=>({}),stripHTML:()=>'',matches:()=>true,esc:x=>x||'',wfOK:()=>true,take:id=>shot.takes.find(t=>t.id===id),updateShotCards:html=>markup=html,document:{querySelectorAll:()=>[]},$:()=>({})});ctx.S.assets=[];ctx.S.settings={};
  vm.runInContext(html.slice(html.indexOf('function renderShotsContent(){'),html.indexOf('function view(sid,tid)')),ctx);ctx.renderShotsContent();
  for(const id of [20,21,30,31,32,40,41])assert.ok(markup.includes(`deleteClip(1,${id},this)`),`Missing delete control for ${id}`);
  assert.match(markup,/Delete previewed clip from shot 003/);assert.ok(!markup.includes('deleteClip(1,10,this)'));

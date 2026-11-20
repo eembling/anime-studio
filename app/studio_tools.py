@@ -13,7 +13,7 @@ from pathlib import Path
 EDITORIAL = ('settings', 'shots', 'assets', 'takes', 'voice_takes', 'voice_clips',
              'audio_cues', 'episode_audio_exports', 'production_approvals', 'production_plans', 'continuity',
              'asset_looks', 'scene_looks', 'continuity_reviews', 'shot_direction', 'generation_recipes',
-             'shot_recipes', 'character_pronunciations', 'line_performances', 'performance_takes', 'creative_runs')
+             'shot_recipes', 'character_pronunciations', 'line_performances', 'performance_takes', 'creative_runs', 'shot_sections', 'section_takes')
 SHARED = {'assets', 'voice_clips', 'asset_looks', 'generation_recipes', 'character_pronunciations'}
 
 
@@ -85,7 +85,7 @@ class StudioTools:
         snapshot = dict(snapshot) if isinstance(snapshot, dict) else snapshot
         if not isinstance(snapshot, dict) or 'shots' not in snapshot or 'settings' not in snapshot:
             raise ValueError('Invalid project checkpoint')
-        for table in ('scene_looks','continuity_reviews','shot_direction','shot_recipes','line_performances','performance_takes','creative_runs'):
+        for table in ('scene_looks','continuity_reviews','shot_direction','shot_recipes','line_performances','performance_takes','creative_runs','shot_sections','section_takes'):
             snapshot.setdefault(table, [])
         if 'assets' in snapshot:
             for table in ('asset_looks','character_pronunciations'):
@@ -200,11 +200,12 @@ class StudioTools:
                     if payload['mode'] == 'reset':
                         # Preserve the script, scene membership, shot order and shot kind.
                         db.conn.execute("UPDATE shots SET keyframe_take=NULL, asset_ids='[]', keyframe_prompt='', motion_prompt='', camera='', notes='', duration=?, retime='hold', ref_prev=0, end_next=0, audio=NULL, audio_mode='lines', line_audio='[]', trim_in=0 WHERE id=?", (self.st.default_duration(), sid))
-                        for table in ('shot_direction', 'shot_recipes', 'line_performances', 'performance_takes', 'continuity_reviews', 'creative_runs'):
+                        for table in ('shot_direction', 'shot_recipes', 'line_performances', 'performance_takes', 'continuity_reviews', 'creative_runs', 'shot_sections'):
                             db.conn.execute('DELETE FROM '+table+' WHERE shot_id=?', (sid,))
                         db.conn.execute('DELETE FROM voice_takes WHERE shot_id=?', (sid,))
                         db.conn.execute('DELETE FROM audio_cues WHERE anchor_shot=?', (sid,))
                     db.conn.execute('DELETE FROM production_approvals WHERE shot_id=?', (sid,))
+                db.conn.executemany('DELETE FROM section_takes WHERE take_id=?', [(t['id'],) for t in payload['takes']])
                 db.conn.executemany('DELETE FROM takes WHERE id=?', [(t['id'],) for t in payload['takes']])
                 db.conn.execute("UPDATE production_plans SET status='cancelled', detail='Scene cleared by editor' WHERE scene=?", (payload['scene'],))
                 if payload['mode'] == 'reset':

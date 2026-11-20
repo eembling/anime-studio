@@ -503,7 +503,7 @@ class CreativeStudio:
 
     def freeze(self, job, recipe, values, key, params, **extras):
         p = copy.deepcopy(params)
-        if recipe['stage'] == 'animate' and extras.get('kind') != 'repair_video':
+        if recipe['stage'] == 'animate' and extras.get('kind') not in ('repair_video','continuation'):
             wants_end = any(n.get('_meta', {}).get('title', '').upper() == 'END_IMAGE' for n in recipe['workflow'].values())
             if wants_end and not p['files'].get('end'):
                 nxt = self.st.neighbor(self.shot(job['shot_id']), 1)
@@ -514,7 +514,7 @@ class CreativeStudio:
                 raise ValueError('End-on-next requires a recipe with an END_IMAGE input.')
             key = 'animate_flf' if wants_end else 'animate'
         p['files'] = {slot: self.st.rel(path) for slot, path in p['files'].items()}
-        if recipe['stage'] in ('animate', 'lipsync') and p.get('length'):
+        if recipe['stage'] in ('animate', 'lipsync') and p.get('length') and extras.get('kind') != 'continuation':
             shot = self.shot(job['shot_id'])
             requested = extras['span']['end']-extras['span']['start'] if extras.get('span') else float(shot['duration'])
             seconds = min(requested, (int(recipe['max_frames'])-1)/float(recipe['fps']))
@@ -845,7 +845,7 @@ class CreativeStudio:
                 raise ValueError('Word ranges must be positive, ordered and non-overlapping.')
             clean.append({'text': w['text'], 'start': a, 'end': b}); last = b
         source = body.get('source', 'edited')
-        if source not in ('edited', 'imported', 'estimated'): raise ValueError('Invalid alignment source.')
+        if source not in ('edited', 'imported', 'estimated','speech'): raise ValueError('Invalid alignment source.')
         data = {'identity': self.identity(line), 'base_audio': line['audio'], 'words': clean, 'source': source,
                 'lead_in': number(body.get('lead_in', 0), 0, 30), 'pause_after': number(body.get('pause_after', .3), 0, 30)}
         terms = self.pronunciation_terms(line['character_id'], body['terms']) if line['character_id'] and 'terms' in body else None
@@ -1002,7 +1002,7 @@ class CreativeStudio:
     def split_controls(self, shot, new_id, fraction):
         """Called inside the timeline transaction; retain per-shot tools on both halves."""
         db = self.st.db
-        for table in ('shot_recipes','line_performances'):
+        for table in ('shot_recipes','line_performances','shot_sections'):
             for row in db.q('SELECT * FROM '+table+' WHERE shot_id=?',(shot['id'],)):
                 row['shot_id'] = new_id
                 columns = list(row)

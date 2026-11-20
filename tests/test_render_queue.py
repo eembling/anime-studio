@@ -93,4 +93,48 @@ class QueueTests(unittest.TestCase):
                 st.db.conn.close()
 
 
+
+class ModelDisplayTests(unittest.TestCase):
+    def test_extracts_model_assets_and_deduplicates_without_including_prompts(self):
+        from render_queue import workflow_models
+        graph={'1':{'class_type':'UNETLoader','inputs':{'unet_name':'wan2.2_high.safetensors'}},
+               '2':{'class_type':'UNETLoader','inputs':{'unet_name':'wan2.2_low.safetensors'}},
+               '3':{'class_type':'LoraLoader','inputs':{'lora_name':'anime.safetensors'}},
+               '4':{'class_type':'LoraLoader','inputs':{'lora_name':'anime.safetensors'}},
+               '5':{'class_type':'CLIPLoader','inputs':{'clip_name':'umt5.safetensors'}},
+               '6':{'class_type':'CLIPTextEncode','inputs':{'text':'secret dialogue','clip':['5',0]}},
+               '7':{'class_type':'LoadImage','inputs':{'image':'reference.png'}},
+               '8':{'class_type':'VAELoader','inputs':{'vae_name':'wan_vae.safetensors'}}}
+        models=workflow_models(graph)
+        self.assertEqual([m['name'] for m in models],['wan2.2_high.safetensors','wan2.2_low.safetensors','anime.safetensors','umt5.safetensors','wan_vae.safetensors'])
+        self.assertEqual(models[2]['kind'],'LoRA')
+    def test_voice_and_upscale_models_have_useful_names(self):
+        from render_queue import workflow_models
+        models=workflow_models({'1':{'class_type':'FB_Qwen3TTSVoiceClone','inputs':{'model_choice':'1.7B'}},'2':{'class_type':'UpscaleModelLoader','inputs':{'model_name':'RealESRGAN.pth'}}})
+        self.assertEqual(models,[{'kind':'Voice model','name':'Qwen3-TTS Voice Clone · 1.7B'},{'kind':'Upscaler','name':'RealESRGAN.pth'}])
+    def test_submitted_snapshot_wins_over_later_workflow_edits(self):
+        from render_queue import models_for_job
+        import json
+        expected=[{'kind':'Diffusion','name':'original.safetensors'}]
+        models,source=models_for_job({'models_json':json.dumps(expected),'creative_json':json.dumps({'recipe':{'workflow':{}}})})
+        self.assertEqual(models,expected);self.assertEqual(source,'submitted')
+    def test_old_job_uses_frozen_recipe_controls_instead_of_current_settings(self):
+        from render_queue import models_for_job
+        import json
+        meta={'recipe':{'workflow':{'1':{'class_type':'UNETLoader','inputs':{'unet_name':'base.safetensors'}}}},'key':'animate','params':{'prefix':'test','images':{}},'values':{'1.unet_name':'chosen.safetensors'}}
+        models,source=models_for_job({'creative_json':json.dumps(meta)})
+        self.assertEqual(source,'captured');self.assertEqual(models[0]['name'],'chosen.safetensors')
+    def test_legacy_job_does_not_guess_from_current_global_workflow(self):
+        from render_queue import models_for_job
+        self.assertEqual(models_for_job({'stage':'animate'}),([],'unknown'))
+    def test_queue_and_history_graphs_must_match_the_remote_prompt_id(self):
+        from render_queue import prompt_graph
+        graph={'1':{'class_type':'UNETLoader','inputs':{'unet_name':'wan.safetensors'}}}
+        self.assertEqual(prompt_graph([1,'remote',graph,{}],'remote'),graph)
+        self.assertIsNone(prompt_graph([1,'different',graph,{}],'remote'))
+    def test_queue_snapshot_exposes_models_for_the_exact_active_job(self):
+        import json
+        q=queue_snapshot([job(10,'running',models_json=json.dumps([{'kind':'Checkpoint','name':'qwen.safetensors'}]))],[],[],now=100)
+        self.assertEqual(q['active'][0]['models'][0]['name'],'qwen.safetensors');self.assertEqual(q['active'][0]['models_source'],'submitted')
+
 if __name__=='__main__': unittest.main()

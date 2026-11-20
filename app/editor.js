@@ -1,5 +1,5 @@
 /* Episode editing, scene cleanup, recovery, series library and delivery. */
-let EDIT_TIME=0,EDIT_PLAYING=false,EDIT_CLOCK=0,EDIT_TIMER=null,EDIT_DRAG=null,EDIT_MEDIA_KEY='',EDIT_AUDIOS=new Map();
+let EDIT_TIME=0,EDIT_PLAYING=false,EDIT_CLOCK=0,EDIT_TIMER=null,EDIT_DRAG=null,EDIT_MEDIA_KEY='',EDIT_AUDIOS=new Map(),EDIT_DURATIONS=new Map(),EDIT_WAITING=false;
 const editorPost=(tool,data={})=>post('/api/editor',{tool,...data});
 const shotAt=time=>{let start=0;for(const shot of S.shots){if(time<start+shot.duration)return{shot,start};start+=shot.duration}return null};
 function renderStudio(){
@@ -9,7 +9,8 @@ function renderStudio(){
  if(!same('editor-timeline',[S.shots.map(s=>[s.id,s.seq,s.duration,s.trim_in,s.keyframe_take,s.clip_take,s.final_take]),S.audio_cues])){
   const total=S.shots.reduce((n,s)=>n+s.duration,0);$('#edit-playhead').max=total;$('#edit-playhead').step=1/(+S.settings.out_fps||24);
   let start=0;$('#edit-track').innerHTML=S.shots.map(s=>{const at=start;start+=s.duration;return `<button class="timeline-shot btn" draggable="true" data-shot="${s.id}" style="flex:0 0 ${Math.max(85,s.duration*18)}px" onclick="seekEdit(${at})"><b>Shot ${pad(s.seq)}</b><span>${esc(s.scene)}</span><small>${audioTime(s.duration)}</small></button>`}).join('');
-  for(const node of document.querySelectorAll('[data-shot]')){node.ondragstart=e=>{EDIT_DRAG=+node.dataset.shot;e.dataTransfer.setData('text/plain',node.dataset.shot)};node.ondragover=e=>e.preventDefault();node.ondrop=e=>{e.preventDefault();const target=+node.dataset.shot;if(!EDIT_DRAG||target===EDIT_DRAG)return;const ids=S.shots.map(s=>s.id).filter(id=>id!==EDIT_DRAG);ids.splice(ids.indexOf(target),0,EDIT_DRAG);editorPost('timeline',{action:'reorder',ids});EDIT_DRAG=null}}
+  if(typeof renderTimelineTracks==='function')renderTimelineTracks();
+  for(const node of document.querySelectorAll('[data-shot]')){node.ondragstart=e=>{if(e.target.closest?.('[data-trim]')){e.preventDefault();return}EDIT_DRAG=+node.dataset.shot;e.dataTransfer.setData('text/plain',node.dataset.shot)};node.ondragover=e=>e.preventDefault();node.ondrop=e=>{e.preventDefault();const target=+node.dataset.shot;if(!EDIT_DRAG||target===EDIT_DRAG)return;const ids=S.shots.map(s=>s.id).filter(id=>id!==EDIT_DRAG);ids.splice(ids.indexOf(target),0,EDIT_DRAG);editorPost('timeline',{action:'reorder',ids});EDIT_DRAG=null}}
   $('#edit-cues').innerHTML=(S.audio_cues||[]).map(c=>`<button class="btn sm" onclick="seekEdit(${c.start});editAudioCue(${c.id})">${esc(c.name)} · ${audioTime(c.start)}${c.anchor_shot?' · follows shot':''}${c.anchor_missing?' · anchor missing':''}</button>`).join('');
  }
  $('#edit-state').textContent=`${audioTime(EDIT_TIME)} / ${audioTime(S.shots.reduce((n,s)=>n+s.duration,0))}`;
@@ -17,21 +18,79 @@ function renderStudio(){
 function stopEdit(){EDIT_PLAYING=false;clearInterval(EDIT_TIMER);EDIT_TIMER=null;const v=$('#edit-monitor video');if(v)v.pause();for(const a of EDIT_AUDIOS.values())a.pause();$('#edit-play').textContent='Play episode'}
 function seekEdit(value){EDIT_TIME=Math.max(0,Math.min(+value,S.shots.reduce((n,s)=>n+s.duration,0)));EDIT_CLOCK=performance.now();updateEdit(true)}
 function frameEdit(direction){stopEdit();seekEdit(EDIT_TIME+direction/(+S.settings.out_fps||24))}
-function playEdit(){if(EDIT_PLAYING)return stopEdit();EDIT_PLAYING=true;EDIT_CLOCK=performance.now();$('#edit-play').textContent='Pause';EDIT_TIMER=setInterval(()=>{const now=performance.now();EDIT_TIME+=(now-EDIT_CLOCK)/1000;EDIT_CLOCK=now;if(EDIT_TIME>=S.shots.reduce((n,s)=>n+s.duration,0))return stopEdit();updateEdit(false)},60);updateEdit(true)}
+function playEdit(){
+ if(EDIT_PLAYING)return stopEdit();
+ const total=S.shots.reduce((n,s)=>n+s.duration,0);if(!total)return;
+ if(EDIT_TIME>=total)seekEdit(0);
+ EDIT_PLAYING=true;EDIT_CLOCK=performance.now();$('#edit-play').textContent='Pause';updateEdit(true);
+ EDIT_TIMER=setInterval(tickEdit,30);
+}
+function tickEdit(){
+ const now=performance.now(),elapsed=(now-EDIT_CLOCK)/1000;EDIT_CLOCK=now;
+ if(!EDIT_WAITING)EDIT_TIME+=elapsed;
+ const total=S.shots.reduce((n,s)=>n+s.duration,0);
+ if(EDIT_TIME>=total){EDIT_TIME=total;stopEdit();$('#edit-playhead').value=total;$('#edit-state').textContent=audioTime(total);return}
+ updateEdit(false);
+}
+function editSourceAt(s,source){
+ const root=take(s.final_take)||take(s.clip_take);if(!root)return{selected:null,offset:source};
+ const chain=root.stage==='upscale'?[root]:[root,...(s.cont||[]).map(take).filter(Boolean)];let offset=source;
+ for(let i=0;i<chain.length;i++){
+  const t=chain[i],duration=EDIT_DURATIONS.get(t.url)||(t.frames&&t.fps?t.frames/t.fps:5);
+  // Continuations repeat the source's final frame. Browser duration is authoritative
+  // once loaded; output fps only controls frame stepping, never playback speed.
+  const frame=t.frames?duration/t.frames:1/(+t.fps||16),skip=i?frame:0,length=Math.max(0,duration-skip);
+  if(offset<length||i===chain.length-1)return{selected:t,offset:Math.max(0,offset+skip)};
+  offset-=length;
+ }
+}
+function syncEditMedia(media,time,force,video=false){
+ if(!media.readyState)return false;
+ const duration=media.duration,finite=Number.isFinite(duration),ended=finite&&(time>=duration||(media.ended&&time>=duration-.08));
+ const target=Math.max(0,finite?Math.min(time,Math.max(0,duration-(video ? .001 : 0))):time);
+ media.playbackRate=1;
+ if(force||Math.abs(media.currentTime-target)>.08)media.currentTime=target;
+ media._editHold=ended;
+ return ended||(!media.seeking&&media.readyState>=3);
+}
+function runEditMedia(media,playing){
+ if(!playing||media._editHold){media.pause();return}
+ if(media.paused&&!media._editStarting){
+  media._editStarting=true;
+  media.play().catch(error=>{if(error?.name!=='AbortError'&&EDIT_PLAYING){stopEdit();toast('Playback could not start. Try Play episode again.',true)}}).finally(()=>media._editStarting=false);
+ }
+}
 function updateEdit(force){
- const item=shotAt(EDIT_TIME);if(!item)return;const s=item.shot,local=EDIT_TIME-item.start,source=local+(s.trim_in||0);
- const root=take(s.final_take)||take(s.clip_take);let selected=root,offset=source;
- if(root&&root.stage!=='upscale'){const chain=[root,...(s.cont||[]).map(take).filter(Boolean)];for(let i=0;i<chain.length;i++){const t=chain[i],fps=t.fps||16,length=t.frames?Math.max(0,t.frames-(i?1:0))/fps:5;selected=t;if(offset<length||i===chain.length-1){offset=Math.min(offset,length-.02)+(i?1/fps:0);break}offset-=length}}
+ const item=shotAt(EDIT_TIME);if(!item){stopEdit();return}const s=item.shot,local=EDIT_TIME-item.start,source=local+(s.trim_in||0);
+ const {selected,offset}=editSourceAt(s,source);
  const image=!selected||s.kind==='still'&&!['lipsync','upscale'].includes(selected.stage),key=image?'img:'+s.keyframe_take:'video:'+selected.id;
- if(key!==EDIT_MEDIA_KEY){const old=$('#edit-monitor video');if(old)old.pause();EDIT_MEDIA_KEY=key;$('#edit-monitor').innerHTML=image?(take(s.keyframe_take)?`<img src="${take(s.keyframe_take).url}" alt="Shot ${pad(s.seq)}">`:'<p>Missing picture</p>'):`<video src="${selected.url}" muted playsinline preload="auto"></video>`;force=true}
- const video=$('#edit-monitor video');if(video){const sync=()=>{const target=Math.max(0,Math.min(offset,Number.isFinite(video.duration)?video.duration-.02:offset));if(force||Math.abs(video.currentTime-target)>.3)video.currentTime=target;if(EDIT_PLAYING)video.play().catch(()=>{});else video.pause()};if(video.readyState)sync();else video.onloadedmetadata=sync}
+ if(key!==EDIT_MEDIA_KEY){const old=$('#edit-monitor video');if(old){old.onloadedmetadata=null;old.pause()}EDIT_MEDIA_KEY=key;$('#edit-monitor').innerHTML=image?(take(s.keyframe_take)?`<img src="${take(s.keyframe_take).url}" alt="Shot ${pad(s.seq)}">`:'<p>Missing picture</p>'):`<video src="${selected.url}" muted playsinline preload="auto" aria-label="Shot ${pad(s.seq)} preview"></video>`;force=true}
+ const media=[],video=$('#edit-monitor video');let ready=true;
+ if(video){
+  if(Number.isFinite(video.duration)&&video.duration>0){EDIT_DURATIONS.set(selected.url,video.duration)}
+  video.onloadedmetadata=()=>{if($('#edit-monitor video')===video){EDIT_DURATIONS.set(selected.url,video.duration);updateEdit(true)}};
+  // Recalculate after loading actual duration, including a continuation boundary.
+  const current=editSourceAt(s,source);
+  if(current.selected.id!==selected.id)return updateEdit(force);
+  ready=syncEditMedia(video,current.offset,force,true)&&ready;media.push(video);
+ }
  const tracks=[];if(s.audio_url)tracks.push({id:'dialogue',url:s.audio_url,time:source,volume:1});
  for(const cue of S.audio_cues||[]){if(!cue.enabled||EDIT_TIME<cue.start||EDIT_TIME>=cue.start+cue.duration)continue;let t=EDIT_TIME-cue.start,volume=cue.volume;if(cue.fade_in)volume*=Math.min(1,t/cue.fade_in);if(cue.fade_out)volume*=Math.min(1,(cue.duration-t)/cue.fade_out);t+=cue.offset;if(cue.loop)t=cue.offset+(t-cue.offset)%Math.max(.001,cue.source_seconds-cue.offset);tracks.push({id:'cue'+cue.id,url:cue.url,time:t,volume})}
  if(S.music_url&&$('#usemusic').checked)tracks.push({id:'bed',url:S.music_url,time:EDIT_TIME,volume:+$('#mvol').value,loop:true});
- const active=new Set();for(const t of tracks){active.add(t.id);let a=EDIT_AUDIOS.get(t.id);if(!a||a.src!==new URL(t.url,location.href).href){if(a)a.pause();a=new Audio(t.url);EDIT_AUDIOS.set(t.id,a)}a.volume=Math.min(1,Math.max(0,t.volume));a.loop=!!t.loop;const sync=()=>{let desired=t.time;if(t.loop&&Number.isFinite(a.duration))desired%=a.duration;if(force||Math.abs(a.currentTime-desired)>.25)a.currentTime=Math.max(0,desired);if(EDIT_PLAYING)a.play().catch(()=>{});else a.pause()};if(a.readyState)sync();else a.onloadedmetadata=sync}
- for(const[id,a]of EDIT_AUDIOS)if(!active.has(id))a.pause();
- $('#edit-playhead').value=EDIT_TIME;$('#edit-state').textContent=`${audioTime(EDIT_TIME)} · Shot ${pad(s.seq)} · source ${audioTime(source)}`;
+ const active=new Set();for(const t of tracks){
+  active.add(t.id);let a=EDIT_AUDIOS.get(t.id);if(!a||a.src!==new URL(t.url,location.href).href){if(a){a.onloadedmetadata=null;a.pause()}a=new Audio(t.url);a.preload='auto';EDIT_AUDIOS.set(t.id,a)}
+  a.volume=Math.min(1,Math.max(0,t.volume));a.loop=!!t.loop;
+  a.onloadedmetadata=()=>{if(EDIT_AUDIOS.get(t.id)===a)updateEdit(true)};
+  let desired=t.time;if(t.loop&&Number.isFinite(a.duration)&&a.duration>0)desired%=a.duration;
+  ready=syncEditMedia(a,desired,force)&&ready;media.push(a);
+ }
+ for(const[id,a]of EDIT_AUDIOS)if(!active.has(id)){a.onloadedmetadata=null;a.pause()}
+ EDIT_WAITING=!ready;
+ for(const element of media)runEditMedia(element,EDIT_PLAYING&&ready);
+ const cursor=$('#timeline-cursor');if(cursor?.style)cursor.style.left=(100+EDIT_TIME*(typeof TIMELINE_ZOOM==='undefined'?30:TIMELINE_ZOOM))+'px';
+ $('#edit-playhead').value=EDIT_TIME;$('#edit-state').textContent=`${audioTime(EDIT_TIME)} · Shot ${pad(s.seq)} · source ${audioTime(source)}${EDIT_PLAYING&&!ready?' · Buffering…':''}`;
 }
+
 function editTimelineShot(){const item=shotAt(EDIT_TIME);if(!item)return toast('Add shots first',true);const s=item.shot;modal(`<div class="dlg-h"><h2>Trim shot ${pad(s.seq)}</h2></div><div class="dlg-b"><label class="f">Source in (seconds)</label><input id="et-in" type="number" min="0" step="0.041667" value="${s.trim_in||0}"><label class="f">Timeline duration (seconds)</label><input id="et-duration" type="number" min="0.5" step="0.041667" value="${s.duration}"><p>Edits affect episode assembly and preview. Source takes stay intact. Later shots and shot-anchored cues ripple automatically.</p></div><div class="dlg-f"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn pri" id="et-save">Save trim</button></div>`);$('#et-save').onclick=async()=>{const r=await editorPost('timeline',{action:'trim',id:s.id,trim_in:+$('#et-in').value,duration:+$('#et-duration').value});if(r.ok!==false){closeModal();EDIT_MEDIA_KEY='';seekEdit(EDIT_TIME)}}}
 async function splitEdit(){const item=shotAt(EDIT_TIME);if(!item)return;stopEdit();if(!confirm('Split this shot at the playhead? Both parts keep their original source takes.'))return;await editorPost('timeline',{action:'split',id:item.shot.id,at:EDIT_TIME-item.start});EDIT_MEDIA_KEY=''}
 async function sceneCleanup(mode){

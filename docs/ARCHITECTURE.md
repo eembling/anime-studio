@@ -158,3 +158,19 @@ See [Operations](OPERATIONS.md#9-development-validation) for commands and [Desig
 `POST /api/creative` dispatches named actions for reference versions/bindings, continuity review, direction, recipe authoring/assignment/checks/experiments, repairs and performances. Read-only previews use this same local tool endpoint. See [Creative tools](CREATIVE-TOOLS.md) for user-visible behavior and input conventions.
 
 Recipe jobs snapshot workflows, scalar values and composed media inputs before dispatch. The dispatcher considers the recipe’s own compatibility, even if the global workflow is unavailable. Remote prompt reconnection keeps that snapshot. Comparison runs require explicit result selection; phrase outputs are stored separately until spliced into a full-line take. History/episode/archive handling includes the creative tables, with shared reference/recipe/pronunciation data separated from episode-specific shot controls.
+
+
+## Continuation section data and Settings workspace
+
+`continuations.py` owns `shot_sections` (per-shot/segment direction and camera) and `section_takes` (retained generation provenance). These participate in history and episode snapshots. `/api/section` exposes inspect/save/extend; normal `/api/generate` continuation requests freeze through the existing creative queue metadata. Worker dispatch uses the captured API graph, parameters and copied boundary PNG. Signatures include the saved section direction and selected predecessor chain/file stamps; changed sources preserve candidates while marking them outdated. Explicit scene-plan fallback is saved per section. Old projects do not invent historical section direction.
+
+`settings.js`/`settings.css` provide focused Settings navigation, durable in-memory drafts, per-server dialogs and a single selected workflow editor. `/api/settings`, instance and workflow routes retain their ownership. UI numeric validation precedes submission; save results are checked before success messages or draft clearing. Project drafts are independent of server/workflow edits.
+
+
+## 2.11 reliability and editing
+
+`JobSnapshots` stores immutable job graphs, composed parameters, controls, input copies and signatures in `jobs.snapshot_json`. Queue mutation is locked through capture, with pending batch rollback on capture failure. Dispatch validates the captured graph independently of later global workflow readiness. Worker compose/build/collection use the captured key and fps. Repeat creates another job/run identity and preserves inputs/seed. Source copies stay under uploads/job-inputs and participate in archive/reference protection while retained by queue records.
+
+`alignment.py` owns asynchronous local CPU recognition jobs and process groups, with setup in an isolated Application Support environment. `alignment_worker.py` normalizes audio with FFmpeg, obtains faster-whisper word timestamps and sends structured output back. Script matching uses normalized Unicode characters with per-word confidence and rejects missing, overlapping or low-confidence ranges. Results are suggestions protected by a performance token; no automatic selection/save occurs. The main app backend keeps its standard-library-only dependency model.
+
+`workspace.py` provides cached waveform peaks and cut-boundary source frames. `workspace.js` renders tracks and pointer gestures, scopes local recovery drafts by project identity/episode and shows version/build metadata. Native WKWebView uses its persistent default data store. `storage_manager.py` inventories files and references from current/archived/history/job rows; reviewed candidates move to per-batch recoverable trash. Purge rechecks inventory, references, review token and explicit confirmation. Protected categories and symlinks are excluded. `render_diagnostics.py` classifies actionable errors without changing captured retry inputs.

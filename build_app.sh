@@ -16,7 +16,17 @@ cp "$ROOT/mac/Info.plist" "$APP/Contents/"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 cp "$ROOT/mac/launcher.sh" "$APP/Contents/MacOS/AnimeStudio"
 chmod 755 "$APP/Contents/MacOS/AnimeStudio"
-cp "$ROOT/app/anime_studio.py" "$ROOT/app/production.py" "$ROOT/app/creative.py" "$ROOT/app/creative.js" "$ROOT/app/creative.css" "$ROOT/app/soundtrack.py" "$ROOT/app/render_queue.py" "$ROOT/app/project_storage.py" "$ROOT/app/studio_tools.py" "$ROOT/app/script_dialogue.py" "$ROOT/app/shot_voices.py" "$ROOT/app/shot_voices.js" "$ROOT/app/comfy_events.py" "$ROOT/app/editor.js" "$ROOT/app/production.js" "$ROOT/app/ui.html" "$ROOT/mac/main.swift" "$ROOT/mac/AppIcon.icns" "$APP/Contents/Resources/"
+cp "$ROOT/app/anime_studio.py" "$ROOT/app/production.py" "$ROOT/app/creative.py" "$ROOT/app/creative.js" "$ROOT/app/creative.css" "$ROOT/app/settings.js" "$ROOT/app/settings.css" "$ROOT/app/continuations.py" "$ROOT/app/continuations.js" "$ROOT/app/workspace.js" "$ROOT/app/workspace.css" "$ROOT/app/workspace.py" "$ROOT/app/alignment.py" "$ROOT/app/alignment_worker.py" "$ROOT/app/job_snapshots.py" "$ROOT/app/storage_manager.py" "$ROOT/app/render_diagnostics.py" "$ROOT/mac/install_alignment.sh" "$ROOT/app/soundtrack.py" "$ROOT/app/render_queue.py" "$ROOT/app/project_storage.py" "$ROOT/app/studio_tools.py" "$ROOT/app/script_dialogue.py" "$ROOT/app/shot_voices.py" "$ROOT/app/shot_voices.js" "$ROOT/app/comfy_events.py" "$ROOT/app/editor.js" "$ROOT/app/production.js" "$ROOT/app/ui.html" "$ROOT/mac/main.swift" "$ROOT/mac/AppIcon.icns" "$APP/Contents/Resources/"
+
+python3 - "$ROOT" "$APP/Contents/Resources/build_info.json" <<'PYINFO'
+import datetime,json,pathlib,re,subprocess,sys
+root=pathlib.Path(sys.argv[1])
+def git(*args):
+ try:return subprocess.check_output(['git',*args],cwd=root,stderr=subprocess.DEVNULL,text=True).strip()
+ except Exception:return 'unknown'
+version=re.search(r'^VERSION = "([^"]+)"',(root/'app/anime_studio.py').read_text(),re.M).group(1)
+pathlib.Path(sys.argv[2]).write_text(json.dumps({'version':version,'commit':git('rev-parse','--short','HEAD'),'branch':git('branch','--show-current'),'dirty':bool(git('status','--porcelain')),'built':datetime.datetime.now(datetime.timezone.utc).isoformat()}))
+PYINFO
 
 if [ "$(uname)" = "Darwin" ] && xcode-select -p >/dev/null 2>&1; then
   echo "Compiling the native window..."

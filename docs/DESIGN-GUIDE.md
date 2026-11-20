@@ -2,7 +2,7 @@
 
 Anime Studio should feel like a focused production desk: readable script pages, clear shot decisions, predictable tools and visible render progress. The interface must help people understand what will be saved, generated, selected or exported before they act.
 
-This guide defines the design system for the 2.10 product and the acceptance requirements for future work. Token values and component names refer to the current implementation. Requirements below are review criteria; they are not a claim that the entire application has passed an accessibility certification.
+This guide defines the design system for the 2.11 product and the acceptance requirements for future work. Token values and component names refer to the current implementation. Requirements below are review criteria; they are not a claim that the entire application has passed an accessibility certification.
 
 See the [Product guide](PRODUCT-GUIDE.md) for user instructions and the [Architecture guide](ARCHITECTURE.md) for implementation contracts.
 

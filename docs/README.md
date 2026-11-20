@@ -2,7 +2,7 @@
 
 Anime Studio is a macOS production app for turning scripts, character references and shot decisions into an assembled anime episode. ComfyUI produces images, video and character voices; the Mac manages the project, editorial decisions, audio timing, assembly and delivery.
 
-These guides describe the 2.10 codebase and its current dialogue UX. They are product documentation, not a promise that every ComfyUI model, GPU or custom workflow has been qualified on every machine.
+These guides describe the 2.11 codebase and its current dialogue UX. They are product documentation, not a promise that every ComfyUI model, GPU or custom workflow has been qualified on every machine.
 
 ## Choose a guide
 

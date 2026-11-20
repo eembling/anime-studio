@@ -190,7 +190,13 @@ In **Shots**, each animation, lip-sync, continuation and upscale take has its ow
 
 Motion generation starts from a selected keyframe. The default 14B animation starter uses 16 fps and a configured maximum of 81 frames per clip; other workflows can use different frame rates and limits. The default shot duration is four seconds.
 
-A longer shot can need multiple parts. **Continue** starts from the end of the selected chain. Review coverage and remaining time on the shot card. Without sufficient motion coverage, assembly can hold the final frame rather than inventing more animation.
+A longer shot can need multiple parts. The shot card shows dialogue duration, editorial shot length, selected motion coverage and uncovered time together. **Extend shot to fit audio** explicitly lengthens a shorter shot without removing its existing takes or script.
+
+**Continue shot** opens a dedicated section editor with its approximate time range, the selected predecessor’s actual final frame, a saved section prompt and optional camera override. Save that direction independently or choose **Generate continuation** to save and queue candidates. Use **Direction…** beside an existing part to edit or regenerate that section. The shared shot-wide motion prompt stays intact. You can explicitly copy it as a starting point; scene preparation can reuse it for missing sections only when its fallback checkbox is selected.
+
+Section capacity follows the effective workflow or assigned recipe’s fps and frame limit. The app snapshots direction, camera/style, boundary file/hash, source take chain, seed and workflow when queued. Retry keeps that snapshot. Changing an upstream selection retains later takes and flags incompatible continuation inputs for review. Regenerate affected stages restarts the earliest affected continuation, preserving successful earlier sections. Unknown historical directions are not invented for older clips.
+
+Boundary frames are deduplicated during assembly, dialogue plays continuously across parts, and excess padding is trimmed to editorial duration. Without sufficient motion coverage, assembly holds the final frame and logs a warning. Inspect the joins on your real ComfyUI output.
 
 **End on the next shot's keyframe** uses the first/last-frame workflow for the final part. Ensure the next shot has the intended keyframe and that the server supports that workflow.
 
@@ -231,6 +237,8 @@ The queue separates active, queued and completed renders, with failed/cancelled 
 - **Active:** dispatched or being collected. Current sampler/node progress can be shown alongside learned duration estimates.
 - **Completed:** output has been collected and recorded. A job should reach 100% here, not merely because its estimated time expired.
 - **Failed/cancelled:** inspect the reason, repair it and retry when appropriate.
+
+Below an active render’s progress bar, **Models** lists the model filenames selected by its submitted workflow, including named LoRAs and supporting encoders. Voice jobs identify the Qwen3-TTS model size. The list describes the render’s workflow, not every model currently resident in GPU memory. Captured recipes are labelled when used as a fallback; earlier jobs without a captured graph show that details are unavailable. Later workflow edits do not rewrite a submitted render’s model list.
 
 A sampler's step count describes that sampler node, not the entire workflow. Estimated completion uses comparable successful runs. New stages, unavailable servers and overdue work may have no reliable estimate. Higher priority affects waiting jobs; it does not preempt a running render.
 
@@ -302,3 +310,53 @@ For startup, storage and server failures, follow the symptom-based instructions 
 ## 15. Creative production tools
 
 Use the [creative tools guide](CREATIVE-TOOLS.md) for versioned reference collections, continuity reviews, shot composition/pose/camera direction, masked image and interval video retakes, word timing and phrase performance editing, plus pinned generation recipes and comparison batches. These extend the workflows above without requiring a new project.
+
+
+## 16. Settings
+
+Settings uses focused sections instead of a single long form:
+
+- **Project:** title, visual style and shared motion direction; negative prompts are under Advanced.
+- **Generation:** source dimensions, draft limits, new-shot duration and render timeout.
+- **Dialogue & voices:** model, language, temporary voice and inter-line pause.
+- **Episode output:** assembled width, height and fps. Model generation fps is configured separately per workflow.
+- **ComfyUI servers:** readable connection cards; Add/Edit server opens a focused name/address/task editor. Enable/disable controls whether it takes new jobs.
+- **Workflows:** select one stage, then choose a starter or import/export API format. Video timing and server/API details are disclosures.
+- **Tools & storage:** local tools and active project folder. Stopping the local server is under Advanced maintenance.
+
+Project-setting drafts survive section navigation and background refresh. **Save changes** saves only changed values; **Discard changes** clears the draft after confirmation. Server and workflow actions save their own configuration, independently of project-setting drafts. A failed save retains your entries and displays an error. Configured workflows are not a claim of server readiness; use Production’s readiness check.
+
+
+## 17. Reliable rendering, recovery and workspace tools (2.11)
+
+### Captured render inputs
+
+New render requests capture their API graph, model controls, seed, effective prompt/settings and independent copies of input media before entering the worker queue. Changing Settings, character references or source files later does not change a queued job. Results made with earlier inputs remain candidates and are not automatically selected over a changed shot. Completed jobs offer **Repeat captured render**, which queues a separate candidate with the recorded inputs and seed. Retry after a connection loss retains the remote prompt where available. Older jobs cannot recover configuration that was never recorded; clear-finished removes the retained queue record, so export/back up the project before discarding provenance you need.
+
+### Local speech timing
+
+Open a selected dialogue line’s **Performance** editor and choose **Align spoken words locally**. Setup is under **Settings → Tools & storage → Local speech alignment**. It installs a separate local Python environment and downloads a multilingual base speech model; recognition then runs on this Mac without uploading audio.
+
+The result shows the recognized transcript, word ranges and confidence. **Use speech timing suggestions** is offered only when the script matches confidently with ordered ranges. Listen and choose **Save timing & pronunciation** to apply them. Unmatched/low-confidence speech remains available for manual review; the app does not present estimated or uncertain timings as verified alignment. Imported/manual timing remains supported. Recognition plus script matching is speech-based timing assistance, not phoneme-level forced alignment.
+
+### Recovery drafts
+
+Settings changes, shot dialogue and continuation direction are saved as recovery drafts on this device as you edit. Keys are scoped to the project and episode. After reopening, choose **Restore draft**, review it against current saved values and explicitly save to apply it to the project. Restoring never starts generation. **Discard saved draft** removes the recovery copy. Saving or explicitly discarding current edits clears the corresponding copy. Browser data deletion or a failed local-storage write can remove this protection; a draft is not an external backup.
+
+### Studio tracks
+
+Studio displays Picture, Dialogue, Music and Effects tracks with a time ruler, zoom and moving playhead. Click a track/ruler to scrub. **Show dialogue waveforms** loads cached waveform previews; trims show the relevant source window. Drag a picture clip’s start/end handle to trim, or use **Trim current shot** for keyboard/numeric editing. Start trimming changes source-in and duration; shot boundaries ripple. Drag cue blocks to move them; anchored cues retain their shot anchor. Double-click a cue to edit its mix settings. Multiple overlapping cues remain separately visible.
+
+**Preview cut boundary** compares the outgoing and incoming source frames at their trim positions. It respects selected continuation chains. Review the assembled output for final camera effects and retiming.
+
+### Storage review
+
+Choose **Settings → Tools & storage → Review disk usage & cleanup**. Usage separates generated picture, dialogue, references/render inputs, cache, history, exports, backups, trash and other project files. Select candidates from a reviewed list and choose **Move reviewed files to trash**. This is reversible and does not free space yet. Restore a batch with **Restore**. **Review permanent deletion…** requires a fresh review and explicit confirmation before freeing space.
+
+Selected media, retained render inputs, archived episodes, history and exports are protected. Cleanup waits for rendering, alignment and export work to finish; changed reviews and new references reject deletion. Keep an external backup before major maintenance.
+
+### Errors and version information
+
+Failed renders distinguish memory, model/file, node-pack, connection, timeout and input problems. Repair guidance links to the relevant shot or Settings section, with the full technical error in a disclosure. **Retry same inputs** retains the original configuration; use a new generation after changing resolution, models or prompts. **Reconnect render** uses the saved remote prompt when possible.
+
+The bottom-left badge shows **Anime Studio v2.11**. Click it for the source commit, branch and build time. A local build with uncommitted changes is labelled accordingly; the badge is not a claim that a release was published.
