@@ -269,6 +269,8 @@ def main():
     check(wf.get("22", {}).get("inputs", {}).get("length") == 73 and
           wf.get("11", {}).get("inputs", {}).get("audio", "").startswith("anime_j"),
           "S2V gets uploaded dialogue and at least 73 frames")
+    check(wf.get("2", {}).get("inputs", {}).get("device") == "default",
+          "S2V keeps text encoding on GPU and never silently switches to CPU")
     # Ordinary Animate must use the selected voice without a separate Lip sync action.
     post("/api/shot/save", {"id": lip, "kind": "motion"})
     r = post("/api/generate", {"stage": "animate", "shot_ids": [lip], "takes": 1})

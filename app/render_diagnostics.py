@@ -4,7 +4,9 @@ def diagnose(job):
     text=(job.get('error') or '').lower();remote=bool(job.get('prompt_id'))
     retry='Reconnect render' if remote else 'Retry same inputs'
     if not text:return None
-    if any(x in text for x in ('out of memory','cuda oom','allocation failed','mps backend out of memory')):
+    if any(x in text for x in ('out of memory','cuda oom','allocation failed','mps backend out of memory','vram grow failed','vram allocation failed')):
+        if 'cliptextencode' in text or 'text encoder' in text:
+            return {'category':'memory','title':'The prompt encoder ran out of GPU memory','guidance':'Keep GPU encoding enabled. Check nvidia-smi on the server and unload competing models, such as Ollama, to free VRAM on the GPU ComfyUI uses. Total VRAM is not the same as free VRAM. Retry keeps the captured workflow; generate a NEW clip after changing the workflow. The shot-length notice is unrelated to this failure.','action':'servers','retry_label':retry}
         return {'category':'memory','title':'The GPU ran out of memory','guidance':'Review the shot and generate a new draft with a smaller image size or frame limit, or use a GPU with more free memory. Retrying the same captured inputs may fail again.','action':'shots','retry_label':retry}
     if any(x in text for x in ('missing node','node type','invalid class_type','missing class_type','unknown class_type','unknown node')):
         return {'category':'nodes','title':'A required ComfyUI node is unavailable','guidance':'Check this workflow’s required node packs on the assigned server, install/update them manually, restart ComfyUI and check readiness.','action':'workflows','retry_label':retry}

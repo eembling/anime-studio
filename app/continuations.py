@@ -43,13 +43,14 @@ class Continuations:
         recipe, values = self.st.creative.current_recipe('animate', sid)
         key = 'animate'
         if shot.get('audio'):
-            from clip_audio import choose_workflow
+            from clip_audio import choose_workflow, gpu_s2v
             row={'json':json.dumps(recipe['workflow']),'fps':recipe['fps'],'max_frames':recipe['max_frames']}
             selected,actual,conditioned,_=choose_workflow(self.st,'continue',key,row,not recipe.get('id') and not shot['end_next'])
             if conditioned and selected=='lipsync':
-                if actual['json']!=row['json'] or actual['fps']!=row['fps'] or actual['max_frames']!=row['max_frames']:
+                if actual!=gpu_s2v(row):
                     recipe=dict(recipe,id=None,name='Voice-driven continuation',workflow=json.loads(actual['json']),fps=actual['fps'],max_frames=actual['max_frames'],controls=[])
                     values={}
+                recipe=dict(recipe,workflow=json.loads(actual['json']))
                 key=selected
         fps, maxf = float(recipe['fps']), int(recipe['max_frames'])
         if fps<=0 or maxf<2: raise ValueError('Set a positive animation fps and a frame limit of at least two.')

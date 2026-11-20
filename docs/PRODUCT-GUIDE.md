@@ -402,3 +402,13 @@ Compatible workflows receive a bounded WAV aligned to that clip's source time, i
 An explicitly assigned generation recipe and end-on-next-shot constraints are retained. Audio-aware assigned recipes receive the voice directly. If the selected recipe cannot use audio, or the default S2V workflow is unavailable on enabled servers, generation keeps the picture workflow and embeds the voice; the queue confirmation explains that audio-driven animation was unavailable. It never claims that attaching a soundtrack alone creates lip sync.
 
 For manual ComfyUI server setup, configure or verify **Settings → Workflows → Lip sync** and run **Production → Check readiness**. On the rendering server, run a compatible S2V template with its required nodes/models, then export its API workflow if it differs from the configured default. Label its connected image/audio loaders `START_IMAGE` and `AUDIO_IN`, and enter its actual generation fps and frame limit in the app. Enable the server for Clip/Continue jobs so automatically routed renders can use it. No server installation or remote GPU render is performed by an app rebuild.
+
+### GPU memory failures during voice animation
+
+`CLIPTextEncode: VRAM grow failed` means prompt encoding could not allocate GPU memory, before video sampling starts. S2V prompt encoding stays on GPU: new jobs use `CLIPLoader.device=default` and remove explicit CPU overrides from captured S2V graphs. Other workflows and existing snapshots are preserved. The app does not silently switch voice animation to CPU.
+
+On the rendering server, run `nvidia-smi` to inspect **free memory on the GPU ComfyUI is using** and the processes holding allocations. A 12 GB card with only 1 GB free cannot satisfy a new 2 GB allocation. Identify the owners before stopping any process. If the competing process is Ollama, `ollama ps` identifies its loaded models; stop only models you intend to unload. If the allocation belongs to idle ComfyUI, restart ComfyUI after checking no renders are active. Do not use CPU/low-VRAM flags as an automatic replacement for GPU prompt encoding.
+
+After freeing memory, Retry can use the same GPU snapshot. After changing a workflow, generate a **new** job; Retry intentionally retains its captured inputs. Reducing resolution/frame count can reduce video-sampling memory, but does not directly reduce the text encoder's model-weight allocation. The 14B video model still needs sufficient peak GPU memory even after prompt encoding succeeds. The shot-length/Continue notice is about segment coverage, not an explanation of this encoder failure.
+
+Reference: [ComfyUI CLIPLoader documentation](https://github.com/Comfy-Org/embedded-docs/blob/main/comfyui_embedded_docs/docs/CLIPLoader/en.md).

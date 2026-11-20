@@ -83,9 +83,23 @@ def audio_inputs(workflow):
             workflow[key].get('_meta',{}).get('title','').upper()=='AUDIO_IN']
 
 
+def gpu_s2v(row):
+    """Keep S2V prompt encoding on the GPU; leave other workflows untouched."""
+    import json
+    workflow=json.loads(row['json'])
+    if not any(node['class_type']=='WanSoundImageToVideo' for node in workflow.values()):
+        return row
+    changed=False
+    for node in workflow.values():
+        if node['class_type']=='CLIPLoader' and node.get('inputs',{}).get('device')=='cpu':
+            node['inputs']['device']='default';changed=True
+    return dict(row,json=json.dumps(workflow)) if changed else row
+
+
 def choose_workflow(st, stage, key, row, allow_switch=True):
     """Prefer an audio-capable recipe, or a ready S2V default on this worker role."""
     import json
+    row=gpu_s2v(row)
     workflow = json.loads(row['json'])
     reason = 'This workflow has no connected AUDIO_IN.'
     if audio_inputs(workflow):
@@ -96,6 +110,8 @@ def choose_workflow(st, stage, key, row, allow_switch=True):
         except ValueError as exc:
             reason=str(exc)
     candidate = st.wf_row('lipsync') if allow_switch else None
+    if candidate:
+        candidate=gpu_s2v(candidate)
     if candidate and audio_inputs(json.loads(candidate['json'])):
         try:
             st.creative.require_ready(dict(stage=stage,workflow=json.loads(candidate['json']),controls=[],requirements=''),{})

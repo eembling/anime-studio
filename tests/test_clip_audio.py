@@ -135,4 +135,30 @@ class ClipAudioTests(unittest.TestCase):
         self.assertEqual(int(video['nb_frames']),meta['params']['length'])
         self.assertAlmostEqual(float(video['duration']),meta['params']['length']/16,delta=.001)
 
+    def test_s2v_cpu_override_is_changed_to_gpu_for_new_jobs(self):
+        row=self.st.wf_row('lipsync');workflow=json.loads(row['json'])
+        workflow['2']['inputs']['device']='cpu'
+        self.st.db.x("UPDATE workflows SET json=? WHERE stage='lipsync'",(json.dumps(workflow),))
+        _,job=self.queue();meta=self.st.snapshots.meta(job)
+        self.assertEqual(meta['workflow']['2']['inputs']['device'],'default')
+        self.assertEqual(json.loads(self.st.wf_row('lipsync')['json'])['2']['inputs']['device'],'cpu')
+
+    def test_gpu_preference_does_not_mutate_captured_retry_inputs(self):
+        _,job=self.queue();meta=self.st.snapshots.meta(job)
+        meta['workflow']['2']['inputs']['device']='cpu'
+        self.st.db.x('UPDATE jobs SET snapshot_json=? WHERE id=?',(json.dumps(meta),job['id']))
+        self._complete(job);repeat=self.st.snapshots.repeat(job['id'])
+        saved=self.st.snapshots.meta(self.st.db.one('SELECT * FROM jobs WHERE id=?',(repeat,)))
+        self.assertEqual(saved['workflow']['2']['inputs']['device'],'cpu')
+
+    def test_s2v_recipe_cpu_control_cannot_reapply_cpu_after_gpu_capture(self):
+        import copy
+        recipe=self.st.creative.insert_recipe('GPU voice','animate',dict(workflow=copy.deepcopy(app.STARTERS['lipsync']['wan22_s2v_14b_fp8']['wf']),
+            fps=16,max_frames=77,purpose='generation',requirements='',controls=[dict(node='2',field='device',type='text',default='cpu',label='Device')]))
+        self.st.creative.recipe_assign(dict(shot_id=self.sid,stage='animate',recipe_id=recipe['id'],values={'2.device':'cpu'}))
+        _,job=self.queue();meta=self.st.snapshots.meta(job)
+        key,params=self.worker.compose(job);params['images']={slot:Path(file).name for slot,file in params['files'].items()}
+        graph=self.st.snapshots.patch(job,app.build_workflow(meta['workflow'],key,params))
+        self.assertEqual(graph['2']['inputs']['device'],'default')
+
 if __name__=='__main__':unittest.main()
