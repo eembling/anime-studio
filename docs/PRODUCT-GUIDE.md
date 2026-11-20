@@ -289,7 +289,7 @@ New episode builds retain a dialogue-only master, so repeated soundtrack exports
 
 Run **Studio → Check episode quality** and address missing picture, missing dialogue, insufficient motion coverage, selected drafts, outdated takes and cut-off dialogue.
 
-In Assemble, confirm sound inclusion and build the episode. Defaults are 1920×1080 at 24 fps; project output settings can differ. Review the build log. Missing picture can become black and insufficient motion can hold frames, so a successful encode is not a production-quality approval.
+In Assemble, confirm sound inclusion and build the episode. Defaults are 1920×1080 at 16 fps; project output settings can differ. Review the build log. Missing picture can become black and insufficient motion can hold frames, so a successful encode is not a production-quality approval.
 
 Assembly writes the episode, per-shot clips and a `timeline.edl` for further editing in DaVinci Resolve. Preserve the referenced clips when transferring the EDL.
 
@@ -377,7 +377,7 @@ Open a shot's **Transitions & audio timing** dialog to choose a cut, dissolve or
 
 Shot clip playback now waits for the dialogue clock to start and synchronizes the video against the selected take's position in the shot. Continuation previews skip the duplicated boundary frame when finding their dialogue offset. Loading and playback failures appear on the preview. Replacing a take or leaving its player stops its audio.
 
-Studio, subtitles, anchored cues and export use output-frame boundaries for shot durations. For example, a 0.1-second edit at 24 fps occupies two frames. The saved editorial duration remains available for further editing.
+Studio, subtitles, anchored cues and export use output-frame boundaries for shot durations. For example, a 0.1-second edit at 16 fps occupies two frames. The saved editorial duration remains available for further editing.
 
 Exports run from a captured database and copies of their required media, while editing and render queue controls remain responsive. Assemble lists each export's status and completed media operations. **Cancel export** stops its local media subprocesses. **Resume captured export** retries its captured inputs after cancellation, an error or an app restart. A source changed before it could be captured produces an explicit error; start a new export to use changed inputs.
 
@@ -412,3 +412,9 @@ On the rendering server, run `nvidia-smi` to inspect **free memory on the GPU Co
 After freeing memory, Retry can use the same GPU snapshot. After changing a workflow, generate a **new** job; Retry intentionally retains its captured inputs. Reducing resolution/frame count can reduce video-sampling memory, but does not directly reduce the text encoder's model-weight allocation. The 14B video model still needs sufficient peak GPU memory even after prompt encoding succeeds. The shot-length/Continue notice is about segment coverage, not an explanation of this encoder failure.
 
 Reference: [ComfyUI CLIPLoader documentation](https://github.com/Comfy-Org/embedded-docs/blob/main/comfyui_embedded_docs/docs/CLIPLoader/en.md).
+
+### Native 16 fps Studio playback
+
+Studio and new episode exports default to 16 fps to match generated shots. The playhead, previous/next-frame actions, trim increments, frame timecode, animatics and camera previews use the project frame rate. Playback stays at normal speed: one source second remains one real second, with audio at its original rate.
+
+Existing projects and older saved episodes using the legacy 24 fps default are upgraded to 16 fps once. Source files, completed exports and captured render/export jobs retain their original media and timing. A later explicit output-setting change is preserved across restarts.

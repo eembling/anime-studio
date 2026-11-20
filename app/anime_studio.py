@@ -7,7 +7,7 @@ nodes built into ComfyUI, so nothing needs installing on the server - just model
 
   ComfyUI server : character sheets, keyframes (Qwen-Image-Edit 2509), animation (Wan 2.2 I2V,
                    first/last-frame mode), optional lip sync (Wan S2V) and upscaling
-  This Mac       : script -> shot list, temporary voices (macOS `say`), 16 -> 24 fps conversion,
+  This Mac       : script -> shot list, temporary voices (macOS `say`), 16 fps playback,
                    assembly, DaVinci Resolve export (EDL + per-shot clips)
 
     python3 anime_studio.py --port 8700 --data ~/Documents/AnimeStudio
@@ -42,7 +42,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "2.20"
+VERSION = "2.21"
 for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebrew/bin")):
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
@@ -212,7 +212,7 @@ DEFAULT_SETTINGS = {
     "kf_width": "1280", "kf_height": "720",
     "sheet_width": "1536", "sheet_height": "864",
     "vid_width": "848", "vid_height": "480",
-    "out_width": "1920", "out_height": "1080", "out_fps": "24",
+    "out_width": "1920", "out_height": "1080", "out_fps": "16",
     "default_voice": "",
     "line_gap": "0.3",
     "tts_model": "1.7B", "tts_language": "Auto",
@@ -366,7 +366,7 @@ def norm_choice(value, options, default):
 
 
 def find_rife():
-    """Optional: rife-ncnn-vulkan (https://github.com/nihui/rife-ncnn-vulkan) for smooth 16->24 fps on the Mac."""
+    """Optional: rife-ncnn-vulkan (https://github.com/nihui/rife-ncnn-vulkan) for optional source frame-rate conversion on the Mac."""
     hit = shutil.which("rife-ncnn-vulkan")
     if hit:
         return Path(hit)
@@ -386,6 +386,12 @@ class Studio:
         self.db = DB(self.data / "studio.db")
         for k, v in DEFAULT_SETTINGS.items():
             self.db.x("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
+        if not export_worker:
+            from timeline import upgrade_legacy_fps
+            saved=self.settings()
+            for key,value in upgrade_legacy_fps(saved).items():
+                if saved.get(key)!=value:
+                    self.db.x('INSERT OR REPLACE INTO settings VALUES(?,?)',(key,value))
         if not self.db.one("SELECT id FROM instances"):
             for name, url, roles in DEFAULT_INSTANCES:
                 self.db.x("INSERT INTO instances(name,url,roles) VALUES(?,?,?)", (name, url, roles))
@@ -1462,7 +1468,7 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
         S = st.settings()
         W, H, FPS = int(S["out_width"]), int(S["out_height"]), int(S["out_fps"])
         if preview:
-            W, H, FPS = 960, 540, 24
+            W, H = 960, 540
         all_shots = st.ordered_shots()
         shots = [s for s in all_shots if (scene is None or s['scene']==scene) and (shot_ids is None or s['id'] in shot_ids)]
         start = 0

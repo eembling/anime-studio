@@ -40,8 +40,8 @@ class ExportReliabilityTests(unittest.TestCase):
         second=self.api.shot_save({'scene':'A','duration':.5})['id']
         self.st.db.x("INSERT INTO audio_cues(name,kind,path,start,offset,duration,volume,fade_in,fade_out,loop,enabled,source_seconds,anchor_shot,anchor_offset) VALUES('cue','sfx','uploads/test.wav',0,0,1,1,0,0,0,1,1,?,0)",(second,))
         state=self.api.state()
-        self.assertAlmostEqual(state['shots'][1]['timeline_start'],2/24)
-        self.assertAlmostEqual(state['audio_cues'][0]['start'],2/24)
+        self.assertAlmostEqual(state['shots'][1]['timeline_start'],2/16)
+        self.assertAlmostEqual(state['audio_cues'][0]['start'],2/16)
         rows=layout([{'id':i,'duration':.1} for i in range(100)],24)
         self.assertEqual(rows[-1]['start_frame'],198)
 

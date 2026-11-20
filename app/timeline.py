@@ -15,3 +15,13 @@ def layout(shots, fps):
                      'start': cursor/int(fps), 'duration': count/int(fps)})
         cursor += count
     return rows
+
+
+def upgrade_legacy_fps(settings):
+    """Move legacy 24 fps projects to the 16 fps default once, including old episodes."""
+    upgraded = dict(settings)
+    if not upgraded.get('studio_16fps_v1'):
+        if str(upgraded.get('out_fps', '16')) == '24':
+            upgraded['out_fps'] = '16'
+        upgraded['studio_16fps_v1'] = '1'
+    return upgraded

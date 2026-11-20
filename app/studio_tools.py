@@ -86,6 +86,9 @@ class StudioTools:
         snapshot = dict(snapshot) if isinstance(snapshot, dict) else snapshot
         if not isinstance(snapshot, dict) or 'shots' not in snapshot or 'settings' not in snapshot:
             raise ValueError('Invalid project checkpoint')
+        from timeline import upgrade_legacy_fps
+        settings=upgrade_legacy_fps({row['key']:row['value'] for row in snapshot['settings']})
+        snapshot['settings']=[dict(key=key,value=value) for key,value in settings.items()]
         for table in ('scene_looks','continuity_reviews','shot_direction','shot_recipes','line_performances','performance_takes','creative_runs','shot_sections','section_takes'):
             snapshot.setdefault(table, [])
         if 'assets' in snapshot:

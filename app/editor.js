@@ -1,24 +1,26 @@
 /* Episode editing, scene cleanup, recovery, series library and delivery. */
 let EDIT_TIME=0,EDIT_PLAYING=false,EDIT_CLOCK=0,EDIT_TIMER=null,EDIT_DRAG=null,EDIT_MEDIA_KEY='',EDIT_AUDIOS=new Map(),EDIT_DURATIONS=new Map(),EDIT_WAITING=false;
 const editorPost=(tool,data={})=>post('/api/editor',{tool,...data});
+const editFps=()=>+S.settings.out_fps||16;
+function editTimecode(seconds){const fps=editFps(),frame=Math.max(0,Math.floor(seconds*fps+1e-6));return [Math.floor(frame/(fps*3600)),Math.floor(frame/(fps*60))%60,Math.floor(frame/fps)%60,frame%fps].map(value=>String(value).padStart(2,'0')).join(':')}
 const editDuration=shot=>shot.timeline_duration??shot.duration;
 const shotAt=time=>{let start=0;for(const shot of S.shots){if(time<start+editDuration(shot))return{shot,start};start+=editDuration(shot)}return null};
 function renderStudio(){
  const state=S.editor;if(!state)return;
  if(!same('editor-episodes',[state.episodes,S.settings.active_episode]))$('#episode-list').innerHTML=state.episodes.map(e=>`<div class="row"><b>${esc(e.title)}</b>${e.id===S.settings.active_episode?'<span class="pill">Current</span>':`<button class="btn sm" onclick="openEpisode('${e.id}')">Open episode</button>`}</div>`).join('')||'<p>Save the current episode to start your series library.</p>';
  if(!same('editor-history',state.history))$('#edit-history').innerHTML=state.history.map(h=>`<div class="row"><span>${esc(new Date(h.created*1000).toLocaleString())} · ${esc(h.label)}</span><button class="btn sm" onclick="restoreHistory('${h.id}')">Restore</button></div>`).join('');
- if(!same('editor-timeline',[S.shots.map(s=>[s.id,s.seq,s.duration,s.trim_in,s.keyframe_take,s.clip_take,s.final_take]),S.audio_cues])){
-  const total=S.shots.reduce((n,s)=>n+editDuration(s),0);$('#edit-playhead').max=total;$('#edit-playhead').step=1/(+S.settings.out_fps||24);
+ if(!same('editor-timeline',[S.shots.map(s=>[s.id,s.seq,s.duration,s.trim_in,s.keyframe_take,s.clip_take,s.final_take]),S.audio_cues,editFps()])){
+  const total=S.shots.reduce((n,s)=>n+editDuration(s),0);$('#edit-playhead').max=total;$('#edit-playhead').step=1/editFps();
   let start=0;$('#edit-track').innerHTML=S.shots.map(s=>{const at=start;start+=editDuration(s);return `<button class="timeline-shot btn" draggable="true" data-shot="${s.id}" style="flex:0 0 ${Math.max(85,editDuration(s)*18)}px" onclick="seekEdit(${at})"><b>Shot ${pad(s.seq)}</b><span>${esc(s.scene)}</span><small>${audioTime(s.duration)}</small></button>`}).join('');
   if(typeof renderTimelineTracks==='function')renderTimelineTracks();
   for(const node of document.querySelectorAll('[data-shot]')){node.ondragstart=e=>{if(e.target.closest?.('[data-trim]')){e.preventDefault();return}EDIT_DRAG=+node.dataset.shot;e.dataTransfer.setData('text/plain',node.dataset.shot)};node.ondragover=e=>e.preventDefault();node.ondrop=e=>{e.preventDefault();const target=+node.dataset.shot;if(!EDIT_DRAG||target===EDIT_DRAG)return;const ids=S.shots.map(s=>s.id).filter(id=>id!==EDIT_DRAG);ids.splice(ids.indexOf(target),0,EDIT_DRAG);editorPost('timeline',{action:'reorder',ids});EDIT_DRAG=null}}
   $('#edit-cues').innerHTML=(S.audio_cues||[]).map(c=>`<button class="btn sm" onclick="seekEdit(${c.start});editAudioCue(${c.id})">${esc(c.name)} · ${audioTime(c.start)}${c.anchor_shot?' · follows shot':''}${c.anchor_missing?' · anchor missing':''}</button>`).join('');
  }
- $('#edit-state').textContent=`${audioTime(EDIT_TIME)} / ${audioTime(S.shots.reduce((n,s)=>n+editDuration(s),0))}`;
+ $('#edit-state').textContent=`${editTimecode(EDIT_TIME)} / ${editTimecode(S.shots.reduce((n,s)=>n+editDuration(s),0))} · ${editFps()} fps`;
 }
 function stopEdit(){EDIT_PLAYING=false;clearInterval(EDIT_TIMER);EDIT_TIMER=null;const v=$('#edit-monitor video');if(v)v.pause();for(const a of EDIT_AUDIOS.values())a.pause();$('#edit-play').textContent='Play episode'}
 function seekEdit(value){EDIT_TIME=Math.max(0,Math.min(+value,S.shots.reduce((n,s)=>n+editDuration(s),0)));EDIT_CLOCK=performance.now();updateEdit(true)}
-function frameEdit(direction){stopEdit();seekEdit(EDIT_TIME+direction/(+S.settings.out_fps||24))}
+function frameEdit(direction){stopEdit();const fps=editFps();seekEdit((Math.round(EDIT_TIME*fps)+direction)/fps)}
 function playEdit(){
  if(EDIT_PLAYING)return stopEdit();
  const total=S.shots.reduce((n,s)=>n+editDuration(s),0);if(!total)return;
@@ -30,13 +32,13 @@ function playEdit(){
  }
  if(typeof measureMixAudio==='function'&&!MIX_FRAME)measureMixAudio();
  EDIT_PLAYING=true;EDIT_CLOCK=performance.now();$('#edit-play').textContent='Pause';updateEdit(true);
- EDIT_TIMER=setInterval(tickEdit,30);
+ EDIT_TIMER=setInterval(tickEdit,1000/editFps());
 }
 function tickEdit(){
  const now=performance.now(),elapsed=(now-EDIT_CLOCK)/1000;EDIT_CLOCK=now;
  if(!EDIT_WAITING)EDIT_TIME+=elapsed;
  const total=S.shots.reduce((n,s)=>n+editDuration(s),0);
- if(EDIT_TIME>=total){EDIT_TIME=total;stopEdit();$('#edit-playhead').value=total;$('#edit-state').textContent=audioTime(total);return}
+ if(EDIT_TIME>=total){EDIT_TIME=total;stopEdit();$('#edit-playhead').value=total;$('#edit-state').textContent=editTimecode(total)+' · '+editFps()+' fps';return}
  updateEdit(false);
 }
 function editSourceAt(s,source){
@@ -130,10 +132,10 @@ function updateEdit(force){
  // for enough data to start. Keep the clock still without cancelling play().
  EDIT_WAITING=!ready||media.some(element=>element._editStarting&&element.readyState<3);
  const cursor=$('#timeline-cursor');if(cursor?.style)cursor.style.left=(100+EDIT_TIME*(typeof TIMELINE_ZOOM==='undefined'?30:TIMELINE_ZOOM))+'px';
- $('#edit-playhead').value=EDIT_TIME;$('#edit-state').textContent=`${audioTime(EDIT_TIME)} · Shot ${pad(s.seq)} · source ${audioTime(source)}${EDIT_PLAYING&&EDIT_WAITING?' · Buffering…':''}`;
+ $('#edit-playhead').value=EDIT_TIME;$('#edit-state').textContent=`${editTimecode(EDIT_TIME)} · ${editFps()} fps · Shot ${pad(s.seq)} · source ${audioTime(source)}${EDIT_PLAYING&&EDIT_WAITING?' · Buffering…':''}`;
 }
 
-function editTimelineShot(){const item=shotAt(EDIT_TIME);if(!item)return toast('Add shots first',true);const s=item.shot;modal(`<div class="dlg-h"><h2>Trim shot ${pad(s.seq)}</h2></div><div class="dlg-b"><label class="f">Source in (seconds)</label><input id="et-in" type="number" min="0" step="0.041667" value="${s.trim_in||0}"><label class="f">Timeline duration (seconds)</label><input id="et-duration" type="number" min="0.5" step="0.041667" value="${s.duration}"><p>Edits affect episode assembly and preview. Source takes stay intact. Later shots and shot-anchored cues ripple automatically.</p></div><div class="dlg-f"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn pri" id="et-save">Save trim</button></div>`);$('#et-save').onclick=async()=>{const r=await editorPost('timeline',{action:'trim',id:s.id,trim_in:+$('#et-in').value,duration:+$('#et-duration').value});if(r.ok!==false){closeModal();EDIT_MEDIA_KEY='';seekEdit(EDIT_TIME)}}}
+function editTimelineShot(){const item=shotAt(EDIT_TIME);if(!item)return toast('Add shots first',true);const s=item.shot;modal(`<div class="dlg-h"><h2>Trim shot ${pad(s.seq)}</h2></div><div class="dlg-b"><label class="f">Source in (seconds)</label><input id="et-in" type="number" min="0" step="${1/editFps()}" value="${s.trim_in||0}"><label class="f">Timeline duration (seconds)</label><input id="et-duration" type="number" min="0.5" step="${1/editFps()}" value="${s.duration}"><p>Edits affect episode assembly and preview. Source takes stay intact. Later shots and shot-anchored cues ripple automatically.</p></div><div class="dlg-f"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn pri" id="et-save">Save trim</button></div>`);$('#et-save').onclick=async()=>{const r=await editorPost('timeline',{action:'trim',id:s.id,trim_in:+$('#et-in').value,duration:+$('#et-duration').value});if(r.ok!==false){closeModal();EDIT_MEDIA_KEY='';seekEdit(EDIT_TIME)}}}
 async function splitEdit(){const item=shotAt(EDIT_TIME);if(!item)return;stopEdit();if(!confirm('Split this shot at the playhead? Both parts keep their original source takes.'))return;await editorPost('timeline',{action:'split',id:item.shot.id,at:EDIT_TIME-item.start});EDIT_MEDIA_KEY=''}
 async function sceneCleanup(mode){
  const preview=await editorPost('scene',{scene:PROD_SCENE,mode});if(preview.ok===false)return;

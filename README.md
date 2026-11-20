@@ -1,13 +1,13 @@
 # Anime Studio
 
-A Mac app that runs a whole anime production on a ComfyUI server used as a render farm: script → shot list → characters → keyframes → animation → 24 fps → voices / lip sync → upscale → an assembled episode plus a DaVinci Resolve timeline.
+A Mac app that runs a whole anime production on a ComfyUI server used as a render farm: script → shot list → characters → keyframes → animation → 16 fps playback → voices / lip sync → upscale → an assembled episode plus a DaVinci Resolve timeline.
 
 The app talks to ComfyUI over its HTTP API. The core image/video workflows use nodes built into ComfyUI. Optional voices use the ComfyUI-Qwen-TTS custom node pack; the app checks the server before queuing work. Everything else runs on the Mac.
 
 | Runs on | What |
 |---|---|
 | ComfyUI server | character turnaround sheets, keyframes (Qwen-Image-Edit 2509 + Lightning), animation (Wan 2.2 I2V 14B + Lightning, normal, first/last-frame and continuation), optional lip sync (Wan 2.2 S2V), optional upscaling (RealESRGAN anime) |
-| Mac | script → shot list, shot board and choosing takes, temporary voices (`say`), 16 → 24 fps, assembly, music mix, Resolve export |
+| Mac | script → shot list, shot board and choosing takes, temporary voices (`say`), 16 fps playback and assembly, music mix, Resolve export |
 
 ## Documentation
 
@@ -60,7 +60,7 @@ The server needs **32 GB of system RAM or more**. The Wan 14B fp8 models are 14.
 
 You can also run it without the app bundle: `python3 app/anime_studio.py`, then open http://127.0.0.1:8700.
 
-**Optional:** for the smoothest 16 → 24 fps conversion, unzip rife-ncnn-vulkan (github.com/nihui/rife-ncnn-vulkan/releases) into `~/Downloads` or `~/Applications`. The app finds it there.
+**Optional:** for optional conversion of other source frame rates, unzip rife-ncnn-vulkan (github.com/nihui/rife-ncnn-vulkan/releases) into `~/Downloads` or `~/Applications`. The app finds it there.
 
 ## Using more than one GPU
 ComfyUI uses **one GPU per running copy**. To use more cards, start more copies on the server. This installs nothing:
@@ -80,7 +80,7 @@ Add each copy under **Settings → ComfyUI servers** and tick which jobs it take
    - **Continue** animates the next part of a longer shot from the last frame of the chosen clip, repeating until the shot's length is filled. The shot card shows how much is animated and warns about any time that would otherwise freeze on the last frame.
    - **End on the next shot's keyframe** uses first-last-frame mode on the final part, so the cut into the next shot is smooth.
    - **Draft** renders at 512×288 and at most 49 frames, for quick motion tests. **Render full quality** re-renders a draft take with the same seed.
-5. **24 fps.** Set per shot and applied at assembly: hold frames (classic anime timing), blend (ffmpeg interpolation), or RIFE.
+5. **16 fps.** Studio playback and assembly default to the generated clips’ native 16 fps. Frame conversion is only needed when a source uses another frame rate.
 6. **Voices (the Voices tab), then lip sync.** Video models make picture only, no sound. Make the voices **before** animating, so line lengths set shot lengths before you spend GPU time on video.
    - **Reference voice (Cast → Add or Edit).** Upload 5–15 seconds of clean speech for each character and type exactly what is said. Qwen3-TTS copies this voice.
    - **The Voices tab** lists every dialogue line in script order, grouped by scene.
@@ -97,7 +97,7 @@ Add each copy under **Settings → ComfyUI servers** and tick which jobs it take
    - Lip sync is optional: use the built-in `wan22_s2v_14b_fp8` starter under Settings → Workflows. Update ComfyUI and download the S2V models first (see **Lip sync setup** below). It creates a talking clip from the chosen keyframe and dialogue audio.
 7. **Upscale and assemble.**
    - Upscaling is optional (RealESRGAN anime → 1080p).
-   - **Assemble** makes a 1920×1080 / 24 fps episode with dialogue and music.
+   - **Assemble** makes a 1920×1080 / 16 fps episode with dialogue and music.
    - It also writes each shot as its own file, plus `timeline.edl` for DaVinci Resolve (File → Import → Timeline).
 
 ## Rough numbers for an RTX 3060 12 GB

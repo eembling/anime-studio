@@ -80,7 +80,7 @@ final class Check: NSObject, WKNavigationDelegate {
   }
  }
  func studio(){
-  web.callAsyncJavaScript("document.querySelector('#shotlist video').pause();go('studio');seekEdit(0);await startMixAudio();playEdit();return MIX_READY;",arguments:[:],in:nil,in:.page){result in
+  web.callAsyncJavaScript("document.querySelector('#shotlist video').pause();go('studio');frameEdit(1);if(editFps()!==16||Math.abs(EDIT_TIME-1/16)>0.000001||+document.querySelector('#edit-playhead').step!==1/16)throw new Error('Studio is not using 16 fps frame timing');seekEdit(0);await startMixAudio();playEdit();return MIX_READY;",arguments:[:],in:nil,in:.page){result in
    switch result {
    case .failure(let error):print("FAIL native mixer",error);exit(1)
    case .success:
@@ -88,7 +88,7 @@ final class Check: NSObject, WKNavigationDelegate {
      self.web.evaluateJavaScript("JSON.stringify({time:EDIT_TIME,playing:EDIT_PLAYING,ready:MIX_READY,state:document.querySelector('#edit-state').textContent,hidden:document.hidden,toast:document.querySelector('#toast').textContent,error:document.querySelector('#edit-monitor video')?.error?.message})"){value,error in
       guard let text=value as? String,let bytes=text.data(using:.utf8),let state=(try? JSONSerialization.jsonObject(with:bytes)) as? [String:Any],
             let time=state["time"] as? Double,time>0.2,(state["ready"] as? Bool)==true,(state["playing"] as? Bool)==true else {print("FAIL native Studio",String(describing:value),String(describing:error));exit(1)}
-      print("Native Studio and AudioWorklet passed",text);exit(0)
+      print("Native 16 fps Studio and AudioWorklet passed",text);exit(0)
      }
     }
    }
