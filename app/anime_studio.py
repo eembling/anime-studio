@@ -936,22 +936,41 @@ def retime(st, take, mode, out_fps, log=None):
         if log is not None:
             log.append("  (rife-ncnn-vulkan not found - using blend)")
     stamp = hashlib.sha256((str(src) + str(src.stat().st_mtime_ns)).encode()).hexdigest()[:12]
-    dst = st.data / "cache" / f"take{take['id']}_{stamp}_{mode}{out_fps}.mp4"
+    dst = st.data / "cache" / f"take{take['id']}_{stamp}_{mode}{out_fps}_v2.mp4"
     if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
         return dst
     enc = ["-c:v", "libx264", "-crf", "14", "-preset", "medium", "-pix_fmt", "yuv420p", "-an"]
     if mode == "hold":
         ffmpeg(["-i", str(src), "-vf", f"fps={out_fps}"] + enc + [str(dst)])
-    elif mode == "blend":
-        ffmpeg(["-i", str(src), "-vf", f"minterpolate=fps={out_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"] + enc + [str(dst)])
+        return dst
+
+    # Use the video stream's duration. Workflow metadata can disagree with
+    # the encoded file, and the container may contain a longer audio track.
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(src)],
+        capture_output=True, text=True,
+    )
+    try:
+        source_duration = float(probe.stdout.strip())
+    except ValueError:
+        source_duration = media_seconds(src)
+    if not 0 < source_duration < float("inf"):
+        raise ValueError(f"Cannot determine video duration for {src.name}.")
+    target = max(1, int(source_duration * out_fps + 0.5))
+    if mode == "blend":
+        # Interpolation looks ahead and drops the final frames without padding.
+        # Clone the edge for lookahead, then cap the output at source duration.
+        filters = f"tpad=stop_mode=clone:stop=3,minterpolate=fps={out_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"
+        ffmpeg(["-i", str(src), "-vf", filters, "-frames:v", str(target)] + enc + [str(dst)])
+    elif target == 1:
+        ffmpeg(["-i", str(src), "-vf", f"fps={out_fps}", "-frames:v", "1"] + enc + [str(dst)])
     else:
         work = st.data / "cache" / f"rife_{take['id']}"
         shutil.rmtree(work, ignore_errors=True)
         (work / "in").mkdir(parents=True)
         (work / "out").mkdir()
         ffmpeg(["-i", str(src), str(work / "in" / "%08d.png")])
-        count = len(list((work / "in").glob("*.png")))
-        target = max(2, int(round(count * out_fps / fps)))
         rp = Path(rife)
         model = next((m for m in ("rife-v4.6", "rife-v4") if (rp.parent / m).is_dir()), None)
         cmd = [str(rp), "-i", str(work / "in"), "-o", str(work / "out"), "-n", str(target)] + (["-m", model] if model else [])
@@ -1432,6 +1451,12 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
         shots = [s for s in st.ordered_shots() if scene is None or s['scene'] == scene]
         if not shots:
             raise RuntimeError("No shots yet.")
+        bed = S.get('music', '') if use_music else ''
+        build = {
+            'picture': st.soundtrack.picture_signature(shots, S), 'mix': st.soundtrack.mix_signature(cues, bed),
+            'width': W, 'height': H, 'fps': FPS, 'music': bool(use_music), 'timed': bool(use_timed),
+            'volume': float(music_volume),
+        } if not preview and scene is None else None
         name = re.sub(r"[^A-Za-z0-9_-]+", "_", S.get("title") or "episode").strip("_") or "episode"
         name += "_animatic" if preview else ""
         out = st.data / "exports" / f"{name}_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
@@ -1505,9 +1530,9 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
         master = out / '_dialogue_master.mp4'
         joined.rename(master)
         log.append('Mixing episode audio...' if cues or use_music else 'Saving dialogue-only episode...')
-        st.soundtrack.mix(master, final, cues, S.get('music', '') if use_music else '', float(music_volume), log)
+        st.soundtrack.mix(master, final, cues, bed, float(music_volume), log)
         if not preview and scene is None:
-            st.soundtrack.register(master, final, rec / FPS)
+            st.soundtrack.register(master, final, rec / FPS, build=build)
         (out / "concat.txt").unlink()
         (out / "shotlist.csv").write_text(API(st).csv_export())
         A["output"], A["folder"] = st.rel(final), st.rel(out)
@@ -1625,14 +1650,15 @@ class API:
         A["output_url"] = self.media(A.get("output"))
         S = st.settings()
         starters = {k: list(v.keys()) for k, v in STARTERS.items()}
+        cues = st.soundtrack.cues()
         S["max_clip_seconds"] = round((st.max_frames() - 1) / float(st.wf_fps()), 2)
         try:build=json.loads((Path(__file__).parent/'build_info.json').read_text())
         except (OSError,ValueError):build={'version':VERSION,'commit':'development','branch':'local source'}
         return {"project_id":hashlib.sha256(str(st.data).encode()).hexdigest()[:24],"build":build,"alignment":st.alignment.state(),"settings": S, "tts_languages": TTS_LANGUAGES, "voice_sample": VOICE_SAMPLE, "shots": shots, "assets": assets, "instances": insts, "workflows": wfs, "starters": starters,
                 "jobs": jobs, "job_counts": counts, "assembly": A, "tools": st.tools(), "music_url": self.media(S.get("music")),
                 "version": VERSION, "platform": sys.platform, "production": production, "render_queue": queue,
-                "audio_cues": [dict(c, url=self.media(c['path'])) for c in st.soundtrack.cues()],
-                "audio_exports": [dict(e, url=self.media(e['output'])) for e in st.soundtrack.exports()],
+                "audio_cues": [dict(c, url=self.media(c['path'])) for c in cues],
+                "audio_exports": [dict(e, url=self.media(e['output'])) for e in st.soundtrack.export_states(S, cues)],
                 "editor": st.editor.state(), "creative": st.creative.state(), "voice_recovery_count": len(voice_recovery_rows)}
 
     # ---- settings / servers / workflows / tools

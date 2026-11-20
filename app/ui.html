@@ -349,7 +349,7 @@ button:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var
   <button data-t="queue"><span class="en">Render queue</span><span class="jp">進行</span><span class="n" id="n-queue"></span></button>
   <div class="nav-group">Finish</div>
   <button data-t="studio"><span class="en">Studio</span><span class="jp">編集</span></button>
-  <button data-t="assemble"><span class="en">Assemble</span><span class="jp">撮影</span></button>
+  <button data-t="assemble"><span class="en">Delivery</span><span class="jp">撮影</span></button>
   <div class="nav-group">Workspace</div>
   <button data-t="settings"><span class="en">Settings</span><span class="jp">設定</span></button>
  </nav>
@@ -399,23 +399,30 @@ button:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var
   <button class="btn pri" onclick="editShot()">Add shot</button>
   <div class="chips" id="filters"></div>
   <span class="sp"></span>
-  <div class="group"><label class="check" style="margin-right:2px"><input type="checkbox" id="selall" onchange="selAll(this.checked)"> All</label><span class="lbl" id="selinfo">Selected</span><select id="ntakes" aria-label="Takes per shot"><option value="1">1 take</option><option value="2" selected>2 takes</option><option value="3">3 takes</option><option value="4">4 takes</option></select>
+  <div class="group"><label class="check" style="margin-right:2px"><input type="checkbox" id="selall" onchange="selAll(this.checked)"> All matching</label><span class="lbl" id="selinfo">Selected</span><select id="ntakes" aria-label="Takes per shot"><option value="1">1 take</option><option value="2" selected>2 takes</option><option value="3">3 takes</option><option value="4">4 takes</option></select>
    <label class="draftbox check" title="Draft: lower resolution and at most 49 frames, for quick motion tests"><input type="checkbox" id="draft"> Draft</label>
    <button class="btn sm" onclick="bulk('keyframe')">Keyframes</button><button class="btn sm" onclick="bulk('animate')">Animate</button><button class="btn sm" onclick="bulk('continue')">Continue</button><details class="action-menu"><summary class="btn sm">More actions ▾</summary><div><button class="btn sm" onclick="bulkMatch()" title="Use a recorded line only from its selected character, when its transcript matches">Use matching recordings</button><button class="btn sm" onclick="bulkVoice()" title="macOS voices for lines that have no audio yet">Temp voices</button><button class="btn sm" onclick="bulk('voice')" title="Text-to-speech in the character's voice (needs a Voice workflow)">Voice (TTS)</button><button class="btn sm" onclick="bulk('lipsync')">Lip sync</button><button class="btn sm" onclick="bulk('upscale')">Upscale</button><button class="btn sm danger" onclick="delSel()">Delete selected shots…</button></div></details></div>
  </div>
- <div id="shotlist"></div>
+ <div class="shot-workspace">
+  <div class="shot-browser" aria-label="Browse shots">
+   <label class="f" for="shot-search">Search shots</label><input id="shot-search" type="search" placeholder="Shot, scene or dialogue" oninput="changeShotScope()">
+   <label class="f" for="shot-scene">Scene</label><select id="shot-scene" onchange="changeShotScope()"></select>
+   <div id="shot-browser-list"></div>
+  </div>
+  <div id="shotlist"></div>
+ </div>
 </section>
 
 <section class="tab" id="t-studio">
  <h2>Episode timeline</h2><p>Drag shots to reorder. Trim or split at the playhead; source media stays intact. Preview selected video, dialogue and timed audio together before exporting.</p>
- <div class="theater" id="edit-monitor"><p>Seek the timeline to preview a shot.</p></div>
- <div class="toolbar"><button class="btn pri" id="edit-play" onclick="playEdit()">Play episode</button><button class="btn" onclick="frameEdit(-1)">Previous frame</button><button class="btn" onclick="frameEdit(1)">Next frame</button><button class="btn" onclick="editTimelineShot()">Trim current shot</button><button class="btn" onclick="splitEdit()">Split at playhead</button><button class="btn" onclick="editAudioCue()">Add audio cue</button><span id="edit-state"></span></div>
+ <div class="studio-viewer"><div class="theater" id="edit-monitor"><p>Seek the timeline to preview a shot.</p></div>
+ <div class="toolbar"><button class="btn pri" id="edit-play" onclick="playEdit()">Play episode</button><button class="btn" onclick="frameEdit(-1)">Previous frame</button><button class="btn" onclick="frameEdit(1)">Next frame</button><button class="btn" onclick="editTimelineShot()">Trim current shot</button><button class="btn" onclick="splitEdit()">Split at playhead</button><details class="action-menu"><summary class="btn">Move shot</summary><div><button class="btn" onclick="moveStudioShot(-1)">Move current shot earlier</button><button class="btn" onclick="moveStudioShot(1)">Move current shot later</button></div></details><button class="btn" onclick="editAudioCue()">Add audio cue</button><span id="edit-state" role="status"></span><button id="edit-return" class="btn sm" hidden onclick="returnToStudioDialogue()">Back to dialogue</button></div><p class="studio-source" id="edit-source"></p></div>
  <input id="edit-playhead" aria-label="Episode playhead in seconds" type="range" min="0" max="1" value="0" step="0.041667" oninput="seekEdit(this.value)">
  <div id="edit-track" style="display:flex;overflow-x:auto;gap:4px;padding:10px 0"></div><div id="edit-cues" class="toolbar"></div>
- <div class="toolbar"><label for="timeline-zoom">Timeline zoom</label><input id="timeline-zoom" type="range" min="12" max="100" value="30" style="width:160px" oninput="TIMELINE_ZOOM=+this.value;delete SIG['editor-timeline'];renderStudio()"><button class="btn" onclick="loadTimelineWaves()">Show dialogue waveforms</button><button class="btn" onclick="previewCut()">Preview cut boundary</button></div><button class="btn sm" onclick="drawWaveform()">Show current dialogue waveform</button><canvas id="edit-waveform" width="1000" height="90" style="width:100%;height:90px" role="img" aria-label="Dialogue waveform appears after selecting a shot with audio"></canvas>
+ <div class="toolbar"><label for="timeline-zoom">Timeline zoom</label><input id="timeline-zoom" type="range" min="12" max="100" value="30" style="width:160px" oninput="TIMELINE_ZOOM=+this.value;delete SIG['editor-timeline'];renderStudio()"><button class="btn" onclick="loadTimelineWaves()">Show dialogue waveforms</button><button class="btn" onclick="previewCut()">Preview cut boundary</button></div>
  <div class="sec"><div><h2>Series and episodes</h2><p>Episodes have their own script, shots, style settings and cues. Cast, reference voices and server workflows are shared across the series. Finish or cancel renders before switching.</p><div class="toolbar"><button class="btn" onclick="editorPost('library',{action:'save'})">Save current episode</button><button class="btn" onclick="episodeAction('new')">New episode</button><button class="btn" onclick="episodeAction('duplicate')">Duplicate episode</button></div></div><div id="episode-list" class="card"></div></div>
  <div class="sec"><div><h2>History and recovery</h2><p>Editorial changes create checkpoints. Restoring saves the current state first. Generated files stay available for recovery; history uses extra disk space.</p><div class="toolbar"><button class="btn" onclick="undoEdit()">Undo last edit</button><button class="btn" onclick="checkpointEdit()">Create checkpoint</button><button class="btn" onclick="backupProject()">Back up portable project</button><button class="btn" onclick="importProject()">Import project archive</button></div><div id="project-download"></div></div><div id="edit-history" class="card" style="max-height:480px;overflow-y:auto"></div></div>
- <div class="sec"><div><h2>Final delivery</h2><p>Inspect the current episode before exporting. Subtitles are editable. Audio stems and loudness analysis use the rendered episode chosen in Assemble and require its dialogue-only master.</p><div class="toolbar"><button class="btn" onclick="runQuality()">Check episode quality</button><button class="btn" onclick="editSubtitles()">Edit subtitles</button><button class="btn" id="stem-export" onclick="exportStems()">Export stems and loudness report</button></div><div id="stem-files" class="toolbar"></div></div><div id="delivery-qc" class="card">Run quality checks before final delivery.</div></div>
+ <div class="toolbar"><button class="btn" onclick="go('assemble')">Open delivery</button></div>
 </section>
 <section class="tab" id="t-production">
  <div class="toolbar"><button class="btn" onclick="editContinuity()">Scene continuity</button><button class="btn" onclick="compareSceneTakes()">Compare takes</button><details class="action-menu"><summary class="btn">Scene actions ▾</summary><div><button class="btn danger" onclick="sceneCleanup('clips')">Delete scene clips…</button><button class="btn danger" onclick="sceneCleanup('reset')">Reset scene settings…</button></div></details></div>
@@ -430,36 +437,38 @@ button:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var
  <div class="qstats" id="qstats"></div>
  <div class="toolbar"><button class="btn" onclick="jobs('retry_errors')">Retry failed jobs</button><details class="action-menu"><summary class="btn">Manage queue ▾</summary><div><button class="btn danger" onclick="jobs('cancel_pending')">Cancel waiting jobs</button><button class="btn" onclick="jobs('clear')">Clear finished</button></div></details></div>
  <p class="muted">Progress and finish times are approximate, based on similar successful renders. Server load and workflow changes can affect timing. A job reaches 100% only when its output is saved.</p>
+ <section class="queue-section" id="queueattentionsection" aria-labelledby="queueattentionheading" hidden><h2 id="queueattentionheading">Failed and cancelled</h2><div id="queueattention"></div></section>
+ <section class="queue-section" id="queue-review-section" hidden aria-labelledby="queue-review-heading"><h2 id="queue-review-heading">Takes to review</h2><div id="queue-review"></div></section>
  <section class="queue-section" aria-labelledby="queueactiveheading"><h2 id="queueactiveheading">Active renders</h2><div id="queueactive"></div></section>
  <section class="queue-section" aria-labelledby="queuequeuedheading"><h2 id="queuequeuedheading">Queued renders</h2><div id="queuequeued"></div></section>
  <section class="queue-section" aria-labelledby="queuecompletedheading"><h2 id="queuecompletedheading">Completed renders</h2><p id="queuecompletednote" class="muted"></p><div id="queuecompleted"></div></section>
- <section class="queue-section" id="queueattentionsection" aria-labelledby="queueattentionheading" hidden><h2 id="queueattentionheading">Failed and cancelled</h2><div id="queueattention"></div></section>
+
 </section>
 
 <section class="tab" id="t-assemble">
  <div class="asm">
   <div><div class="theater" id="theater"></div><div id="aout" style="margin-top:10px"></div>
-   <div class="panel" style="margin-top:14px"><h3>Build log</h3><pre id="alog">No build yet.</pre></div></div>
+   <details class="panel" style="margin-top:14px"><summary>Build log</summary><pre id="alog">No build yet.</pre></details></div>
   <div>
-   <div class="panel"><h3>Readiness</h3><ul class="checklist" id="readiness"></ul></div>
+   <div class="panel"><h3>Before export</h3><ul class="checklist" id="readiness"></ul><div class="toolbar"><button class="btn" onclick="runQuality()">Run detailed checks</button><button class="btn" onclick="editSubtitles()">Edit subtitles</button></div><div id="delivery-qc" role="status"></div></div>
    <div class="panel"><h3>Music bed</h3><div id="musicinfo" class="muted" style="margin-bottom:10px"></div>
     <div class="toolbar" style="margin:0"><button class="btn" onclick="pick('audio/*',f=>post('/api/music',{file:f}).then(()=>toast('Music added')))">Choose music</button>
     <label class="check">Volume <input id="mvol" type="number" step="0.05" min="0" max="2" value="0.25" style="width:72px"></label></div>
-    <label class="check" style="margin-top:10px"><input type="checkbox" id="usemusic" checked> Mix music under the episode</label></div>
+    <label class="check" style="margin-top:10px"><input type="checkbox" id="usemusic" checked onchange="renderDeliverySpec()"> Mix music under the episode</label></div>
    <div class="panel"><h3>Build the episode</h3>
-    <p class="muted" style="font-size:13px;margin:0 0 12px">Each shot becomes a 1920×1080, 24 fps clip with its dialogue. Still shots get a slow push-in, and anything not ready yet is black. The output folder also holds every shot as a separate file, a <b>timeline.edl</b> for DaVinci Resolve and the shot list.</p>
-    <button class="btn ink" style="width:100%;justify-content:center;padding:10px" onclick="post('/api/assemble',{use_music:$('#usemusic').checked,music_volume:+$('#mvol').value,use_timed:$('#usetimed').checked}).then(r=>r.ok!==false&&toast('Building the episode'))">Build episode</button>
+    <p id="delivery-spec" class="muted"></p>
+    <button class="btn pri" id="build-episode" onclick="buildDeliveryEpisode()">Build episode</button>
     <div id="arun" class="warn-t" style="margin-top:8px;font-size:13px"></div></div>
   </div>
  </div>
 
  <div class="panel" style="margin-top:20px"><h2>Timed music and sound effects</h2>
  <p>Add audio at absolute episode times (seconds, MM:SS or HH:MM:SS). Cues overlap freely; dialogue is preserved. Timing stays at these positions if you edit the shot list.</p>
- <div class="toolbar"><button class="btn pri" onclick="editAudioCue()">Add music / sound effect</button><label class="check"><input type="checkbox" id="usetimed" checked> Include enabled cues when building the episode</label></div>
+ <div class="toolbar"><button class="btn pri" onclick="editAudioCue()">Add music / sound effect</button><label class="check"><input type="checkbox" id="usetimed" checked onchange="renderDeliverySpec()"> Include enabled cues when building the episode</label></div>
  <div id="audiotimeline"></div><div id="audiocues"></div>
  <h3>Change the soundtrack after rendering</h3><p>Choose an episode, preview it, then export a new soundtrack. This copies the existing picture without rendering shots or using ComfyUI. New episode builds retain a dialogue-only master so repeated mixes do not stack.</p>
  <div class="toolbar"><label for="audioexport">Rendered episode</label><select id="audioexport" style="width:auto;max-width:100%" onchange="renderSoundtrack(true)"></select><button class="btn" onclick="post('/api/audio/discover',{}).then(r=>r.ok!==false&&toast('Found '+r.found+' older episode exports'))">Find rendered episodes</button><button class="btn" onclick="previewAudioExport()">Preview selected episode</button><button class="btn pri" onclick="exportSoundtrack()">Export new soundtrack</button></div>
- <p id="audioexportnote" class="muted"></p><p>Soundtrack exports include all enabled cues plus the whole-episode music bed above if its checkbox is selected. Older exports without a dialogue-only master retain their embedded soundtrack.</p>
+ <p id="audioexportnote" class="muted"></p><div class="toolbar"><button class="btn" id="stem-export" onclick="exportStems()">Export stems and loudness report</button></div><div id="stem-files" class="toolbar"></div><p>Soundtrack exports include all enabled cues plus the whole-episode music bed above if its checkbox is selected. Older exports without a dialogue-only master retain their embedded soundtrack.</p>
  </div>
 </section>
 
@@ -472,7 +481,7 @@ button:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var
 const $=s=>document.querySelector(s);
 let S=null,sel=new Set(),tab='shots',VOICES=null,FILTER='all',VIEW={},prevApproved={};
 const STAGES=['sheet','keyframe','animate','continue','lipsync','upscale','voice','voice_design'];
-const TITLES={studio:['Studio','Edit the episode, manage history and deliver finished work.'],production:['Production','Preview pacing, check servers, and prepare one scene at a time.'],script:['Script','Write or paste the episode, then turn it into shots.'],cast:['Cast','Characters and locations with their reference sheets.'],voices:['Voices','Generate every line in its character’s voice, choose the best take, and play scenes back.'],shots:['Shots','Keyframe, animate and finish each shot.'],queue:['Render queue','Everything sent to ComfyUI, newest first.'],assemble:['Assemble','Put the episode together and export it for Resolve.'],settings:['Settings','Servers, workflows and project defaults.']};
+const TITLES={studio:['Studio','Review picture and dialogue together, then edit the episode timeline.'],production:['Production','Preview pacing, check servers, and prepare one scene at a time.'],script:['Script','Write or paste the episode, then turn it into shots.'],cast:['Cast','Characters and locations with their reference sheets.'],voices:['Voices','Generate every line in its character’s voice, choose the best take, and play scenes back.'],shots:['Shots','Find a shot, review its takes and prepare its next render.'],queue:['Render queue','Track renders and review the takes they produced.'],assemble:['Delivery','Review the episode, assemble picture and sound, and export.'],settings:['Settings','Servers, workflows and project defaults.']};
 const jsq=s=>esc(JSON.stringify((s??'').toString()));   // JS string literal, safe inside an onclick="…" attribute
 const esc=s=>(s??'').toString().replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function post(u,b){try{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.ok===false&&j.error)toast(j.error,1);await load();return j}catch(e){toast('Can’t reach the Anime Studio server. Reopen the app.',1);return {ok:false}}}
@@ -503,7 +512,7 @@ const pad=n=>String(n|0).padStart(3,'0');
 function lb(u){$('#lbimg').src=u;$('#lightbox').style.display='flex'}
 let MODAL_OPTIONS={},MODAL_OPENER=null;
 function modal(h,options={}){MODAL_OPENER=document.activeElement;MODAL_OPTIONS=options;const dlg=$('#dlg');dlg.className='dlg '+(options.className||'');dlg.innerHTML=h;$('#modal').removeAttribute('aria-labelledby');$('#modal').removeAttribute('aria-label');const title=dlg.querySelector('h2');if(title){title.id=title.id||'dialog-title';$('#modal').setAttribute('aria-labelledby',title.id)}else $('#modal').setAttribute('aria-label','Anime Studio dialog');$('#modal').classList.add('on');setTimeout(()=>{if(!$('#modal').classList.contains('on'))return;const f=dlg.querySelector(options.initialFocus||'input:not([type=hidden]),textarea,select,button')||dlg.querySelector('button');f?.focus({preventScroll:true})},30)}
-function closeModal(){if(!$('#modal').classList.contains('on'))return true;if(MODAL_OPTIONS.beforeClose&&!MODAL_OPTIONS.beforeClose())return false;$('#modal').classList.remove('on');MODAL_OPTIONS.onClose?.();MODAL_OPTIONS={};if(MODAL_OPENER?.isConnected)MODAL_OPENER.focus({preventScroll:true});return true}
+function closeModal(options={}){if(!$('#modal').classList.contains('on'))return true;if(MODAL_OPTIONS.beforeClose&&!MODAL_OPTIONS.beforeClose(options))return false;$('#modal').classList.remove('on');MODAL_OPTIONS.onClose?.();MODAL_OPTIONS={};if(MODAL_OPENER?.isConnected)MODAL_OPENER.focus({preventScroll:true});return true}
 document.addEventListener('click',e=>{for(const menu of document.querySelectorAll('.action-menu[open]'))if(!menu.contains(e.target)||e.target.closest('button'))menu.open=false});
 $('#modal').onclick=e=>{if(e.target.id==='modal')closeModal()};
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){for(const menu of document.querySelectorAll('.action-menu[open]'))menu.open=false;closeModal();$('#lightbox').style.display='none'}if(e.key==='Tab'&&$('#modal').classList.contains('on')){const items=[...$('#dlg').querySelectorAll('button:not(:disabled),input:not(:disabled):not([type=hidden]),textarea:not(:disabled),select:not(:disabled),a[href],[tabindex="0"]')].filter(el=>el.getClientRects().length);const first=items[0],last=items[items.length-1];if(e.shiftKey&&(document.activeElement===first||!$('#dlg').contains(document.activeElement))){e.preventDefault();last?.focus()}else if(!e.shiftKey&&(document.activeElement===last||!$('#dlg').contains(document.activeElement))){e.preventDefault();first?.focus()}}});
@@ -581,7 +590,7 @@ function renderDesigned(){const el=$('#a_designed');if(!el||!$('#modal').classLi
   <td style="text-align:right;white-space:nowrap">${c.id===DREF?'<span class="flag">reference</span>':`<button class="btn sm" type="button" onclick="post('/api/clip/update',{id:${c.id},is_ref:true})">Use as reference</button>`}
   <button class="btn sm ghost" type="button" onclick="post('/api/reveal',{path:${jsq(c.path)}})" title="${esc(c.path)}">Show file</button>
   <button class="btn sm danger" type="button" onclick="if(confirm('Delete this take?'))post('/api/clip/delete',{id:${c.id}})">Delete</button></td></tr>`).join('')}</tbody></table></div>`:'')}
-async function editAsset(id){const a=id?S.assets.find(x=>x.id===id):{kind:'character',name:'',description:'',voice:'',lora:'',lora_strength:1,clips:[],voice_desc:'',voice_sample:''};
+async function editAsset(id,returnToDialogue){const a=id?S.assets.find(x=>x.id===id):{kind:'character',name:'',description:'',voice:'',lora:'',lora_strength:1,clips:[],voice_desc:'',voice_sample:''};
  const ref=refOf(a);DLG_AID=id||null;DREF=ref?ref.id:null;delete SIG.designed;
  const dReady=wfOK('voice_design'),dTakers=S.instances.some(i=>i.enabled&&i.roles.split(',').includes('voice_design'));
  if(VOICES===null){try{VOICES=(await (await fetch('/api/voices',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json()).voices||[]}catch(e){VOICES=[]}}
@@ -605,7 +614,7 @@ async function editAsset(id){const a=id?S.assets.find(x=>x.id===id):{kind:'chara
  <label class="f" for="a_vsample">Sample line the voice reads. It becomes the reference transcript.</label><input id="a_vsample" value="${esc(a.voice_sample||'')}" placeholder="${esc(S.voice_sample||'')}">
  <div class="toolbar" style="margin-top:8px"><span class="group"><span class="lbl">Takes</span><select id="a_vn"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></span><button class="btn sm pri" type="button" id="a_vgen">Generate voice</button></div>
  <div id="a_designed"></div></div>`}</div>
- <div class="dlg-f"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn pri" id="a_save">Save</button></div>`);
+ <div class="dlg-f"><button class="btn" onclick="closeModal()">${returnToDialogue?'Back to dialogue':'Cancel'}</button><button class="btn pri" id="a_save">${returnToDialogue?'Save and return':'Save'}</button></div>`,returnToDialogue?{initialFocus:'#a_vfile',onClose:()=>{DLG_AID=null;setTimeout(returnToDialogue,0)}}:{});
  $('#a_kind').value=a.kind;$('#a_voice').value=a.voice||'';
  $('#a_kind').onchange=()=>{const vb=$('#a_voicebox');if(vb)vb.style.display=$('#a_kind').value==='character'?'':'none'};
  $('#a_save').onclick=async()=>{const b={id:id||undefined,name:$('#a_name').value,kind:$('#a_kind').value,description:$('#a_desc').value,voice:$('#a_voice').value,lora:$('#a_lora').value.trim(),lora_strength:+$('#a_ls').value};
@@ -615,7 +624,7 @@ async function editAsset(id){const a=id?S.assets.find(x=>x.id===id):{kind:'chara
   if($('#a_vdesc')){b.voice_desc=$('#a_vdesc').value;b.voice_sample=$('#a_vsample').value}
   const cur=refOf(S.assets.find(x=>x.id===id));
   const r=await post('/api/asset/save',b);if(r.ok===false)return;const aid=r.id||id;
-  if(vf)await post('/api/clips/upload',{asset_id:aid,files:[await readFile(vf)],as_ref:true,transcript:vt,auto_match:true});
+  if(vf&&(await post('/api/clips/upload',{asset_id:aid,files:[await readFile(vf)],as_ref:true,transcript:vt,auto_match:!returnToDialogue})).ok===false)return;
   else if(cur&&$('#a_vtext')&&vt!==(cur.transcript||''))await post('/api/clip/update',{id:cur.id,transcript:vt});
   DLG_AID=null;closeModal()};
  const vg=$('#a_vgen');if(vg)vg.onclick=async()=>{const desc=$('#a_vdesc').value.trim();if(!desc){toast('Describe the voice first.',1);$('#a_vdesc').focus();return}
@@ -635,9 +644,11 @@ function stripHTML(){const total=S.shots.reduce((a,s)=>a+(+s.duration||0),0);if(
  return `<div class="strip"><div class="strip-head"><h2>Episode</h2><span class="muted" style="font-size:12.5px">Each slice is one shot, sized by its length. Click to jump to it.</span>
  <div class="legend"><span><i style="background:var(--line)"></i>Not started</span><span><i style="background:var(--red)"></i>Keyframe</span><span><i style="background:var(--ink)"></i>Animated</span><span><i style="background:var(--green)"></i>Finished</span></div></div>
  <div class="segs">${segs}</div><div class="ruler">${ticks}</div></div>`}
-function jump(id){if(tab!=='shots')go('shots');FILTER='all';renderShots();++SCROLL_PAINT;const el=$('#cut-'+id);if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.remove('flash');void el.offsetWidth;el.classList.add('flash')}}
-function setFilter(f){FILTER=f;sel.clear();$('#selall').checked=false;renderShots()}
-function matches(s){return FILTER==='all'||(FILTER==='voice'?missingLines(s)>0:needs(s)===FILTER)}
+function jump(id){if(tab!=='shots')go('shots');FILTER='all';
+ if(typeof selectInspectorShot==='function'){selectInspectorShot(id,true);return}
+ renderShots();++SCROLL_PAINT;const el=$('#cut-'+id);if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.remove('flash');void el.offsetWidth;el.classList.add('flash')}}
+function setFilter(f){$('#shotlist video')?.pause();FILTER=f;sel.clear();$('#selall').checked=false;$('#selall').indeterminate=false;renderShots()}
+function matches(s){return (typeof shotInScope!=='function'||shotInScope(s))&&(FILTER==='all'||(FILTER==='voice'?missingLines(s)>0:needs(s)===FILTER))}
 function updateShotCards(markup){
  const board=$('#shotlist'),template=document.createElement('template');template.innerHTML=markup;
  const existing=new Map([...board.children].filter(el=>el.id).map(el=>[el.id,el]));
@@ -654,13 +665,15 @@ function updateShotCards(markup){
 function renderShots(){return preserveMainScroll(renderShotsContent)}
 function renderShotsContent(){
  if([...document.querySelectorAll('#shotlist video')].some(v=>!v.paused))return;
- if(same('shots',[S.shots,S.assets,S.settings,S.workflows,FILTER,[...sel],VIEW]))return;
+ const scoped=S.shots.filter(matches);
+ const inspected=typeof renderShotBrowser==='function'?renderShotBrowser(scoped):scoped;
+ if(same('shots',[S.shots,S.assets,S.settings,S.workflows,FILTER,[...sel],VIEW,inspected.map(s=>s.id)]))return;
  const cn=counts();
  $('#strip').innerHTML=stripHTML();
  $('#filters').innerHTML=[['all','All',S.shots.length],['kf','Needs keyframe',cn.kf],['clip','Needs clip',cn.clip],['done','Ready',cn.done],['voice','Lines without audio',cn.lines]]
   .map(([k,l,n])=>`<button class="chip ${FILTER===k?'on':''}" onclick="setFilter('${k}')">${l}<b>${n}</b></button>`).join('');
  $('#selinfo').textContent=sel.size?`${sel.size} selected`:'Selected shots';
- const cast=Object.fromEntries(S.assets.map(a=>[a.id,a]));const list=S.shots.filter(matches);
+ const cast=Object.fromEntries(S.assets.map(a=>[a.id,a]));const list=inspected;
  if(!S.shots.length){$('#shotlist').innerHTML=`<div class="empty-state"><h2>No shots yet</h2><p>Start from the script and the app drafts the shot list for you. Or import a spreadsheet, or add shots one at a time.</p><button class="btn pri" onclick="go('script')">Open the script</button> <button class="btn" onclick="pick('.csv,.tsv,.txt',f=>post('/api/csv/import',{file:f}))">Import shot list</button> <button class="btn ghost" onclick="editShot()">Add a shot</button></div>`;return}
  if(!list.length){$('#shotlist').innerHTML=`<div class="empty-state"><h2>Nothing here</h2><p>No shots match this filter.</p><button class="btn" onclick="setFilter('all')">Show all shots</button></div>`;return}
  const fresh={};
@@ -689,16 +702,17 @@ function renderShotsContent(){
   <div class="cut-no"><label class="check"><input type="checkbox" ${sel.has(s.id)?'checked':''} onchange="tog(${s.id},this.checked)" aria-label="Select shot ${s.seq|0}"></label>
    <div class="no"><small>Shot</small>${pad(s.seq)}</div><div class="dur">${(+s.duration).toFixed(1)} s</div><div class="kind">${s.kind==='still'?'Still':'Motion'}</div>${s.outdated.length?'<span class="err">Outdated renders</span>':''}
    <div class="mv"><button onclick="post('/api/shot/move',{id:${s.id},dir:-1})" title="Move up" aria-label="Move up">▲</button><button onclick="post('/api/shot/move',{id:${s.id},dir:1})" title="Move down" aria-label="Move down">▼</button></div></div>
-  <div class="screen">${media}${viewing&&viewing.stage==='keyframe'?`<button class="btn sm danger delete-keyframe" onclick="deleteKeyframe(${s.id},${viewing.id},this)" aria-label="Delete keyframe K${kfs.findIndex(t=>t.id===viewing.id)+1} from shot ${pad(s.seq)}">Delete keyframe K${kfs.findIndex(t=>t.id===viewing.id)+1}</button>`:viewing&&['animate','lipsync','continue','upscale'].includes(viewing.stage)?`<button class="btn sm danger delete-clip" onclick="deleteClip(${s.id},${viewing.id},this)" aria-label="Delete previewed clip from shot ${pad(s.seq)}">Delete clip</button>`:''}${viewing?`<span class="tag">${lab(viewing)}</span>`:''}${viewing&&(!approved||viewing.draft)?`<span class="use" style="display:flex;gap:6px">${viewing.draft?`<button class="btn sm" onclick="fullQuality(${viewing.id})" title="Render again at full quality with the same seed">Render full quality</button>`:''}${!approved?`<button class="btn sm red" onclick="approve(${viewing.id})">Use this take</button>`:''}</span>`:''}</div>
-  <div class="info"><h3>${esc(s.scene)||'Untitled scene'}</h3>${names?`<div class="cast">${names}</div>`:''}
+  <div class="screen">${media}${viewing?.stage==='keyframe'?`<button class="btn sm preview-enlarge" onclick="lb('${viewing.url}')">Enlarge</button>`:''}${viewing&&viewing.stage==='keyframe'?`<button class="btn sm danger delete-keyframe" onclick="deleteKeyframe(${s.id},${viewing.id},this)" aria-label="Delete keyframe K${kfs.findIndex(t=>t.id===viewing.id)+1} from shot ${pad(s.seq)}">Delete keyframe K${kfs.findIndex(t=>t.id===viewing.id)+1}</button>`:viewing&&['animate','lipsync','continue','upscale'].includes(viewing.stage)?`<button class="btn sm danger delete-clip" onclick="deleteClip(${s.id},${viewing.id},this)" aria-label="Delete previewed clip from shot ${pad(s.seq)}">Delete clip</button>`:''}${viewing?`<span class="tag">${lab(viewing)} · ${approved?'Used in episode':'Preview only'}</span>`:''}${viewing?.draft?`<span class="use" style="display:flex;gap:6px">${viewing.draft?`<button class="btn sm" onclick="fullQuality(${viewing.id})" title="Render again at full quality with the same seed">Render full quality</button>`:''}</span>`:''}</div>
+  <div class="info"><h3>${esc(s.scene)||'Untitled scene'}</h3>${typeof shotNextAction==='function'?shotNextAction(s,viewing,approved):''}<details class="shot-direction"><summary>Prompts and generation details</summary>${names?`<div class="cast">${names}</div>`:''}
    <p>${esc(s.keyframe_prompt)||'<span class="muted">No keyframe description yet.</span>'}</p>
    ${s.kind==='motion'&&s.motion_prompt&&s.motion_prompt!==s.keyframe_prompt?`<p class="mp"><b>Motion:</b> ${esc(s.motion_prompt)}</p>`:''}${s.camera?`<p class="cam"><b>Camera:</b> ${esc(s.camera)}</p>`:''}
+   </details>
    ${dia?`<div class="lines">${dia}${s.audio_mode!=='file'&&(s.lines||[]).length>1&&s.audio_url?`<div class="mixbar"><button class="play" onclick="playA(this,'${s.audio_url}')" aria-label="Play all lines">▶</button>All lines together</div>`:''}</div>`:''}
-   <div class="flags">${s.draft_in_use?'<span class="flag" style="border-color:var(--amber);color:var(--amber)">Uses a draft clip</span>':''}${s.kind==='motion'?`<span class="flag">24 fps by ${s.retime==='hold'?'holding frames':s.retime==='blend'?'blending':'RIFE'}</span>`:''}${s.ref_prev?'<span class="flag">Matches previous shot</span>':''}${s.end_next?'<span class="flag">Ends on next shot</span>':''}${s.notes?`<span class="flag">${esc(s.notes)}</span>`:''}</div>
-   <div class="acts"><button class="btn sm pri" onclick="editShotVoices(${s.id})">Dialogue</button><button class="btn sm" onclick="editShot(${s.id})">Edit shot</button><button class="btn sm" onclick="openDirector(${s.id})">Direction</button><button class="btn sm" onclick="openRepair(${s.id})">Repair</button><button class="btn sm ghost" onclick="editShot(null,${s.seq})">Add shot after</button></div>${continuationCard(s)}</div>
+   <div class="flags">${s.draft_in_use?'<span class="flag" style="border-color:var(--amber);color:var(--amber)">Uses a draft clip</span>':''}${s.kind==='motion'?`<span class="flag">${esc(S.settings.out_fps||24)} fps export by ${s.retime==='hold'?'holding frames':s.retime==='blend'?'blending':'RIFE'}</span>`:''}${s.ref_prev?'<span class="flag">Matches previous shot</span>':''}${s.end_next?'<span class="flag">Ends on next shot</span>':''}${s.notes?`<span class="flag">${esc(s.notes)}</span>`:''}</div>
+   <div class="acts"><button class="btn sm" onclick="editShotVoices(${s.id})">Dialogue</button><button class="btn sm" onclick="editShot(${s.id})">Edit shot</button><details class="action-menu"><summary class="btn sm">Shot actions</summary><div><button class="btn sm" onclick="openDirector(${s.id})">Direction</button><button class="btn sm" onclick="openRepair(${s.id})">Repair</button><button class="btn sm" onclick="editShot(null,${s.seq})">Add shot after</button></div></details></div>${continuationCard(s)}</div>
   <div class="stages">
    <div class="stage"><div class="st-h"><span class="dot ${stState(s.keyframe_take,s.active.keyframe)}"></span>Keyframe<span class="cnt">${kfs.length?kfs.length+' take'+(kfs.length>1?'s':''):''}</span><span class="btns"><button class="btn sm" onclick="gen('keyframe',[${s.id}])">${kfs.length?'More':'Generate'}</button></span></div>
-    <div class="st-b">${kfs.map((t,i)=>`<span class="kf-take"><button class="th ${t.id===s.keyframe_take?'sel'+mark(t.id,'k'):''}" style="background-image:url('${t.url}')" onclick="approve(${t.id})" ondblclick="lb('${t.url}')" title="Click to use K${i+1}, double-click to enlarge" aria-label="Use keyframe K${i+1} for shot ${pad(s.seq)}"></button><span class="kf-actions"><span class="kf-label">K${i+1}</span><button type="button" class="kf-delete" onclick="deleteKeyframe(${s.id},${t.id},this)" title="Delete keyframe K${i+1}" aria-label="Delete keyframe K${i+1} from shot ${pad(s.seq)}">×</button></span></span>`).join('')}${pend('keyframe')}</div></div>
+    <div class="st-b">${kfs.map((t,i)=>`<span class="kf-take"><button class="th ${t.id===s.keyframe_take?'sel'+mark(t.id,'k'):''}" style="background-image:url('${t.url}')" onclick="view(${s.id},${t.id})" title="Preview keyframe K${i+1}" aria-label="Preview keyframe K${i+1} for shot ${pad(s.seq)}${t.id===s.keyframe_take?', used in episode':''}" aria-pressed="${viewing?.id===t.id}"></button><span class="kf-actions"><span class="kf-label">K${i+1}</span><button type="button" class="kf-delete" onclick="deleteKeyframe(${s.id},${t.id},this)" title="Delete keyframe K${i+1}" aria-label="Delete keyframe K${i+1} from shot ${pad(s.seq)}">×</button></span></span>`).join('')}${pend('keyframe')}</div></div>
    <div class="stage"><div class="st-h"><span class="dot ${s.kind==='still'&&!clips.length?(s.keyframe_take?'ok':'hollow'):stState(s.clip_take,s.active.animate||s.active.lipsync)}"></span>${s.kind==='still'?'Push-in':'Clip'}<span class="cnt">${clips.length?clips.length+' take'+(clips.length>1?'s':''):''}</span>
     <span class="btns">${s.kind==='motion'?`<button class="btn sm" ${s.keyframe_take?'':'disabled title="Choose a keyframe first"'} onclick="gen('animate',[${s.id}])">Animate</button>`:''}${s.kind==='motion'&&s.clip_take&&rem>0.25?`<button class="btn sm" onclick="gen('continue',[${s.id}])" title="Animate the next part from the last frame">Continue shot</button>`:''}${s.audio?`<button class="btn sm" ${wfOK('lipsync')&&s.keyframe_take?'':'disabled title="Needs a keyframe and a lip-sync workflow (Settings)"'} onclick="gen('lipsync',[${s.id}])">Lip sync</button>`:''}</span></div>
     <div class="st-b">${clips.length?chips(clips,s.clip_take,'T','c'):s.kind==='still'?'<span class="none">Made from the keyframe when you assemble.</span>':''}${pend('animate')}${pend('lipsync')}</div>${contRow}${pend('continue')}${cover}</div>
@@ -710,9 +724,17 @@ function renderShotsContent(){
   const sync=()=>{if(Math.abs(a.currentTime-v.currentTime)>0.15)a.currentTime=Math.min(v.currentTime,a.duration||v.currentTime)};
   v.addEventListener('play',()=>{sync();a.play().catch(()=>{})});v.addEventListener('pause',()=>a.pause());v.addEventListener('seeked',sync);
   v.addEventListener('timeupdate',()=>{if(v.currentTime<0.2&&a.currentTime>0.5)sync()})})}
-function view(sid,tid){VIEW[sid]=tid;renderShots()}
+function view(sid,tid){$("#cut-"+sid+" video")?.pause();VIEW[sid]=tid;renderShots()}
 function fullQuality(tid){const t=take(tid);if(!t)return;gen(t.stage==='continue'?'continue':'animate',[t.shot_id],{draft:false,seed:t.seed,segment:t.stage==='continue'?(t.segment||0):undefined})}
-function tog(id,on){on?sel.add(id):sel.delete(id);$('#selinfo').textContent=sel.size?`${sel.size} selected`:'Selected shots'}
+function tog(id,on){
+ on?sel.add(id):sel.delete(id);
+ $('#selinfo').textContent=sel.size?`${sel.size} selected`:'Selected shots';
+ const browser=$('#shot-select-'+id),inspector=$('#cut-'+id+' .cut-no input');
+ if(browser)browser.checked=on;if(inspector)inspector.checked=on;
+ const matching=S.shots.filter(matches),all=$('#selall');
+ all.checked=matching.length>0&&matching.every(shot=>sel.has(shot.id));
+ all.indeterminate=!all.checked&&matching.some(shot=>sel.has(shot.id));
+}
 function selAll(on){sel=new Set(on?S.shots.filter(matches).map(s=>s.id):[]);renderShots()}
 async function gen(stage,ids,extra){if(stage==='continue'&&!extra){if(ids.length!==1)return toast('Open Continue shot on each shot to set its section direction.',1);return openContinuation(ids[0])}const b=Object.assign({stage,shot_ids:ids,takes:+$('#ntakes').value,draft:(stage==='animate'||stage==='continue')&&$('#draft').checked},extra||{});
  const r=await post('/api/generate',b);if(r.ok===false)return;
@@ -892,25 +914,34 @@ function renderQueue(){
   const controls=j.status==='pending'?`<label class="check">Priority <input type="number" min="-10" max="10" value="${j.priority||0}" style="width:64px" aria-label="Priority for job ${j.id}" onchange="post('/api/jobs',{action:'priority',ids:[${j.id}],priority:+this.value})"></label>`:'';
   return `<article class="queue-job"><div class="queue-job-head"><b>${esc(label)}</b><span class="muted">#${j.id}${j.queue_position?' · queue position '+j.queue_position:''}${j.draft?' · Draft':''}${j.stage==='continue'?' · part '+((j.segment||0)+2):''}</span><span class="pill p-${j.status}">${({running:'Active',pending:'Queued',done:'Completed',error:'Failed',cancelled:'Cancelled'})[j.status]}</span></div>
    <div class="queue-job-body"><div class="queue-meter">${queueProgress(j,label)}${queueModels(j)}<div class="muted">${esc(timing)}</div>${j.status==='running'&&j.progress?`<div class="muted">${esc(j.progress)}</div>`:''}${server?`<div class="muted">${j.status==='pending'?'Expected server: ':'Server: '}${esc(server)}</div>`:''}${j.sample_count&&['pending','running'].includes(j.status)?`<div class="muted">Estimate from ${j.sample_count} similar successful render${j.sample_count===1?'':'s'}</div>`:''}${j.error?`<div class="render-diagnostic"><b>${esc(j.diagnostic?.title||'Render failed')}</b><p>${esc(j.diagnostic?.guidance||'Review the technical details and retry.')}</p><button class="btn sm" onclick="openRenderRepair('${j.diagnostic?.action||'workflows'}',${j.shot_id||0})">${j.diagnostic?.action==='shots'?'Review shot':'Review settings'}</button><details><summary>Technical details</summary><pre>${esc(j.error)}</pre></details></div>`:''}</div>
-   <div class="queue-actions">${controls}${['pending','running'].includes(j.status)?`<button class="btn sm" onclick="post('/api/jobs',{action:'cancel',ids:[${j.id}]})">Cancel</button>`:''}${j.status==='done'&&j.snapshot_json?`<button class="btn sm" onclick="repeatRender(${j.id})">Repeat captured render</button>`:''}${['error','cancelled'].includes(j.status)?`<button class="btn sm" onclick="post('/api/jobs',{action:'retry',ids:[${j.id}]})">${esc(j.diagnostic?.retry_label||'Retry')}</button>`:''}</div></div></article>`;
+   <div class="queue-actions">${controls}${j.status==='done'&&typeof queueResultActions==='function'?queueResultActions(j):''}${['pending','running'].includes(j.status)?`<button class="btn sm" onclick="post('/api/jobs',{action:'cancel',ids:[${j.id}]})">Cancel</button>`:''}${j.status==='done'&&j.snapshot_json?`<button class="btn sm" onclick="repeatRender(${j.id})">Repeat captured render</button>`:''}${['error','cancelled'].includes(j.status)?`<button class="btn sm" onclick="post('/api/jobs',{action:'retry',ids:[${j.id}]})">${esc(j.diagnostic?.retry_label||'Retry')}</button>`:''}</div></div></article>`;
  };
- $('#queueactive').innerHTML=q.active.map(card).join('')||'<p class="muted">No active renders.</p>';
+ const group=typeof renderQueueGroups==='function'?rows=>renderQueueGroups(rows,card):rows=>rows.map(card).join('');
+ const review=q.completed.filter(job=>typeof queueResults==='function'&&queueResults(job).some(result=>!result.selected));
+ const reviewIds=new Set(review.map(job=>job.id));
+ if($('#queue-review')){$('#queue-review-section').hidden=!review.length;updateQueueSection('#queue-review',group(review))}
+ updateQueueSection('#queueactive',group(q.active)||'<p class="muted">No active renders.</p>');
  // Keep a priority field stable while the user is typing; other sections continue updating.
- if(!document.activeElement?.closest('#queuequeued input'))$('#queuequeued').innerHTML=q.queued.map(card).join('')||'<p class="muted">Nothing queued.</p>';
- $('#queuecompleted').innerHTML=q.completed.map(card).join('')||'<p class="muted">No completed renders yet.</p>';
+ if(!document.activeElement?.closest('#queuequeued input'))updateQueueSection('#queuequeued',group(q.queued)||'<p class="muted">Nothing queued.</p>');
+ updateQueueSection('#queuecompleted',group(q.completed.filter(job=>!reviewIds.has(job.id)))||'<p class="muted">No other completed renders.</p>');
  $('#queuecompletednote').textContent=c.done>q.completed.length?`Showing the latest ${q.completed.length} of ${c.done} completed renders.`:'';
- $('#queueattention').innerHTML=q.attention.map(card).join('');
+ updateQueueSection('#queueattention',group(q.attention));
  $('#queueattentionsection').hidden=!q.attention.length;
+}
+function updateQueueSection(selector,markup){
+ const section=$(selector);
+ if(document.activeElement&&section.contains?.(document.activeElement))return;
+ if(section._queueMarkup!==markup){section.innerHTML=markup;section._queueMarkup=markup}
 }
 function jobs(a){post('/api/jobs',{action:a})}
 
 /* ---------- assemble ---------- */
 let LAST_ASSEMBLY_OUTPUT=null;
-function renderAssemble(){renderSoundtrack();const total=S.shots.reduce((a,s)=>a+(+s.duration||0),0),cn=counts();
+function renderAssemble(){renderSoundtrack();renderDeliverySpec();const total=S.shots.reduce((a,s)=>a+(+s.duration||0),0),cn=counts();
  const held=S.shots.filter(s=>s.kind==='motion'&&s.clip_take&&(s.remaining||0)>0.25).length,drafts=S.shots.filter(s=>s.draft_in_use).length;
- $('#readiness').innerHTML=`<li><span class="dot ${cn.done===S.shots.length&&S.shots.length?'ok':'run'}"></span>Shots ready<b>${cn.done} of ${S.shots.length}</b></li><li><span class="dot ${cn.kf?'bad':'ok'}"></span>Missing a keyframe<b>${cn.kf}</b></li><li><span class="dot ${cn.clip?'run':'ok'}"></span>Missing a clip<b>${cn.clip}</b></li><li><span class="dot ${cn.lines?'run':'ok'}"></span>Dialogue lines without audio<b>${cn.lines}</b></li><li><span class="dot ${held?'run':'ok'}"></span>Motion shots that freeze at the end<b>${held}</b></li><li><span class="dot ${drafts?'run':'ok'}"></span>Shots using draft clips<b>${drafts}</b></li><li><span class="dot hollow"></span>Runtime<b>${fmtT(total)}</b></li>`;
+ $('#readiness').innerHTML=`<li><span class="dot ${cn.done===S.shots.length&&S.shots.length?'ok':'run'}"></span>Shots ready<b>${cn.done} of ${S.shots.length}</b></li><li><span class="dot ${cn.kf?'bad':'ok'}"></span><button class="btn sm ghost" onclick="showDeliveryIssues('kf')">Missing a keyframe</button><b>${cn.kf}</b></li><li><span class="dot ${cn.clip?'run':'ok'}"></span><button class="btn sm ghost" onclick="showDeliveryIssues('clip')">Missing a clip</button><b>${cn.clip}</b></li><li><span class="dot ${cn.lines?'run':'ok'}"></span><button class="btn sm ghost" onclick="showDeliveryIssues('voice')">Dialogue lines without audio</button><b>${cn.lines}</b></li><li><span class="dot ${held?'run':'ok'}"></span><button class="btn sm ghost" onclick="showDeliveryIssues('held')">Motion shots with a final frame hold</button><b>${held}</b></li><li><span class="dot ${drafts?'run':'ok'}"></span><button class="btn sm ghost" onclick="showDeliveryIssues('draft')">Shots using draft clips</button><b>${drafts}</b></li><li><span class="dot hollow"></span>Runtime<b>${fmtT(total)}</b></li>`;
  $('#musicinfo').innerHTML=S.music_url?`<audio src="${S.music_url}" controls style="height:30px;width:100%"></audio><button class="btn sm ghost" style="margin-top:6px" onclick="post('/api/music',{clear:true})">Remove music</button>`:'No music chosen.';
- const A=S.assembly;$('#arun').textContent=A.running?'Building… this can take a while for a long episode.':'';$('#alog').textContent=(A.log||[]).join('\n')||'No build yet.';
+ const A=S.assembly;$('#build-episode').disabled=A.running||!S.shots.length;$('#arun').textContent=A.running?'Building… this can take a while for a long episode.':'';$('#alog').textContent=(A.log||[]).join('\n')||'No build yet.';
  if(A.output_url){if(LAST_ASSEMBLY_OUTPUT!==A.output_url){LAST_ASSEMBLY_OUTPUT=A.output_url;$('#theater').dataset.u=A.output_url;$('#theater').innerHTML=`<video src="${A.output_url}" controls></video>`;
    $('#aout').innerHTML=`<div class="toolbar"><button class="btn" onclick="post('/api/reveal',{path:${jsq(A.output)}})">Show in Finder</button><a class="btn ghost" href="${A.output_url}" download>Save a copy</a><span class="muted" style="font-size:13px">In Resolve: File › Import › Timeline, choose timeline.edl, then point it at the shots folder.</span></div>`}}
  else if(!$('#theater').dataset.u)$('#theater').innerHTML='<div>Your episode plays here after the first build.</div>'}
@@ -920,20 +951,47 @@ function audioTime(n){const ms=Math.round(n*1000),hours=Math.floor(ms/3600000),m
 function audioPlayhead(){const v=$('#theater video');return v&&Number.isFinite(v.currentTime)?v.currentTime:0}
 function renderSoundtrack(force=false){
  const cues=S.audio_cues||[],exports=S.audio_exports||[],sel=$('#audioexport'),old=sel.value;
- if(force||!same('audioexports',exports)){sel.innerHTML=exports.map(e=>`<option value="${e.id}">${esc(e.title)} · ${audioTime(e.seconds)}</option>`).join('')||'<option value="">No rendered episodes found</option>';if(exports.some(e=>String(e.id)===old))sel.value=old}
- const current=exports.find(e=>e.id===+sel.value),duration=current?current.seconds:S.shots.reduce((sum,s)=>sum+s.duration,0);
+ if(force||!same('audioexports',exports)){sel.innerHTML=exports.map(e=>`<option value="${e.id}">${esc(e.title)} · ${audioTime(e.seconds)}${e.created?' · '+esc(new Date(e.created*1000).toLocaleString()):''}${e.edit_status==='changed'?' · Edit changed':e.edit_status==='current'?' · Current edit':''}</option>`).join('')||'<option value="">No rendered episodes found</option>';if(exports.some(e=>String(e.id)===old))sel.value=old}
+ const current=exports.find(e=>e.id===+sel.value),duration=S.shots.reduce((sum,s)=>sum+s.duration,0)||current?.seconds||0;
  $('#audioexportnote').textContent=current?(current.clean?'A dialogue-only master is available. Each export rebuilds the mix from that master.':'This older episode contains its existing audio. New cues will be added on top; rebuild the episode once for a clean master.'):'Build an episode, or click Find rendered episodes for earlier app exports.';
+ if(current?.created)$('#audioexportnote').textContent=`Built ${new Date(current.created*1000).toLocaleString()} · ${current.edit_status==='changed'?'Episode changed since export.':current.edit_status==='current'?'Matches the current episode using its saved mix options.':'Edit status unavailable for this earlier export.'} `+$('#audioexportnote').textContent;
  if(!force&&same('audiocues',[cues,duration]))return;
  $('#audiotimeline').innerHTML=duration?`<p class="muted">Episode timeline · ${audioTime(duration)} · click a cue to edit its timing</p>`+['music','sfx'].map(kind=>`<span class="muted">${kind==='music'?'Music':'Sound effects'}</span><div class="audio-lane">${cues.filter(c=>c.kind===kind&&c.enabled&&c.start<duration).map(c=>`<button class="audio-cue ${kind}" style="left:${100*c.start/duration}%;width:${100*Math.min(c.duration,duration-c.start)/duration}%" onclick="editAudioCue(${c.id})" title="${esc(c.name)} at ${audioTime(c.start)}" aria-label="Edit ${esc(c.name)} at ${audioTime(c.start)}">${esc(c.name)}</button>`).join('')}</div>`).join(''):'<p class="muted">Add shots or choose a rendered episode to see the timeline.</p>';
  $('#audiocues').innerHTML='<div class="audio-list">'+cues.map(c=>`<div class="audio-item"><label class="check"><input type="checkbox" ${c.enabled?'checked':''} onchange="toggleAudioCue(${c.id},this.checked)" aria-label="Enable ${esc(c.name)}">${esc(c.name)}</label><span>${c.kind==='music'?'Music':'Sound effect'} · ${audioTime(c.start)} → ${audioTime(c.start+c.duration)} · volume ${c.volume}${c.loop?' · loop':''}</span>${duration&&c.start>=duration?'<span class="err">Starts after episode end; will be skipped</span>':''}<audio controls preload="none" src="${c.url}" style="height:30px;max-width:220px" aria-label="Preview source ${esc(c.name)}"></audio><button class="btn sm" onclick="seekEpisode(${c.start})">Go to time</button><button class="btn sm" onclick="editAudioCue(${c.id})">Edit timing</button><button class="btn sm danger" onclick="removeAudioCue(${c.id})">Remove cue</button></div>`).join('')+'</div>'+(cues.length?'':'<p class="muted">No timed audio yet. Add a music track, footsteps, a door slam, ambience, or another sound.</p>');
 }
 function seekEpisode(time){const v=$('#theater video');if(!v)return toast('Preview a rendered episode first');v.currentTime=Math.min(time,Number.isFinite(v.duration)?v.duration:time)}
-function previewAudioExport(){const e=(S.audio_exports||[]).find(e=>e.id===+$('#audioexport').value);if(!e)return toast('Choose a rendered episode first',1);$('#theater').dataset.u=e.url;$('#theater').innerHTML=`<video src="${e.url}" controls></video>`;$('#aout').innerHTML=`<a class="btn" href="${e.url}" download>Save this episode</a>`}
+function renderDeliverySpec(){
+ const box=$('#delivery-spec');if(!box)return;
+ const seconds=S.shots.reduce((total,shot)=>total+shot.duration,0);
+ const cues=(S.audio_cues||[]).filter(cue=>cue.enabled&&cue.start<seconds);
+ const sources=[];
+ if(S.shots.some(shot=>shot.audio_url))sources.push('Dialogue');
+ if($('#usemusic').checked&&S.music_url)sources.push('Music bed');
+ if($('#usetimed').checked)for(const [kind,label] of [['music','Music cues'],['sfx','Sound effects']]){
+  const count=cues.filter(cue=>cue.kind===kind).length;if(count)sources.push(label+' ('+count+')');
+ }
+ box.textContent=`${audioTime(seconds)} · ${S.settings.out_width} × ${S.settings.out_height} · ${S.settings.out_fps} fps · ${sources.length?'Stereo mix: '+sources.join(', '):'Silent audio track'}`;
+}
+function buildDeliveryEpisode(){
+ return post('/api/assemble',{use_music:$('#usemusic').checked,music_volume:+$('#mvol').value,use_timed:$('#usetimed').checked}).then(result=>result.ok!==false&&toast('Building the episode'));
+}
+function showDeliveryIssues(kind){
+ const rows=[];
+ for(const shot of S.shots){
+  if(kind==='voice'&&shot.audio_mode!=='file'){
+   for(const [index,line] of (shot.lines||[]).entries())if(!line.audio)rows.push(`<div class="delivery-issues"><button class="btn sm" onclick="editShotVoices(${shot.id},${index})">Shot ${pad(shot.seq)} · Line ${index+1}</button><span>${esc(line.character_name||line.speaker||'Unassigned')} · ${esc(line.text)}</span></div>`);
+  }else if((kind==='kf'&&!shot.keyframe_take)||(kind==='clip'&&shot.kind==='motion'&&!shot.clip_take)||(kind==='held'&&shot.remaining>.25)||(kind==='draft'&&shot.draft_in_use)){
+   rows.push(`<div class="delivery-issues"><button class="btn sm" onclick="jump(${shot.id})">Shot ${pad(shot.seq)}</button><span>${esc(shot.scene||'Untitled scene')}</span></div>`);
+  }
+ }
+ $('#delivery-qc').innerHTML=rows.join('')||'<p>No matching issues.</p>';
+}
+function previewAudioExport(){const e=(S.audio_exports||[]).find(e=>e.id===+$('#audioexport').value);if(!e)return toast('Choose a rendered episode first',1);$('#theater').dataset.u=e.url;$('#theater').innerHTML=`<video src="${e.url}" controls></video>`;$('#aout').innerHTML=`<a class="btn" href="${e.url}" download>Save this episode</a><span class="muted"> ${e.build?`${e.build.width} × ${e.build.height} · ${e.build.fps} fps`:''}</span>`}
 function editAudioCue(id){const cue=id?(S.audio_cues||[]).find(c=>c.id===id):null;if(id&&!cue)return;
- const c=cue||{name:'',kind:'sfx',start:audioPlayhead(),offset:0,duration:'',volume:1,fade_in:0,fade_out:0,loop:0,enabled:1};
+ const c=cue||{name:'',kind:'sfx',start:tab==='studio'?EDIT_TIME:audioPlayhead(),offset:0,duration:'',volume:1,fade_in:0,fade_out:0,loop:0,enabled:1};
  modal(`<div class="dlg-h"><h2>${id?'Edit audio cue':'Add music or sound effect'}</h2></div><div class="dlg-b"><label class="f" for="acfile">Audio file ${id?'(leave empty to keep current source)':''}</label><input type="file" id="acfile" accept="audio/*"><div class="g2"><div><label class="f" for="acname">Name</label><input id="acname" value="${esc(c.name)}"></div><div><label class="f" for="ackind">Track</label><select id="ackind"><option value="sfx">Sound effect</option><option value="music">Music</option></select></div></div>
- <label class="f">Follow a shot</label><select id="acanchor"><option value="">Absolute episode time</option>${S.shots.map(s=>`<option value="${s.id}" ${s.id===c.anchor_shot?'selected':''}>Shot ${pad(s.seq)} · ${esc(s.scene)}</option>`).join('')}</select><label class="f">Offset from shot start (seconds)</label><input id="acanchoroffset" type="number" min="0" step="0.01" value="${c.anchor_offset||0}"><p class="muted">Times accept seconds, MM:SS or HH:MM:SS. Start is measured from the beginning of the episode. Source offset skips the beginning of the audio file.</p>
- <div class="g2"><div><label class="f" for="acstart">Episode start time</label><input id="acstart" value="${audioTime(c.start)}"><button class="btn sm" onclick="$('#acstart').value=audioTime(audioPlayhead())">Use episode playhead</button></div><div><label class="f" for="acoffset">Source offset</label><input id="acoffset" value="${audioTime(c.offset)}"></div><div><label class="f" for="acduration">Play duration (blank = remaining source length)</label><input id="acduration" value="${c.duration===''?'':audioTime(c.duration)}"></div><div><label class="f" for="acvolume">Volume (0 = mute, 1 = original)</label><input id="acvolume" type="number" min="0" max="4" step="0.05" value="${c.volume}"></div><div><label class="f" for="acfadein">Fade in</label><input id="acfadein" value="${audioTime(c.fade_in)}"></div><div><label class="f" for="acfadeout">Fade out</label><input id="acfadeout" value="${audioTime(c.fade_out)}"></div></div><label class="check"><input id="acloop" type="checkbox" ${c.loop?'checked':''}> Loop source to fill play duration</label><label class="check" style="margin-left:14px"><input id="acenabled" type="checkbox" ${c.enabled?'checked':''}> Enabled</label></div><div class="dlg-f"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn pri" id="acsave">Save cue</button></div>`);
+ <label class="f" for="acanchor">Follow a shot</label><select id="acanchor"><option value="">Absolute episode time</option>${S.shots.map(s=>`<option value="${s.id}" ${s.id===c.anchor_shot?'selected':''}>Shot ${pad(s.seq)} · ${esc(s.scene)}</option>`).join('')}</select><label class="f" for="acanchoroffset">Offset from shot start (seconds)</label><input id="acanchoroffset" type="number" min="0" step="0.01" value="${c.anchor_offset||0}"><p class="muted">Times accept seconds, MM:SS or HH:MM:SS. Start is measured from the beginning of the episode. Source offset skips the beginning of the audio file.</p>
+ <div class="g2"><div><label class="f" for="acstart">Episode start time</label><input id="acstart" value="${audioTime(c.start)}"><button class="btn sm" onclick="$('#acstart').value=audioTime(tab==='studio'?EDIT_TIME:audioPlayhead())">Use episode playhead</button></div><div><label class="f" for="acoffset">Source offset</label><input id="acoffset" value="${audioTime(c.offset)}"></div><div><label class="f" for="acduration">Play duration (blank = remaining source length)</label><input id="acduration" value="${c.duration===''?'':audioTime(c.duration)}"></div><div><label class="f" for="acvolume">Volume (0 = mute, 1 = original)</label><input id="acvolume" type="number" min="0" max="4" step="0.05" value="${c.volume}"></div><div><label class="f" for="acfadein">Fade in</label><input id="acfadein" value="${audioTime(c.fade_in)}"></div><div><label class="f" for="acfadeout">Fade out</label><input id="acfadeout" value="${audioTime(c.fade_out)}"></div></div><label class="check"><input id="acloop" type="checkbox" ${c.loop?'checked':''}> Loop source to fill play duration</label><label class="check" style="margin-left:14px"><input id="acenabled" type="checkbox" ${c.enabled?'checked':''}> Enabled</label></div><div class="dlg-f"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn pri" id="acsave">Save cue</button></div>`);
  $('#ackind').value=c.kind;
  $('#acsave').onclick=async()=>{const button=$('#acsave'),file=$('#acfile').files[0];if(!id&&!file)return toast('Choose an audio file first',1);button.disabled=true;try{const b={id,anchor_shot:+$('#acanchor').value||null,anchor_offset:+$('#acanchoroffset').value,name:$('#acname').value,kind:$('#ackind').value,start:$('#acstart').value,offset:$('#acoffset').value,duration:$('#acduration').value,volume:+$('#acvolume').value,fade_in:$('#acfadein').value,fade_out:$('#acfadeout').value,loop:$('#acloop').checked,enabled:$('#acenabled').checked};if(file)b.file=await readFile(file);const r=await post('/api/audio/cue/save',b);if(r.ok!==false){closeModal();toast('Audio cue saved')}}finally{button.disabled=false}};
 }

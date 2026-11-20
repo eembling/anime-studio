@@ -124,6 +124,24 @@ class SoundtrackTests(unittest.TestCase):
         self.assertEqual(self.video_hashes(master),self.video_hashes(output))
         self.assertAlmostEqual(probe(output)[0],2,delta=.05)
 
+    def test_export_status_follows_episode_edits_and_remixes_keep_history(self):
+        api=app.API(self.st)
+        sid=api.shot_save({'scene':'Timing','kind':'still','duration':2})['id']
+        app.assemble(self.st,False,.25)
+        original=api.state()['audio_exports'][0]
+        self.assertEqual(original['edit_status'],'current')
+        self.assertEqual(original['build']['fps'],24)
+        self.cue()
+        self.assertEqual(api.state()['audio_exports'][0]['edit_status'],'changed')
+        source=self.audio.exports()[0]
+        self.audio._export(source,self.root/source['master'],self.audio.cues(),'',.25)
+        latest, earlier=api.state()['audio_exports']
+        self.assertEqual(latest['edit_status'],'current')
+        self.assertEqual(earlier['id'],original['id'])
+        self.assertEqual(earlier['edit_status'],'changed')
+        self.st.db.x('UPDATE shots SET duration=3 WHERE id=?',(sid,))
+        self.assertEqual([row['edit_status'] for row in api.state()['audio_exports']],['changed','changed'])
+
     def test_remix_uses_clean_master_and_never_uses_previous_mix(self):
         self.audio.register(self.master,self.master,3)
         self.cue()

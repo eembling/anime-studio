@@ -12,3 +12,11 @@ test('timeline waveform uses the source trim window',()=>{const{ctx}=setup();vm.
 test('moving a shot-anchored cue retains its anchor and other mix settings',async()=>{const{ctx,calls}=setup();ctx.S.audio_cues=[{id:1,anchor_shot:2,anchor_offset:1,start:5,offset:.3,duration:2,volume:.5,kind:'music',enabled:1}];await ctx.moveTimelineCue(1,6);const body=calls[0].body;assert.equal(body.anchor_shot,2);assert.equal(body.anchor_offset,2);assert.equal(body.volume,.5);assert.equal(body.offset,.3)});
 test('build info presents the application version and source commit',()=>{const{ctx,elements}=setup();ctx.showBuildInfo();assert.match(elements.modal,/Anime Studio 2.11/);assert.match(elements.modal,/abc123/);assert.match(elements.modal,/codex\/test/)});
 test('repeating a render queues the exact job only after explicit confirmation',async()=>{const{ctx,calls}=setup();await ctx.repeatRender(12);assert.equal(calls[0].body.action,'repeat');assert.equal(calls[0].body.ids[0],12);ctx.confirm=()=>false;await ctx.repeatRender(13);assert.equal(calls.filter(c=>c.url).length,1)});
+test('a short waveform leaves the rest of the shot visually silent',()=>{
+ const{ctx}=setup();
+ vm.runInContext("TIMELINE_WAVES.set('/short.wav',{seconds:1,peaks:[.5,.9]})",ctx);
+ const html=ctx.timelineWaveHTML({audio_url:'/short.wav',trim_in:0,duration:4});
+ assert.match(html,/viewBox="0 0 8 50"/);
+ assert.equal((html.match(/<path/g)||[]).length,2);
+ assert.match(html,/M1.5 /);
+});

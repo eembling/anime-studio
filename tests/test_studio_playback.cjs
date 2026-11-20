@@ -20,7 +20,7 @@ test('buffering pauses every track and freezes the shared timeline',()=>{
  const s=setup({videoReady:0});s.ctx.playEdit();s.advance(1000);assert.equal(s.time(),0);assert.equal(s.audios[0].paused,true);assert.equal(s.audios[0].plays,0);assert.match(s.elements['#edit-state'].textContent,/Buffering/);
  s.video().readyState=4;s.ctx.updateEdit(false);s.advance(1000);assert.equal(s.time(),1);assert.equal(s.audios[0].paused,false);
 });
-test('audio buffering also pauses video',()=>{const s=setup();s.ctx.playEdit();s.audios[0].readyState=2;s.ctx.updateEdit(false);s.advance(1000);assert.equal(s.time(),0);assert.equal(s.video().paused,true)});
+test('audio buffering also pauses video',()=>{const s=setup();s.ctx.playEdit();s.audios[0].readyState=1;s.ctx.updateEdit(false);s.advance(1000);assert.equal(s.time(),0);assert.equal(s.video().paused,true)});
 test('short dialogue remains silent after its end rather than replaying',()=>{
  const s=setup({audioDuration:1});s.ctx.playEdit();const audio=s.audios[0],plays=audio.plays;s.ctx.seekEdit(2);assert.equal(audio.currentTime,1);assert.equal(audio.paused,true);s.advance(100);assert.equal(audio.plays,plays);
 });
@@ -37,3 +37,16 @@ test('paused frame stepping uses output fps without changing media speed',()=>{c
 
 test('an ended track is not restarted by sub-frame clock drift',()=>{const s=setup();s.ctx.playEdit();const audio=s.audios[0],plays=audio.plays;audio.ended=true;audio.currentTime=6;s.ctx.seekEdit(5.98);assert.equal(audio.paused,true);assert.equal(audio.plays,plays)});
 test('a normal play/pause interruption does not stop the transport',async()=>{const s=setup();s.ctx.seekEdit(0);s.video().play=()=>Promise.reject({name:'AbortError'});s.ctx.playEdit();await new Promise(resolve=>setImmediate(resolve));assert.equal(s.playing(),true)});
+
+test('current-data-only media starts loading without advancing the timeline before play resolves',async()=>{
+ const s=setup({videoReady:2});s.ctx.seekEdit(0);const video=s.video();
+ let resolvePlay;
+ video.play=()=>{video.paused=false;return new Promise(resolve=>{resolvePlay=resolve})};
+ s.ctx.playEdit();assert.equal(video.paused,false);
+ s.advance(200);assert.equal(s.time(),0);
+ resolvePlay();await new Promise(resolve=>setImmediate(resolve));s.ctx.updateEdit(false);
+ s.advance(30);assert.equal(s.time(),.03);
+});
+test('forced updates do not restart a seek at the same position',()=>{const s=setup();s.ctx.seekEdit(0);let writes=0,position=0;Object.defineProperty(s.video(),'currentTime',{get:()=>position,set:v=>{writes++;position=v;s.video().seeking=true}});s.ctx.updateEdit(true);assert.equal(writes,0);s.ctx.playEdit();assert.equal(writes,0);assert.equal(s.video().paused,false)});
+test('an in-flight seek is allowed to finish before another correction',()=>{const s=setup();s.ctx.seekEdit(0);const video=s.video();let writes=0;Object.defineProperty(video,'currentTime',{get:()=>0,set:()=>writes++});video.seeking=true;s.ctx.seekEdit(1);s.ctx.updateEdit(true);assert.equal(writes,0);video.seeking=false;s.ctx.updateEdit(true);assert.equal(writes,1)});
+test('an undecodable track stops the transport with an actionable error',()=>{const s=setup();s.ctx.playEdit();s.video().error={code:3};s.ctx.updateEdit(false);assert.equal(s.playing(),false);assert.match(s.elements['#edit-state'].textContent,/could not be decoded/);assert.equal(s.audios[0].paused,true)});

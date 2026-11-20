@@ -5,6 +5,25 @@ class Workspace:
     def __init__(self,studio):self.st=studio;self.waves={}
     def action(self,body):
         st=self.st;shot=st.creative.shot(body['shot_id'])
+        if body['action']=='line_range':
+            if shot['audio_mode']=='file':
+                raise ValueError('This shot uses a single audio file.')
+            from anime_studio import media_seconds
+            elapsed = 0.0
+            gap = float(st.settings().get('line_gap') or .3)
+            trim = float(shot.get('trim_in') or 0)
+            for line in st.shot_lines(shot):
+                timing = st.creative.timing(shot['id'], line)
+                elapsed += round(timing.get('lead_in', 0)*1000)/1000
+                length = (media_seconds(st.abs(line['audio'])) if line.get('audio') else
+                          round(max(1.0, len(line['text'].split())/2.6), 2))
+                if line['line_id'] == body['line_id']:
+                    start, end = max(0, elapsed-trim), min(shot['duration'], elapsed+length-trim)
+                    if not line.get('audio') or end <= start:
+                        raise ValueError('The selected line has no audible range in the shot.')
+                    return {'ok': True, 'start': start, 'end': end}
+                elapsed += length + timing.get('pause_after', gap)
+            raise ValueError('This line is no longer in the shot.')
         if body['action']=='waveform':
             if not shot.get('audio'):return {'ok':True,'peaks':[],'seconds':0}
             path=st.creative.path(shot['audio']);key=tuple(st.production.file_stamp(shot['audio']))
