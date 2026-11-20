@@ -4,13 +4,14 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 from urllib.parse import urlparse, parse_qs
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 
 port = int(sys.argv[1]); root = Path(sys.argv[2]); gpu = sys.argv[3]
 inp, out = root / "input", root / "output"
 inp.mkdir(parents=True, exist_ok=True); out.mkdir(parents=True, exist_ok=True)
 history, prompts_seen = {}, []
 REQUIRED = {
+    "ImageCompositeMasked": ["destination", "source", "mask", "x", "y", "resize_source"],
     "TextEncodeQwenImageEditPlus": ["clip", "prompt"], "WanImageToVideo": ["positive", "negative", "vae", "width", "height", "length", "batch_size"],
     "KSamplerAdvanced": ["model", "positive", "negative", "latent_image", "add_noise", "noise_seed", "steps", "cfg", "sampler_name", "scheduler", "start_at_step", "end_at_step", "return_with_leftover_noise"],
     "KSampler": ["model", "positive", "negative", "latent_image", "seed", "steps", "cfg", "sampler_name", "scheduler", "denoise"],
@@ -73,6 +74,13 @@ def render(pid, wf):
     for i in range(frames):
         im = src.copy(); d = ImageDraw.Draw(im)
         d.rectangle([i * 6 % w, 20, i * 6 % w + 40, 60], fill=(255, 200, 0)); d.text((10, h - 20), f"{gpu} {pid[:6]} f{i}", fill=(255, 255, 255))
+        if 'ImageCompositeMasked' in cls:
+            composite = cls['ImageCompositeMasked'][1]['inputs']
+            destination = wf[str(composite['destination'][0])]['inputs']['image']
+            mask_node = wf[str(composite['mask'][0])]['inputs']['image']
+            original = Image.open(inp/destination).convert('RGB')
+            mask = ImageOps.invert(Image.open(inp/mask_node).convert('RGBA').getchannel('A')).resize(original.size)
+            im = Image.composite(im.resize(original.size), original, mask)
         fn = f"{base}_{i + 1:05d}_.png"; im.save(out / sub / fn); imgs.append({"filename": fn, "subfolder": sub, "type": "output"})
     history[pid] = {"prompt": [0, pid, wf, {}, []], "outputs": {save_k: {"images": imgs}},
                     "status": {"status_str": "success", "completed": True, "messages": []}}

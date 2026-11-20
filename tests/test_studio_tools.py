@@ -24,6 +24,53 @@ class EditorTests(unittest.TestCase):
         path=f'shots/{stage}-{shot}.mp4';self.st.abs(path).write_bytes(b'original media')
         return self.st.db.x('INSERT INTO takes(shot_id,stage,path,fps,frames) VALUES(?,?,?,?,?)',(shot,stage,path,16,65))
 
+    def test_deleting_selected_clip_clears_dependent_selections_and_is_recoverable(self):
+        key=self.add_take(self.a,'keyframe');clip=self.add_take(self.a,'animate')
+        cont=self.add_take(self.a,'continue');final=self.add_take(self.a,'upscale')
+        other=self.add_take(self.b,'animate')
+        self.st.db.x('UPDATE shots SET keyframe_take=?,clip_take=?,final_take=?,cont_takes=? WHERE id=?',
+                     (key,clip,final,json.dumps([cont]),self.a))
+        history=self.editor.checkpoint('Before clip deletion')
+        self.api.take_delete({'take_id':clip})
+        shot=self.st.db.one('SELECT * FROM shots WHERE id=?',(self.a,))
+        self.assertIsNone(shot['clip_take']);self.assertIsNone(shot['final_take'])
+        self.assertEqual(json.loads(shot['cont_takes']),[])
+        self.assertEqual(shot['keyframe_take'],key)
+        self.assertIsNone(self.st.take(clip))
+        for tid in (key,cont,final,other):self.assertIsNotNone(self.st.take(tid))
+        self.assertTrue(self.st.abs(f'shots/animate-{self.a}.mp4').is_file())
+        self.editor.history({'action':'restore','id':history})
+        self.assertEqual(self.st.chain(self.st.db.one('SELECT * FROM shots WHERE id=?',(self.a,)))[0]['id'],clip)
+
+    def test_deleting_unused_clip_preserves_selected_chain(self):
+        selected=self.add_take(self.a,'animate');unused=self.add_take(self.a,'lipsync')
+        cont=self.add_take(self.a,'continue');final=self.add_take(self.a,'upscale')
+        self.st.db.x('UPDATE shots SET clip_take=?,final_take=?,cont_takes=? WHERE id=?',
+                     (selected,final,json.dumps([cont]),self.a))
+        self.api.take_delete({'take_id':unused})
+        shot=self.st.db.one('SELECT * FROM shots WHERE id=?',(self.a,))
+        self.assertEqual(shot['clip_take'],selected);self.assertEqual(shot['final_take'],final)
+        self.assertEqual(json.loads(shot['cont_takes']),[cont])
+
+    def test_deleting_selected_continuation_truncates_chain_and_clears_upscale(self):
+        clip=self.add_take(self.a,'animate');first=self.add_take(self.a,'continue')
+        second=self.add_take(self.a,'continue');third=self.add_take(self.a,'continue')
+        final=self.add_take(self.a,'upscale')
+        self.st.db.x('UPDATE shots SET clip_take=?,final_take=?,cont_takes=? WHERE id=?',
+                     (clip,final,json.dumps([first,second,third]),self.a))
+        self.api.take_delete({'take_id':second})
+        shot=self.st.db.one('SELECT * FROM shots WHERE id=?',(self.a,))
+        self.assertEqual(json.loads(shot['cont_takes']),[first]);self.assertIsNone(shot['final_take'])
+        self.assertEqual(shot['clip_take'],clip);self.assertIsNotNone(self.st.take(third))
+
+    def test_deleting_upscale_keeps_source_clip_and_repeated_delete_succeeds(self):
+        clip=self.add_take(self.a,'animate');final=self.add_take(self.a,'upscale')
+        self.st.db.x('UPDATE shots SET clip_take=?,final_take=? WHERE id=?',(clip,final,self.a))
+        self.api.take_delete({'take_id':final})
+        self.assertTrue(self.api.take_delete({'take_id':final})['ok'])
+        shot=self.st.db.one('SELECT * FROM shots WHERE id=?',(self.a,))
+        self.assertIsNone(shot['final_take']);self.assertEqual(shot['clip_take'],clip)
+
     def test_scene_clip_cleanup_is_scoped_and_recoverable(self):
         k=self.add_take(self.a,'keyframe');v=self.add_take(self.a,'animate');other=self.add_take(self.b,'animate')
         self.st.db.x('UPDATE shots SET keyframe_take=?,clip_take=? WHERE id=?',(k,v,self.a))

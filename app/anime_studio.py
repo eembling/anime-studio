@@ -417,6 +417,8 @@ class Studio:
         self.frame_lock = threading.Lock()
         self.assembly = {"running": False, "log": [], "output": None, "folder": None}
         self.tools_cache = None
+        from creative import CreativeStudio
+        self.creative = CreativeStudio(self)
         from studio_tools import StudioTools
         self.editor = StudioTools(self)
 
@@ -587,8 +589,10 @@ class Studio:
                     ins += ["-i", str(self.abs(l["audio"]))]
                 else:
                     ins += ["-f", "lavfi", "-t", f"{max(1.0, len(l['text'].split()) / 2.6):.2f}", "-i", "anullsrc=r=48000:cl=stereo"]
-                pad = gap if i < len(lines) - 1 else 0
-                graph += f"[{i}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad=pad_dur={pad}[a{i}];"
+                timing = self.creative.timing(shot_id, l)
+                pad = timing.get('pause_after', gap) if i < len(lines) - 1 else 0
+                delay = timing.get('lead_in', 0)*1000
+                graph += f"[{i}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay={delay}:all=1,apad=pad_dur={pad}[a{i}];"
             graph += "".join(f"[a{i}]" for i in range(len(lines))) + f"concat=n={len(lines)}:v=0:a=1[out]"
             dest = self.data / "voices" / f"shot{shot_id}_mix_{uuid.uuid4().hex[:6]}.wav"
             ffmpeg(ins + ["-filter_complex", graph, "-map", "[out]", "-ar", "48000", str(dest)])
@@ -705,7 +709,7 @@ def detect_slots(wf, key):
     cls = lambda k: wf[k].get("class_type") or ""
     ins = lambda k: wf[k].get("inputs", {})
     encs = [k for k in keys if cls(k) in TEXT_ENCODERS]
-    loads = [k for k in keys if cls(k) == "LoadImage"]
+    loads = [k for k in keys if cls(k) == "LoadImage" and _title(wf[k]).upper() not in ("SOURCE", "MASK", "POSE", "DEPTH", "LAYOUT")]
     m = {"prompt": (_tagged(wf, "PROMPT") or [k for k in encs if "neg" not in _title(wf[k]).lower()])[:1],
          "negative": (_tagged(wf, "NEGATIVE") or [k for k in encs if "neg" in _title(wf[k]).lower()])[:1],
          "save": [k for k in keys if cls(k) in SAVE_NODES],
@@ -854,6 +858,13 @@ def build_workflow(template, key, p):
     for k in m["save"]:
         if "filename_prefix" in wf[k]["inputs"]:
             wf[k]["inputs"]["filename_prefix"] = p["prefix"]
+    # Explicit creative inputs never rely on the positional reference fallback.
+    for tag, value in imgs.items():
+        if tag.startswith('creative_'):
+            for node in wf.values():
+                if _title(node).upper() == tag[9:]:
+                    field = VIDEO_LOADERS.get(node['class_type'], 'image')
+                    node['inputs'][field] = value
     return wf
 
 
@@ -985,11 +996,15 @@ class Worker(threading.Thread):
             for d in j.get("devices", []):
                 nm = re.sub(r"^cuda:\d+\s*", "", d.get("name", "?")).split(" : ")[0]
                 parts.append(f"{nm} - {d.get('vram_free', 0) / 2**30:.1f} of {d.get('vram_total', 0) / 2**30:.1f} GB free")
-            self.st.health[inst["id"]] = {"ok": True, "info": "; ".join(parts), "t": time.time()}
+            self.st.health[inst["id"]] = {"ok": True, "info": "; ".join(parts), "t": time.time(), "hardware":[{k:d.get(k) for k in ("name","vram_total")} for d in j.get("devices",[])]}
         except Exception as e:
             self.st.health[inst["id"]] = {"ok": False, "info": str(e)[:200], "t": time.time()}
 
     def dispatch(self):
+        with self.st.production.lock:
+            return self._dispatch()
+
+    def _dispatch(self):
         db = self.st.db
         if db.one("SELECT id FROM jobs WHERE status='pending' LIMIT 1"):
             self.st.production.inspect()
@@ -1000,8 +1015,6 @@ class Worker(threading.Thread):
             roles = [r.strip() for r in (inst["roles"] or "").split(",") if r.strip() in JOB_STAGES]
             inspected = self.st.production.readiness.get('servers', [])
             readiness = next((s['stages'] for s in inspected if s['id'] == inst['id']), None)
-            if readiness is not None:
-                roles = [r for r in roles if readiness.get(r, {}).get('ready')]
             resumable = db.q("SELECT * FROM jobs WHERE status='pending' AND prompt_id IS NOT NULL AND instance_id=? ORDER BY id", (inst['id'],))
             if not roles and not resumable:
                 continue
@@ -1011,7 +1024,11 @@ class Worker(threading.Thread):
                 if candidate.get("prompt_id") and candidate.get("instance_id") != inst["id"]:
                     continue
                 shot = db.one('SELECT end_next FROM shots WHERE id=?', (candidate['shot_id'],))
-                if not candidate.get('prompt_id') and candidate['stage'] in ('animate', 'continue') and shot and shot['end_next'] and not (readiness or {}).get('animate_flf', {}).get('ready'):
+                if not candidate.get('prompt_id') and candidate.get('creative_json'):
+                    if not self.st.creative.compatible(candidate, inst): continue
+                elif not candidate.get('prompt_id') and readiness is not None and not readiness.get(candidate['stage'], {}).get('ready'):
+                    continue
+                if not candidate.get('creative_json') and not candidate.get('prompt_id') and candidate['stage'] in ('animate', 'continue') and shot and shot['end_next'] and not (readiness or {}).get('animate_flf', {}).get('ready'):
                     continue
                 job = candidate
                 break
@@ -1026,6 +1043,8 @@ class Worker(threading.Thread):
     def compose(self, job):
         """Returns (workflow_key, params)."""
         st, S = self.st, self.st.settings()
+        if job.get("creative_json"):
+            return st.creative.composed(job)
         stage = job["stage"]
         p = {"seed": job["seed"], "prefix": f"anime/j{job['id']:06d}_{stage}", "files": {}}
         if stage == "sheet":
@@ -1061,7 +1080,7 @@ class Worker(threading.Thread):
             if not ref or not st.abs(ref["path"]).exists():
                 raise RuntimeError(f"{line['speaker'] or 'The speaker'} has no voice clip to copy. Add one in Cast.")
             p["files"] = {"audio": st.abs(ref["path"])}
-            p["prompt"], p["negative"], p["ref_text"] = line["text"], None, ref["transcript"] or ""
+            p["prompt"], p["negative"], p["ref_text"] = st.creative.spoken(line["character_id"], line["text"]), None, ref["transcript"] or ""
             S = st.settings()
             p["direction"] = job.get("voice_direction") if job.get("voice_direction") is not None else line.get("direction") or ""
             p["language"] = norm_choice(S.get("tts_language"), TTS_LANGUAGES, "Auto")
@@ -1077,6 +1096,7 @@ class Worker(threading.Thread):
                     a = st.db.one('SELECT * FROM assets WHERE id=?', (v['asset_id'],))
                     if a: assets.append(a)
             assets = [dict(a, image=overrides[a['id']]['image']) if a['id'] in overrides else a for a in assets]
+            assets = st.creative.scene_assets(shot['scene'], assets)
             lines, refs, loras = [], [], []
             for a in assets:
                 if a["lora"]:
@@ -1092,7 +1112,7 @@ class Worker(threading.Thread):
                 if pp:
                     refs.append(pp)
                     lines.append(f"Picture {len(refs)} is the previous shot: keep the same location, lighting and outfits")
-            parts = [". ".join(lines), shot["keyframe_prompt"], shot["camera"], context["lighting"], context["notes"], ". ".join(v["notes"] for v in context["variants"]), S.get("style_prompt", "")]
+            parts = [". ".join(lines), shot["keyframe_prompt"], shot["camera"], st.creative.direction(shot["id"]).get("notes", ""), context["lighting"], context["notes"], ". ".join(v["notes"] for v in context["variants"]), S.get("style_prompt", "")]
             p["prompt"] = ". ".join(x.strip().rstrip(".") for x in parts if x and x.strip()) + "."
             p["negative"] = S.get("keyframe_negative", "")
             p["files"] = {f"ref{i + 1}": r for i, r in enumerate(refs)}
@@ -1165,13 +1185,15 @@ class Worker(threading.Thread):
         events = None
         try:
             job = db.one("SELECT * FROM jobs WHERE id=?", (job_id,))
+            st.creative.started(job,inst)
+            job = db.one("SELECT * FROM jobs WHERE id=?", (job_id,))
             pid = job.get("prompt_id")
             key = 'animate' if job['stage'] == 'continue' else job['stage']
             if not pid:
                 if not db.one("SELECT job_id FROM production_inputs WHERE job_id=?",(job_id,)):
                     st.production.capture(job)
                 key, p = self.compose(job)
-                row = st.wf_row(key)
+                row = st.creative.workflow(job) or st.wf_row(key)
                 if not row:
                     raise RuntimeError(f"No '{key}' workflow set. Upload one in Settings > Workflows.")
                 tpl = json.loads(row["json"])
@@ -1193,6 +1215,7 @@ class Worker(threading.Thread):
                 p["images"] = {slot: comfy_upload(base, path, f"anime_j{job_id}_{slot}{Path(path).suffix.lower()}")
                                for slot, path in p["files"].items()}
                 wf = build_workflow(tpl, key, p)
+                wf = st.creative.patch_controls(job, wf)
                 try:
                     res = http_json("POST", base + "/prompt", {"prompt": wf, "client_id": f"anime-studio-{job_id}"}, 60)
                 except RuntimeError as e:
@@ -1245,8 +1268,10 @@ class Worker(threading.Thread):
             with st.production.lock:
                 if (db.one("SELECT status FROM jobs WHERE id=?", (job_id,)) or {}).get("status") != "running":
                     return
-                self.finish(job, key, local)
+                if not st.creative.finish_special(job, key, local):
+                    self.finish(job, key, local)
             db.x("UPDATE jobs SET status='done', finished=?, progress='done' WHERE id=? AND status='running'", (time.time(), job_id))
+            st.creative.completed(db.one('SELECT * FROM jobs WHERE id=?', (job_id,)), 'done')
             from render_queue import remember_timings
             remember_timings(db)
             shutil.rmtree(out_dir, ignore_errors=True)
@@ -1254,6 +1279,8 @@ class Worker(threading.Thread):
             traceback.print_exc()
             db.x("UPDATE jobs SET status='error', error=?, finished=?, progress='' WHERE id=? AND status='running'",
                  (str(e)[:4000], time.time(), job_id))
+            failed = db.one('SELECT * FROM jobs WHERE id=?', (job_id,))
+            if failed: st.creative.completed(failed, 'error', str(e)[:4000])
 
         finally:
             if events:
@@ -1312,7 +1339,7 @@ class Worker(threading.Thread):
             st.db.x("INSERT INTO voice_takes(shot_id,text,speaker,path,seed,job_id,seconds,created,input_signature,line_index,character_id,line_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     (shot["id"], job.get("note"), (line or {}).get("speaker", ""), st.rel(dest), job["seed"], job["id"],
                      round(media_seconds(dest), 2), time.time(), signature, line["index"] if line else job.get("segment"), job.get("voice_character_id"), job.get("voice_line_id")))
-            if line and (not line["audio"] or (job.get("voice_autoselect") and line["audio"]==job.get("voice_previous_audio"))) and (not signature or signature==st.production.signature(shot,"voice")):
+            if not st.creative.meta(job).get("manual") and line and (not line["audio"] or (job.get("voice_autoselect") and line["audio"]==job.get("voice_previous_audio"))) and (not signature or signature==st.production.signature(shot,"voice")):
                 line.update(audio=st.rel(dest), src="tts", clip_id=None)
                 st.save_lines(shot["id"], lines)
                 st.rebuild_audio(shot["id"])
@@ -1324,6 +1351,7 @@ class Worker(threading.Thread):
         folder.mkdir(parents=True, exist_ok=True)
         made = []
         if stage in ("sheet", "keyframe"):
+            if job.get("creative_json") and not imgs: raise ValueError("The recipe saved no image candidate.")
             for i, f in enumerate(imgs or local):
                 dest = folder / f"{stage}_j{job['id']}_{output_id}_{i}{f.suffix.lower()}"
                 shutil.move(str(f), dest)
@@ -1333,7 +1361,7 @@ class Worker(threading.Thread):
                 src = st.db.one("SELECT t.fps FROM takes t JOIN shots s ON s.clip_take=t.id WHERE s.id=?", (job["shot_id"],))
                 fps = (src or {}).get("fps") or 16
             else:
-                fps = st.wf_fps(key)
+                fps = (st.creative.workflow(job) or {}).get("fps") or st.wf_fps(key)
             dest = folder / f"{stage}_j{job['id']}_{output_id}.mp4"
             if vids:
                 dest = dest.with_suffix(vids[0].suffix.lower())
@@ -1350,6 +1378,8 @@ class Worker(threading.Thread):
                           "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                           (job["shot_id"], job["asset_id"], stage, st.rel(path), fps, job["seed"], job["id"], time.time(),
                            nframes if fps else None, job.get("segment"), 1 if job.get("draft") else 0, signature))
+            if st.creative.meta(job).get("manual"):
+                continue
             if stage in TAKE_FIELD:
                 f = TAKE_FIELD[stage]
                 st.db.x(f"UPDATE shots SET {f}=? WHERE id=? AND {f} IS NULL", (tid, job["shot_id"]))
@@ -1433,7 +1463,9 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
                 how, vin = "still pan", ["-loop", "1", "-framerate", str(FPS), "-i", str(kf)]
                 vf = (f"[0:v]scale={W * 2}:{H * 2}:force_original_aspect_ratio=increase,crop={W * 2}:{H * 2},"
                       f"zoompan=z='min(1+0.0010*on,1.2)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS},setsar=1[v]")
-                if preview and (s['camera'] or '').strip().lower() in ('static', 'hold', 'locked'):
+                directed = st.creative.camera_filter(s, W, H, FPS)
+                if directed: vf = '[0:v]'+directed+'[v]'
+                if not directed and preview and (s['camera'] or '').strip().lower() in ('static', 'hold', 'locked'):
                     vf = f"[0:v]{fill}[v]"
             else:
                 how, vin = "MISSING - black", ["-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r={FPS}"]
@@ -1578,7 +1610,7 @@ class API:
                 "version": VERSION, "platform": sys.platform, "production": production, "render_queue": queue,
                 "audio_cues": [dict(c, url=self.media(c['path'])) for c in st.soundtrack.cues()],
                 "audio_exports": [dict(e, url=self.media(e['output'])) for e in st.soundtrack.exports()],
-                "editor": st.editor.state(), "voice_recovery_count": len(voice_recovery_rows)}
+                "editor": st.editor.state(), "creative": st.creative.state(), "voice_recovery_count": len(voice_recovery_rows)}
 
     # ---- settings / servers / workflows / tools
     def settings(self, b):
@@ -1714,6 +1746,7 @@ class API:
         return {"ok": True, "id": aid}
 
     def asset_delete(self, b):
+        self.st.creative.delete_asset(b["id"])
         for c in self.st.db.q("SELECT id FROM voice_clips WHERE asset_id=?", (b["id"],)):
             self.clip_delete({"id": c["id"]})
         self.st.db.x("DELETE FROM takes WHERE asset_id=? AND stage='sheet'", (b["id"],))
@@ -1764,6 +1797,7 @@ class API:
     def shot_delete(self, b):
         db = self.st.db
         for sid in b["ids"]:
+            self.st.creative.delete_shot(sid)
             db.x("DELETE FROM production_approvals WHERE shot_id=?", (sid,))
             db.x("DELETE FROM shots WHERE id=?", (sid,))
             db.x(f"DELETE FROM takes WHERE shot_id=? AND stage NOT IN {_ASSET_SQL}", (sid,))
@@ -1998,6 +2032,11 @@ class API:
 
     # ---- generation / takes / jobs
     def generate(self, b):
+        if self.st.creative.wants_recipe(b):
+            with self.st.production.lock:
+                return self.st.creative.generate(b)
+        if b['stage'] == 'keyframe' and any(self.st.creative.direction(sid).get('conditioning') for sid in b.get('shot_ids', [])):
+            return {'ok':False,'queued':0,'skipped':[],'error':'Assign a compatible keyframe recipe in Generation lab before using pose/depth/layout conditioning.'}
         if not self.st.production.ready(b['stage'], b.get('shot_ids', [])):
             return {'ok': False, 'queued': 0, 'skipped': ['No ready server for this workflow. Run Production → Check readiness for details.'],
                     'error': 'No ready server for ' + b['stage']}
@@ -2055,7 +2094,7 @@ class API:
                     if target in seen:continue
                     seen.add(target)
                     sp = st.line_character(l)
-                    if st.db.one("SELECT id FROM jobs WHERE shot_id=? AND stage='voice' AND status IN ('pending','running') AND ((voice_line_id=? AND voice_character_id IS ? AND note=? AND voice_direction=?) OR (voice_line_id IS NULL AND segment=? AND note=? AND speaker=? COLLATE NOCASE)) LIMIT 1", (sid,l['line_id'],sp['id'] if sp else None,l['text'],l.get('direction') or '',l['index'],l['text'],l['speaker'])):
+                    if not b.get('_creative_batch') and st.db.one("SELECT id FROM jobs WHERE shot_id=? AND stage='voice' AND status IN ('pending','running') AND ((voice_line_id=? AND voice_character_id IS ? AND note=? AND voice_direction=?) OR (voice_line_id IS NULL AND segment=? AND note=? AND speaker=? COLLATE NOCASE)) LIMIT 1", (sid,l['line_id'],sp['id'] if sp else None,l['text'],l.get('direction') or '',l['index'],l['text'],l['speaker'])):
                         skipped.append(f"Shot {int(s['seq'])}, line {l['index']+1}: voice generation already queued or running.")
                         continue
                     if not sp or not st.ref_clip(sp["id"]) or not st.abs(st.ref_clip(sp["id"])["path"]).is_file():
@@ -2143,9 +2182,9 @@ class API:
                 shot = st.db.one("SELECT * FROM shots WHERE id=?", (t["shot_id"],))
                 cont = json.loads((shot or {}).get("cont_takes") or "[]")
                 if t["id"] in cont:
-                    st.db.x("UPDATE shots SET cont_takes=? WHERE id=?", (json.dumps(cont[:cont.index(t["id"])]), t["shot_id"]))
+                    st.db.x("UPDATE shots SET cont_takes=?, final_take=NULL WHERE id=?", (json.dumps(cont[:cont.index(t["id"])]), t["shot_id"]))
             if t["stage"] in ("animate", "lipsync"):
-                st.db.x("UPDATE shots SET cont_takes='[]' WHERE id=? AND clip_take=?", (t["shot_id"], t["id"]))
+                st.db.x("UPDATE shots SET cont_takes='[]', final_take=NULL WHERE id=? AND clip_take=?", (t["shot_id"], t["id"]))
             if t["stage"] in TAKE_FIELD:
                 f = TAKE_FIELD[t["stage"]]
                 st.db.x(f"UPDATE shots SET {f}=NULL WHERE id=? AND {f}=?", (t["shot_id"], t["id"]))
@@ -2172,9 +2211,11 @@ class API:
         elif act == "cancel_pending":
             db.x("UPDATE jobs SET status='cancelled', finished=? WHERE status='pending'", (now,))
         elif act == "clear":
+            self.st.creative.sync_runs()
             from render_queue import remember_timings
             remember_timings(db)
             db.x("DELETE FROM jobs WHERE status IN ('done','cancelled')")
+        self.st.creative.sync_runs()
         if act in ('retry', 'retry_errors'):
             db.x("UPDATE jobs SET started=NULL WHERE status='pending' AND prompt_id IS NULL")
         return {"ok": True}
@@ -2222,6 +2263,9 @@ class API:
                 result.append({'shot_id': shot['id'], 'stage': stage, **r})
         return {'ok': True, 'results': result}
 
+    def creative_action(self, b):
+        return self.st.creative.action(b)
+
     def editor_action(self, b):
         actions = {'scene': self.st.editor.scene, 'history': self.st.editor.history,
                    'timeline': self.st.editor.timeline, 'continuity': self.st.editor.continuity,
@@ -2251,6 +2295,7 @@ EDIT_ROUTES = {'/api/settings','/api/shot/save','/api/shot/delete','/api/shot/mo
     '/api/voice_take/delete','/api/clip/delete','/api/line/set','/api/line/direction',
     '/api/audio/cue/save','/api/audio/cue/delete','/api/script/revision'}
 ROUTES = {
+    '/api/creative': 'creative_action',
     '/api/shot/voices': 'shot_voices',
     '/api/voice/recover': 'voice_recover',
     '/api/editor': 'editor_action',
@@ -2297,6 +2342,10 @@ def make_handler(st, api):
                     return self._send(200, INDEX_HTML, "text/html; charset=utf-8")
                 if path == '/shot_voices.js':
                     return self._send(200, (Path(__file__).resolve().parent / 'shot_voices.js').read_text(), 'text/javascript; charset=utf-8')
+                if path == '/creative.css':
+                    return self._send(200, (Path(__file__).resolve().parent / 'creative.css').read_text(), 'text/css; charset=utf-8')
+                if path == '/creative.js':
+                    return self._send(200, (Path(__file__).resolve().parent / 'creative.js').read_text(), 'text/javascript; charset=utf-8')
                 if path == '/editor.js':
                     return self._send(200, (Path(__file__).resolve().parent / 'editor.js').read_text(), 'text/javascript; charset=utf-8')
                 if path == '/production.js':

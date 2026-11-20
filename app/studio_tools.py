@@ -11,8 +11,10 @@ import zipfile
 from pathlib import Path
 
 EDITORIAL = ('settings', 'shots', 'assets', 'takes', 'voice_takes', 'voice_clips',
-             'audio_cues', 'episode_audio_exports', 'production_approvals', 'production_plans', 'continuity')
-SHARED = {'assets', 'voice_clips'}
+             'audio_cues', 'episode_audio_exports', 'production_approvals', 'production_plans', 'continuity',
+             'asset_looks', 'scene_looks', 'continuity_reviews', 'shot_direction', 'generation_recipes',
+             'shot_recipes', 'character_pronunciations', 'line_performances', 'performance_takes', 'creative_runs')
+SHARED = {'assets', 'voice_clips', 'asset_looks', 'generation_recipes', 'character_pronunciations'}
 
 
 def number(value, minimum=0):
@@ -80,8 +82,14 @@ class StudioTools:
 
     def apply(self, snapshot):
         db = self.st.db
+        snapshot = dict(snapshot) if isinstance(snapshot, dict) else snapshot
         if not isinstance(snapshot, dict) or 'shots' not in snapshot or 'settings' not in snapshot:
             raise ValueError('Invalid project checkpoint')
+        for table in ('scene_looks','continuity_reviews','shot_direction','shot_recipes','line_performances','performance_takes','creative_runs'):
+            snapshot.setdefault(table, [])
+        if 'assets' in snapshot:
+            for table in ('asset_looks','character_pronunciations'):
+                snapshot.setdefault(table, [])
         # Validate every table/column before changing anything; keep jobs and server configuration intact.
         for table, rows in snapshot.items():
             if table.startswith('_'):
@@ -192,6 +200,8 @@ class StudioTools:
                     if payload['mode'] == 'reset':
                         # Preserve the script, scene membership, shot order and shot kind.
                         db.conn.execute("UPDATE shots SET keyframe_take=NULL, asset_ids='[]', keyframe_prompt='', motion_prompt='', camera='', notes='', duration=?, retime='hold', ref_prev=0, end_next=0, audio=NULL, audio_mode='lines', line_audio='[]', trim_in=0 WHERE id=?", (self.st.default_duration(), sid))
+                        for table in ('shot_direction', 'shot_recipes', 'line_performances', 'performance_takes', 'continuity_reviews', 'creative_runs'):
+                            db.conn.execute('DELETE FROM '+table+' WHERE shot_id=?', (sid,))
                         db.conn.execute('DELETE FROM voice_takes WHERE shot_id=?', (sid,))
                         db.conn.execute('DELETE FROM audio_cues WHERE anchor_shot=?', (sid,))
                     db.conn.execute('DELETE FROM production_approvals WHERE shot_id=?', (sid,))
@@ -199,6 +209,7 @@ class StudioTools:
                 db.conn.execute("UPDATE production_plans SET status='cancelled', detail='Scene cleared by editor' WHERE scene=?", (payload['scene'],))
                 if payload['mode'] == 'reset':
                     db.conn.execute('DELETE FROM continuity WHERE scene=?', (payload['scene'],))
+                    db.conn.execute('DELETE FROM scene_looks WHERE scene=?', (payload['scene'],))
                 db.conn.commit()
             except Exception:
                 db.conn.rollback()
@@ -252,6 +263,7 @@ class StudioTools:
                                         db.conn.execute('UPDATE shots SET '+field+'=? WHERE id=?', (cur.lastrowid, new_id))
                     db.conn.execute('UPDATE shots SET cont_takes=? WHERE id=?', (json.dumps([mapping[i] for i in json.loads(shot['cont_takes'] or '[]') if i in mapping]), new_id))
                     db.conn.execute('UPDATE shots SET duration=? WHERE id=?', (at, shot['id']))
+                    self.st.creative.split_controls(shot,new_id,at/shot['duration'])
                 self.st.renumber()
         else:
             raise ValueError('Unknown timeline action')
@@ -274,6 +286,10 @@ class StudioTools:
         if len(clean) > 3:
             raise ValueError('Use at most three scene reference overrides')
         self.checkpoint('Before continuity edit')
+        for bound in self.st.db.q('SELECT s.*,l.json FROM scene_looks s JOIN asset_looks l ON l.id=s.look_id WHERE s.scene=?', (scene,)):
+            image = json.loads(bound['json'])['references'][bound['view_index']]['path']
+            if not any(v['asset_id']==bound['asset_id'] and v['image']==image for v in clean):
+                self.st.db.x('DELETE FROM scene_looks WHERE scene=? AND asset_id=?', (scene,bound['asset_id']))
         self.st.db.x('INSERT OR REPLACE INTO continuity VALUES(?,?)', (scene, json.dumps({'lighting': str(body.get('lighting', ''))[:2000], 'notes': str(body.get('notes', ''))[:4000], 'variants': clean})))
         return {'ok': True}
 
@@ -411,10 +427,12 @@ class StudioTools:
             for line in self.st.shot_lines(shot):
                 from anime_studio import media_seconds
                 length = media_seconds(self.st.abs(line['audio'])) if line.get('audio') else max(.5, len(line['text'])/14)
+                timing = self.st.creative.timing(shot['id'], line)
+                cursor += timing.get('lead_in', 0)
                 left, right = max(0,cursor-trim), min(shot['duration'],cursor+length-trim)
                 if right > left:
                     rows.append({'start':start+left,'end':start+right,'text':line['text'],'speaker':line.get('speaker','')})
-                cursor += length + float(self.st.settings().get('line_gap', .3))
+                cursor += length + timing.get('pause_after', float(self.st.settings().get('line_gap', .3)))
             start += shot['duration']
         if body.get('rows') is not None:
             rows = body['rows']

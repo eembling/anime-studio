@@ -30,11 +30,15 @@ class Production:
         except OSError:
             return [path, 'missing']
 
-    def signature(self, shot, stage, segment=0):
+    def signature(self, shot, stage, segment=0, recipe_override=None):
         st = self.st
         settings = st.settings()
         assets = [st.db.one('SELECT * FROM assets WHERE id=?', (i,)) for i in (json.loads(shot['asset_ids'] or '[]') if isinstance(shot['asset_ids'], str) else shot['asset_ids'])]
         common = {'stage': stage, 'workflow': st.wf_row('animate_flf' if stage == 'continue' and shot['end_next'] else 'animate' if stage == 'continue' else stage)}
+        assignment = recipe_override if recipe_override is not None else (st.creative.assignment(shot['id'], stage) if hasattr(st,'creative') else None)
+        if assignment and assignment.get('recipe_id') and not assignment.get('missing'):
+            pinned = st.creative.recipe(assignment['recipe_id'])
+            common['workflow'] = {'id':pinned['id'],'json':pinned['workflow'],'fps':pinned['fps'],'max_frames':pinned['max_frames']}
         # Metadata timestamps do not change what a workflow renders.
         if common['workflow']:
             common['workflow'] = {k: v for k, v in common['workflow'].items() if k != 'updated'}
@@ -68,7 +72,7 @@ class Production:
                 nxt = st.neighbor(shot, 1)
                 common['next'] = nxt and nxt['keyframe_take']
                 flf = st.wf_row('animate_flf')
-                common['flf_workflow'] = flf and flf['json']
+                common['flf_workflow'] = pinned['workflow'] if assignment and assignment.get('recipe_id') and not assignment.get('missing') else flf and flf['json']
             if stage == 'continue':
                 chain = st.chain(shot)
                 common['previous_parts'] = [t['id'] for t in chain[:int(segment or 0) + 1]]
@@ -79,6 +83,8 @@ class Production:
                 common['clips'] = [t['id'] for t in st.chain(shot)]
             if stage == 'lipsync':
                 common['audio'] = self.file_stamp(shot['audio'])
+        creative = st.creative.signature_data(shot, stage, recipe_override) if hasattr(st, 'creative') else None
+        if creative: common['creative'] = creative
         return digest(common)
 
     def capture(self, job):

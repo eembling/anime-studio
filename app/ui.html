@@ -114,7 +114,8 @@ label.f{display:block;font-size:12px;color:var(--graphite);margin:12px 0 4px}
 .screen .empty{color:#9AA3B2;text-align:center;font-size:13px;padding:20px;border:1px dashed #4A5160;border-radius:4px;margin:18px}
 .screen .tag{position:absolute;left:8px;top:8px;background:rgba(20,22,27,.78);color:#fff;font-size:11.5px;padding:2px 8px;border-radius:99px;pointer-events:none}
 .screen .use{position:absolute;right:8px;top:8px}
-.screen .delete-keyframe{position:absolute;left:8px;bottom:8px;background:var(--sheet);box-shadow:0 1px 6px #0005}
+.screen .delete-keyframe,.screen .delete-clip{position:absolute;left:8px;bottom:8px;background:var(--sheet);box-shadow:0 1px 6px #0005}
+.screen .delete-clip{bottom:48px}
 .info{padding:14px 18px 12px;min-width:0;display:flex;flex-direction:column}
 .info h3{margin:0 0 6px;font:600 17px/1.2 var(--f-display);letter-spacing:.2px}
 .cast{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
@@ -179,6 +180,8 @@ label.f{display:block;font-size:12px;color:var(--graphite);margin:12px 0 4px}
 .kf-delete:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 .kf-delete:disabled{opacity:.5;cursor:wait}
 .take{border:1px solid var(--line);background:var(--sheet);border-radius:4px;padding:2px 8px;font:600 12px/1.4 var(--f-display);cursor:pointer;position:relative}
+.clip-take{display:inline-flex;align-items:center;gap:8px}
+.clip-delete{font:500 11px var(--f-ui);padding:4px 6px;min-height:28px}
 .take.view{border-color:var(--blue);color:var(--blue)}
 .th.sel::after,.take.sel::after{content:"";position:absolute;inset:-6px -8px;border:2px solid var(--red);border-radius:50%;transform:rotate(-4deg);pointer-events:none}
 .take.sel::after{inset:-5px -6px}
@@ -331,7 +334,7 @@ button:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var
 @media(max-width:900px){.sv-workspace{grid-template-columns:220px minmax(0,1fr)}.sv-editor{padding:16px}.sec{grid-template-columns:1fr;gap:12px}}
 @media(max-width:650px){.modal{padding:8px}.dlg{max-height:96dvh;width:100%}.dlg-h,.dlg-f{padding:14px}.dialogue-dlg .dlg-b{padding:0 12px 12px;display:block;overflow:auto}#sv-rows{height:auto}.sv-workspace{height:auto}.sv-editor{overflow:visible}.sv-workspace{grid-template-columns:1fr}.sv-sidebar{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}#sv-list{max-height:160px}.sv-editor{padding:14px}.g2,.g3,.form2{grid-template-columns:1fr}.dlg-f .btn{flex:1}#sv-status{width:100%;margin-bottom:4px}}
 
-</style></head><body>
+</style><link rel="stylesheet" href="/creative.css"></head><body>
 <aside>
  <div class="brand"><svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true"><rect x="1" y="1" width="28" height="28" rx="7" fill="#C8372D"/><rect x="7" y="9" width="16" height="12" rx="2" fill="none" stroke="#fff" stroke-width="2"/><path d="M13 12.2v5.6l4.6-2.8z" fill="#fff"/></svg><b>Anime Studio</b></div>
  <nav id="nav">
@@ -506,7 +509,7 @@ const fmtT=sec=>{sec=Math.round(sec);return sec>=3600?`${Math.floor(sec/3600)}h 
 const pad=n=>String(n|0).padStart(3,'0');
 function lb(u){$('#lbimg').src=u;$('#lightbox').style.display='flex'}
 let MODAL_OPTIONS={},MODAL_OPENER=null;
-function modal(h,options={}){MODAL_OPENER=document.activeElement;MODAL_OPTIONS=options;const dlg=$('#dlg');dlg.className='dlg '+(options.className||'');dlg.innerHTML=h;$('#modal').removeAttribute('aria-labelledby');$('#modal').removeAttribute('aria-label');const title=dlg.querySelector('h2');if(title){title.id=title.id||'dialog-title';$('#modal').setAttribute('aria-labelledby',title.id)}else $('#modal').setAttribute('aria-label','Anime Studio dialog');$('#modal').classList.add('on');setTimeout(()=>{if(!$('#modal').classList.contains('on'))return;const f=dlg.querySelector(options.initialFocus||'input:not([type=hidden]),textarea,select,button');f?.focus({preventScroll:true})},30)}
+function modal(h,options={}){MODAL_OPENER=document.activeElement;MODAL_OPTIONS=options;const dlg=$('#dlg');dlg.className='dlg '+(options.className||'');dlg.innerHTML=h;$('#modal').removeAttribute('aria-labelledby');$('#modal').removeAttribute('aria-label');const title=dlg.querySelector('h2');if(title){title.id=title.id||'dialog-title';$('#modal').setAttribute('aria-labelledby',title.id)}else $('#modal').setAttribute('aria-label','Anime Studio dialog');$('#modal').classList.add('on');setTimeout(()=>{if(!$('#modal').classList.contains('on'))return;const f=dlg.querySelector(options.initialFocus||'input:not([type=hidden]),textarea,select,button')||dlg.querySelector('button');f?.focus({preventScroll:true})},30)}
 function closeModal(){if(!$('#modal').classList.contains('on'))return true;if(MODAL_OPTIONS.beforeClose&&!MODAL_OPTIONS.beforeClose())return false;$('#modal').classList.remove('on');MODAL_OPTIONS.onClose?.();MODAL_OPTIONS={};if(MODAL_OPENER?.isConnected)MODAL_OPENER.focus({preventScroll:true});return true}
 document.addEventListener('click',e=>{for(const menu of document.querySelectorAll('.action-menu[open]'))if(!menu.contains(e.target)||e.target.closest('button'))menu.open=false});
 $('#modal').onclick=e=>{if(e.target.id==='modal')closeModal()};
@@ -531,7 +534,7 @@ function renderContent(force){if(!S)return;if(force)for(const k in SIG)delete SI
  $('#stats').innerHTML=tab==='shots'||tab==='assemble'?`<div class="stat"><b>${fmtT(total)}</b><span>runtime</span></div><div class="stat"><b>${S.shots.length}</b><span>shots</span></div><div class="stat"><b class="ok-t">${cn.done}</b><span>ready</span></div>`:'';
  if(tab==='script'&&(force||document.activeElement!==$('#script')))$('#script').value=S.settings.script||'';
  if(tab!=='studio'&&typeof stopEdit==='function')stopEdit();if(tab==='studio')renderStudio();if(tab==='production')renderProduction();renderDesigned();if(tab==='cast')renderCast();if(tab==='voices'&&(force||!document.activeElement.closest('#t-voices input')))renderVoices();if(tab==='shots')renderShots();if(tab==='queue')renderQueue();if(tab==='assemble')renderAssemble();
- if(tab==='settings'&&(force||!document.activeElement.closest('#t-settings')))renderSettings()}
+ if(tab==='settings'&&(force||!document.activeElement.closest('#t-settings')))renderSettings();if(typeof renderCreative==='function')renderCreative()}
 
 /* ---------- script ---------- */
 function saveScript(){post('/api/settings',{settings:{script:$('#script').value}}).then(()=>toast('Script saved'))}
@@ -543,7 +546,7 @@ function draftShots(){if(!$('#script').value.trim())return toast('Write or paste
 function renderCast(){return preserveMainScroll(renderCastContent)}
 function renderCastContent(){if(same('cast',[S.assets]))return;$('#cast').innerHTML=S.assets.map(a=>`<article class="model">
  <div class="art" ${a.url?`onclick="lb('${a.url}')"`:''}>${a.url?`<img src="${a.url}" alt="${esc(a.name)} reference">`:`<div class="ph">No reference image yet.<br><button class="btn sm" style="margin-top:8px" onclick="editAsset(${a.id})">Add one</button></div>`}</div>
- <div class="body"><h3>${esc(a.name)}<span class="k">${a.kind}</span></h3>${a.description?`<div class="desc">${esc(a.description)}</div>`:''}
+ <div class="body"><button class="btn sm ghost" onclick="openReferenceLibrary(${a.id})">Reference collections</button><h3>${esc(a.name)}<span class="k">${a.kind}</span></h3>${a.description?`<div class="desc">${esc(a.description)}</div>`:''}
   <div class="meta">${a.voice?`<span class="flag">Voice: ${esc(a.voice)}</span>`:''}${a.lora?`<span class="flag" title="${esc(a.lora)}">LoRA ${a.lora_strength}</span>`:''}</div>
   ${a.sheets.length?`<div class="muted" style="font-size:12px">Turnaround sheets. Click one to make it the reference.</div><div class="sheets">${a.sheets.map(t=>`<button class="th ${t.path===a.image?'sel':''}" style="background-image:url('${t.url}');width:84px;height:47px" onclick="post('/api/asset/use_sheet',{take_id:${t.id}})" ondblclick="lb('${t.url}')" aria-label="Use this sheet"></button>`).join('')}</div>`:''}
   ${a.active.length?`<div class="pending" style="margin-bottom:8px"><span class="dot"></span>${a.active.length} sheet${a.active.length>1?'s':''} ${a.active.includes('running')?'rendering':'waiting'}</div>`:''}
@@ -676,7 +679,7 @@ function renderShotsContent(){
    :viewing.stage==='keyframe'?`<img src="${viewing.url}" alt="Keyframe" ondblclick="lb('${viewing.url}')">`:`<video src="${viewing.url}" controls muted loop preload="metadata" ${s.audio_url?`data-audio="${s.audio_url}"`:''}></video>`;
   const mark=(id,field)=>{const isNew=prevApproved[s.id+field]!==undefined&&prevApproved[s.id+field]!==id&&id;fresh[s.id+field]=id;return isNew?' just':''};
   const pend=st=>s.active[st]?`<div class="pending"><span class="dot"></span>${s.active[st].length} ${s.active[st].includes('running')?'rendering':'waiting'}</div>`:'';
-  const chip=(t,isSel,label,field)=>`<button class="take ${isSel?'sel'+mark(t.id,field):''} ${viewing&&viewing.id===t.id?'view':''} ${t.draft?'draft':''}" onclick="view(${s.id},${t.id})" title="${lab(t)}, seed ${t.seed}${t.fps?', '+t.fps+' fps':''}${t.frames&&t.fps?', '+(t.frames/t.fps).toFixed(1)+' s':''}">${label}</button>`;
+  const chip=(t,isSel,label,field)=>`<span class="clip-take"><button class="take ${isSel?'sel'+mark(t.id,field):''} ${viewing&&viewing.id===t.id?'view':''} ${t.draft?'draft':''}" onclick="view(${s.id},${t.id})" title="${lab(t)}, seed ${t.seed}${t.fps?', '+t.fps+' fps':''}${t.frames&&t.fps?', '+(t.frames/t.fps).toFixed(1)+' s':''}">${label}</button><button type="button" class="kf-delete clip-delete" onclick="deleteClip(${s.id},${t.id},this)" title="Delete ${label}" aria-label="Delete clip ${label} from shot ${pad(s.seq)}">Delete</button></span>`;
   const chips=(arr,selId,p,field)=>arr.map((t,i)=>chip(t,t.id===selId,(t.stage==='lipsync'?'L':p)+(i+1),field)).join('');
   const conts=s.takes.filter(t=>t.stage==='continue'),segs=[];conts.forEach(t=>{const k=t.segment||0;(segs[k]=segs[k]||[]).push(t)});
   const contRow=segs.length?`<div class="st-b">${segs.map((arr,k)=>arr?`<span class="seglab">Part ${k+2}</span>${arr.map((t,i)=>chip(t,s.cont[k]===t.id,(k+2)+'.'+(i+1),'p'+k)).join('')}`:'').join('')}</div>`:'';
@@ -692,13 +695,13 @@ function renderShotsContent(){
   <div class="cut-no"><label class="check"><input type="checkbox" ${sel.has(s.id)?'checked':''} onchange="tog(${s.id},this.checked)" aria-label="Select shot ${s.seq|0}"></label>
    <div class="no"><small>Shot</small>${pad(s.seq)}</div><div class="dur">${(+s.duration).toFixed(1)} s</div><div class="kind">${s.kind==='still'?'Still':'Motion'}</div>${s.outdated.length?'<span class="err">Outdated renders</span>':''}
    <div class="mv"><button onclick="post('/api/shot/move',{id:${s.id},dir:-1})" title="Move up" aria-label="Move up">▲</button><button onclick="post('/api/shot/move',{id:${s.id},dir:1})" title="Move down" aria-label="Move down">▼</button></div></div>
-  <div class="screen">${media}${viewing&&viewing.stage==='keyframe'?`<button class="btn sm danger delete-keyframe" onclick="deleteKeyframe(${s.id},${viewing.id},this)" aria-label="Delete keyframe K${kfs.findIndex(t=>t.id===viewing.id)+1} from shot ${pad(s.seq)}">Delete keyframe K${kfs.findIndex(t=>t.id===viewing.id)+1}</button>`:''}${viewing?`<span class="tag">${lab(viewing)}</span>`:''}${viewing&&(!approved||viewing.draft)?`<span class="use" style="display:flex;gap:6px">${viewing.draft?`<button class="btn sm" onclick="fullQuality(${viewing.id})" title="Render again at full quality with the same seed">Render full quality</button>`:''}${!approved?`<button class="btn sm red" onclick="approve(${viewing.id})">Use this take</button>`:''}</span>`:''}</div>
+  <div class="screen">${media}${viewing&&viewing.stage==='keyframe'?`<button class="btn sm danger delete-keyframe" onclick="deleteKeyframe(${s.id},${viewing.id},this)" aria-label="Delete keyframe K${kfs.findIndex(t=>t.id===viewing.id)+1} from shot ${pad(s.seq)}">Delete keyframe K${kfs.findIndex(t=>t.id===viewing.id)+1}</button>`:viewing&&['animate','lipsync','continue','upscale'].includes(viewing.stage)?`<button class="btn sm danger delete-clip" onclick="deleteClip(${s.id},${viewing.id},this)" aria-label="Delete previewed clip from shot ${pad(s.seq)}">Delete clip</button>`:''}${viewing?`<span class="tag">${lab(viewing)}</span>`:''}${viewing&&(!approved||viewing.draft)?`<span class="use" style="display:flex;gap:6px">${viewing.draft?`<button class="btn sm" onclick="fullQuality(${viewing.id})" title="Render again at full quality with the same seed">Render full quality</button>`:''}${!approved?`<button class="btn sm red" onclick="approve(${viewing.id})">Use this take</button>`:''}</span>`:''}</div>
   <div class="info"><h3>${esc(s.scene)||'Untitled scene'}</h3>${names?`<div class="cast">${names}</div>`:''}
    <p>${esc(s.keyframe_prompt)||'<span class="muted">No keyframe description yet.</span>'}</p>
    ${s.kind==='motion'&&s.motion_prompt&&s.motion_prompt!==s.keyframe_prompt?`<p class="mp"><b>Motion:</b> ${esc(s.motion_prompt)}</p>`:''}${s.camera?`<p class="cam"><b>Camera:</b> ${esc(s.camera)}</p>`:''}
    ${dia?`<div class="lines">${dia}${s.audio_mode!=='file'&&(s.lines||[]).length>1&&s.audio_url?`<div class="mixbar"><button class="play" onclick="playA(this,'${s.audio_url}')" aria-label="Play all lines">▶</button>All lines together</div>`:''}</div>`:''}
    <div class="flags">${s.draft_in_use?'<span class="flag" style="border-color:var(--amber);color:var(--amber)">Uses a draft clip</span>':''}${s.kind==='motion'?`<span class="flag">24 fps by ${s.retime==='hold'?'holding frames':s.retime==='blend'?'blending':'RIFE'}</span>`:''}${s.ref_prev?'<span class="flag">Matches previous shot</span>':''}${s.end_next?'<span class="flag">Ends on next shot</span>':''}${s.notes?`<span class="flag">${esc(s.notes)}</span>`:''}</div>
-   <div class="acts"><button class="btn sm pri" onclick="editShotVoices(${s.id})">Dialogue</button><button class="btn sm" onclick="editShot(${s.id})">Edit shot</button><button class="btn sm ghost" onclick="editShot(null,${s.seq})">Add shot after</button></div></div>
+   <div class="acts"><button class="btn sm pri" onclick="editShotVoices(${s.id})">Dialogue</button><button class="btn sm" onclick="editShot(${s.id})">Edit shot</button><button class="btn sm" onclick="openDirector(${s.id})">Direction</button><button class="btn sm" onclick="openRepair(${s.id})">Repair</button><button class="btn sm ghost" onclick="editShot(null,${s.seq})">Add shot after</button></div></div>
   <div class="stages">
    <div class="stage"><div class="st-h"><span class="dot ${stState(s.keyframe_take,s.active.keyframe)}"></span>Keyframe<span class="cnt">${kfs.length?kfs.length+' take'+(kfs.length>1?'s':''):''}</span><span class="btns"><button class="btn sm" onclick="gen('keyframe',[${s.id}])">${kfs.length?'More':'Generate'}</button></span></div>
     <div class="st-b">${kfs.map((t,i)=>`<span class="kf-take"><button class="th ${t.id===s.keyframe_take?'sel'+mark(t.id,'k'):''}" style="background-image:url('${t.url}')" onclick="approve(${t.id})" ondblclick="lb('${t.url}')" title="Click to use K${i+1}, double-click to enlarge" aria-label="Use keyframe K${i+1} for shot ${pad(s.seq)}"></button><span class="kf-actions"><span class="kf-label">K${i+1}</span><button type="button" class="kf-delete" onclick="deleteKeyframe(${s.id},${t.id},this)" title="Delete keyframe K${i+1}" aria-label="Delete keyframe K${i+1} from shot ${pad(s.seq)}">×</button></span></span>`).join('')}${pend('keyframe')}</div></div>
@@ -775,7 +778,7 @@ async function lineSrc(sid,idx,sel){const v=sel.value;if(v==='keep')return;let b
 async function deleteKeyframe(sid,tid,button){
  const s=S.shots.find(x=>x.id===sid),t=s&&s.takes.find(x=>x.id===tid&&x.stage==='keyframe');if(!t)return;
  const frames=s.takes.filter(x=>x.stage==='keyframe'),index=frames.findIndex(x=>x.id===tid),label='K'+(index+1);
- const message=`Delete keyframe ${label} from shot ${pad(s.seq)}? Its image file will be removed. Other takes stay available.`+(s.keyframe_take===tid?' This is the keyframe currently used by this shot; choose another before rendering.':'');
+ const message=`Delete keyframe ${label} from shot ${pad(s.seq)}? It will be removed from this shot. Recover it through Studio history; other takes stay available.`+(s.keyframe_take===tid?' This is the keyframe currently used by this shot; choose another before rendering.':'');
  if(!confirm(message))return;
  const remaining=frames.filter(x=>x.id!==tid),next=remaining[Math.min(index,remaining.length-1)];
  button.disabled=true;
@@ -785,6 +788,21 @@ async function deleteKeyframe(sid,tid,button){
   renderShots();toast('Deleted keyframe '+label);
  }finally{button.disabled=false}
 }
+async function deleteClip(sid,tid,button){
+ const s=S.shots.find(x=>x.id===sid),t=s&&s.takes.find(x=>x.id===tid&&['animate','lipsync','continue','upscale'].includes(x.stage));if(!t||button.disabled)return;
+ const group=s.takes.filter(x=>t.stage==='continue'?x.stage==='continue'&&(x.segment||0)===(t.segment||0):t.stage==='upscale'?x.stage==='upscale':['animate','lipsync'].includes(x.stage));
+ const index=group.findIndex(x=>x.id===tid),label=(t.stage==='continue'?`Part ${(t.segment||0)+2} take `:t.stage==='upscale'?'Upscale take ':t.stage==='lipsync'?'Lip-sync take ':'Clip take ')+(index+1);
+ const selected=[s.clip_take,s.final_take,...s.cont].includes(tid);
+ if(!confirm(`Delete ${label} from shot ${pad(s.seq)}? It will be removed from this shot. Recover it through Studio history; other takes stay available.`+(selected?' This clip is currently used. Dependent continuation and upscale selections will be cleared where needed. Choose a replacement before assembling.':'')))return;
+ const wasPreviewed=VIEW[sid]===tid||(!VIEW[sid]&&(s.final_take||s.clip_take||s.keyframe_take)===tid);
+ button.disabled=true;
+ if(wasPreviewed){const video=$('#cut-'+sid+' video');if(video)video.pause()}
+ try{const r=await post('/api/take/delete',{take_id:tid});if(r.ok===false)return;
+  if(wasPreviewed){const remaining=group.filter(x=>x.id!==tid),next=remaining[Math.min(index,remaining.length-1)];if(next)VIEW[sid]=next.id;else delete VIEW[sid]}
+  renderShots();toast('Deleted '+label);
+ }finally{button.disabled=false}
+}
+
 function delView(sid){const s=S.shots.find(x=>x.id===sid);const v=take(VIEW[sid])||take(s.final_take)||take(s.clip_take)||take(s.keyframe_take);if(v){delete VIEW[sid];post('/api/take/delete',{take_id:v.id});closeModal()}}
 
 /* ---------- voices ---------- */
@@ -954,5 +972,5 @@ function renderSettings(){
 function saveInst(id){post('/api/instance/save',{id,name:$('#in_n'+id).value,url:$('#in_u'+id).value,enabled:$('#in_e'+id).checked,roles:[...document.querySelectorAll('.in_r'+id+':checked')].map(x=>x.value)}).then(()=>toast('Server saved'))}
 function addInst(){post('/api/instance/save',{name:'RTX 3060 #2',url:'http://172.16.2.70:8189',roles:['keyframe','animate','continue','lipsync','sheet']})}
 function saveSettings(){const o={};document.querySelectorAll('#setform [data-k]').forEach(e=>o[e.dataset.k]=e.value);post('/api/settings',{settings:o}).then(()=>toast('Settings saved'))}
-window.addEventListener('DOMContentLoaded',()=>{load();setInterval(()=>{if(!$('#modal').classList.contains('on')||$('#a_designed')||$('#sv-rows'))load()},4000)});   // the cast dialog follows its voice takes
-</script><script src="/shot_voices.js"></script><script src="/editor.js"></script><script src="/production.js"></script></body></html>
+window.addEventListener('DOMContentLoaded',()=>{load();setInterval(()=>{if(!$('#modal').classList.contains('on')||$('#a_designed')||$('#sv-rows')||$('#creative-dialog'))load()},4000)});   // the cast dialog follows its voice takes
+</script><script src="/shot_voices.js"></script><script src="/editor.js"></script><script src="/production.js"></script><script src="/creative.js"></script></body></html>
