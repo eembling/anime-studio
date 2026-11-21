@@ -13,12 +13,50 @@ import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT/'app'))
+from anime_studio import API, DEFAULT_INSTANCES, Studio
+from project_workspace import ProjectWorkspace, identity
+from render_queue import eligible_server
 
 
 def free_port():
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0))
         return probe.getsockname()[1]
+
+
+class SharedConfigurationTests(unittest.TestCase):
+    def test_initial_setup_recovers_servers_from_another_project(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Studio(root/'original')
+            current = Studio(root/'recent')
+            try:
+                api = API(source)
+                api.instance_save({'name':'Audio GPU','url':'http://audio.local:8188','roles':['voice'],'enabled':False})
+                api.settings({'settings':{'tts_model':'0.6B','title':'Original title'}})
+                config = root/'config'
+                config.mkdir()
+                (config/'projects.json').write_text(json.dumps({
+                    identity(source.data): {'name':'Original','path':str(source.data)},
+                }))
+                current.projects = ProjectWorkspace(current, config, [], DEFAULT_INSTANCES)
+                audio = next(row for row in current.instances() if row['name'] == 'Audio GPU')
+                self.assertEqual(audio['enabled'], 0)
+                self.assertEqual(current.settings()['tts_model'], '0.6B')
+                self.assertEqual(current.settings()['title'], 'My Anime Episode')
+
+                current.db.x("INSERT INTO jobs(stage,status,instance_id,prompt_id) VALUES('voice','pending',?,'remote-id')", (audio['id'],))
+                API(current).instance_delete({'id':audio['id']})
+                source.projects = ProjectWorkspace(source, config, [], DEFAULT_INSTANCES)
+                self.assertFalse(any(row['name'] == 'Audio GPU' for row in source.instances()))
+                resumable = next(server for server in current.render_instances() if server['id'] == audio['id'])
+                self.assertEqual(resumable['url'], 'http://audio.local:8188')
+                self.assertTrue(eligible_server({'instance_id':audio['id'],'prompt_id':'remote-id'}, resumable, {}, None))
+                self.assertFalse(eligible_server({'stage':'voice'}, resumable, {}, None))
+            finally:
+                current.db.conn.close()
+                source.db.conn.close()
 
 
 @unittest.skipUnless(shutil.which('ffmpeg') and importlib.util.find_spec('PIL'), 'Requires FFmpeg and Pillow')
@@ -80,6 +118,9 @@ class ProjectWorkspaceTests(unittest.TestCase):
                     self.assertEqual(queued.get('queued'), 2, queued)
 
                 queue_on(port, 'Existing cast')
+                request(port, '/api/instance/save', {'name':'Spare ComfyUI','url':'http://127.0.0.1:1','roles':['voice'],'enabled':False})
+                request(port, '/api/settings', {'settings':{'kf_width':1024,'tts_model':'0.6B','title':'Original title'}})
+                request(port, '/api/workflow/meta', {'stage':'animate','fps':16,'max_frames':65})
                 self.assertTrue(request(port, '/api/ping')['job_counts'])
                 created = request(port, '/api/projects', {'action':'create','name':'Second Show'})
                 self.assertTrue(created['ok'], created)
@@ -89,8 +130,18 @@ class ProjectWorkspaceTests(unittest.TestCase):
                 second_state = request(second_port, '/api/state')
                 self.assertEqual(second_state['project_name'], 'Second Show')
                 self.assertEqual((second_state['assets'],second_state['shots'],second_state['job_counts']), ([],[],{}))
+                self.assertEqual([(s['name'],s['enabled']) for s in second_state['instances']], [('Mock',1),('Spare ComfyUI',0)])
+                self.assertEqual(second_state['settings']['kf_width'], '1024')
+                self.assertEqual(second_state['settings']['tts_model'], '0.6B')
+                self.assertEqual(second_state['settings']['title'], 'My Anime Episode')
+                self.assertEqual(second_state['workflows']['animate']['max_frames'], 65)
 
                 queue_on(second_port, 'Second cast')
+                request(second_port, '/api/settings', {'settings':{'kf_width':1280}})
+                request(second_port, '/api/workflow', {'stage':'lipsync','remove':True})
+                first_state = request(port, '/api/state')
+                self.assertEqual(first_state['settings']['kf_width'], '1280')
+                self.assertIsNone(first_state['workflows']['lipsync'])
                 opened = request(second_port, '/api/projects', {'action':'open','path':str(first)})
                 self.assertEqual(opened.get('port'), port, opened)
                 self.assertEqual(Path((config/'data-folder').read_text(encoding='utf-8')), first)

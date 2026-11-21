@@ -86,6 +86,8 @@ def remember_timings(db):
 
 
 def eligible_server(job, instance, health, readiness, compatibility=None):
+    if instance.get('resume_only'):
+        return health.get('ok') is not False and bool(job.get('prompt_id') or job.get('submission_client_id')) and job.get('instance_id') == instance['id']
     if not instance.get('enabled') or health.get('ok') is False:
         return False
     if job.get('prompt_id') or job.get('submission_client_id'):

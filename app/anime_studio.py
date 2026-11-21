@@ -45,7 +45,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "2.25"
+VERSION = "2.26"
 for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebrew/bin")):
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
@@ -279,6 +279,7 @@ CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY, shot_id INTEGER, asset_i
 
 
 MIGRATIONS = [  # columns added after v2.0 - existing projects get them on start
+    ("instances", "shared_retired", "INTEGER NOT NULL DEFAULT 0"),
     ("shots", "cont_takes", "TEXT DEFAULT '[]'"), ("takes", "frames", "INTEGER"), ("takes", "segment", "INTEGER"),
     ("takes", "draft", "INTEGER DEFAULT 0"), ("jobs", "segment", "INTEGER"), ("jobs", "draft", "INTEGER DEFAULT 0"),
     ("shots", "line_audio", "TEXT DEFAULT '[]'"), ("shots", "audio_mode", "TEXT DEFAULT 'lines'"), ("jobs", "note", "TEXT"),
@@ -552,7 +553,23 @@ class Studio:
         return self.tools_cache
 
     def settings(self):
-        return {r["key"]: r["value"] for r in self.db.q("SELECT key,value FROM settings")}
+        settings = {r["key"]: r["value"] for r in self.db.q("SELECT key,value FROM settings")}
+        if self.projects:
+            settings.update(self.projects.configuration['settings'])
+        return settings
+
+    def instances(self, enabled_only=False):
+        return self.db.q("SELECT id,name,url,roles,enabled FROM instances WHERE shared_retired=0"
+                         + (" AND enabled=1" if enabled_only else "") + " ORDER BY id")
+
+    def render_instances(self):
+        servers = self.instances(enabled_only=True)
+        if self.projects:
+            # A removed or disabled server can finish jobs already submitted to its original address.
+            servers += self.db.q("SELECT i.*, 1 AS resume_only FROM instances i WHERE (i.shared_retired=1 OR i.enabled=0) "
+                                 "AND EXISTS (SELECT 1 FROM jobs j WHERE j.instance_id=i.id AND j.status='pending' "
+                                 "AND (j.prompt_id IS NOT NULL OR j.submission_client_id IS NOT NULL))")
+        return servers
 
     def rel(self, p):
         return Path(p).resolve().relative_to(self.data).as_posix()
@@ -593,6 +610,8 @@ class Studio:
         return self.abs(t["path"]) if t else None
 
     def wf_row(self, key):
+        if self.projects:
+            return self.projects.configuration['workflows'].get(key)
         return self.db.one("SELECT * FROM workflows WHERE stage=?", (key,))
 
     def default_duration(self):
@@ -1342,6 +1361,8 @@ class Worker(threading.Thread):
     def run(self):
         while True:
             try:
+                if self.st.projects:
+                    self.st.projects.refresh_configuration()
                 if time.time() - self.last_health > 15:
                     self.refresh_health()
                 self.st.production.tick()
@@ -1352,7 +1373,9 @@ class Worker(threading.Thread):
 
     def refresh_health(self):
         self.last_health = time.time()
-        for inst in self.st.db.q("SELECT * FROM instances"):
+        servers = {inst['id']:inst for inst in self.st.instances()}
+        servers.update({inst['id']:inst for inst in self.st.render_instances() if inst.get('resume_only')})
+        for inst in servers.values():
             threading.Thread(target=self.check, args=(inst,), daemon=True).start()
 
     def check(self, inst):
@@ -1377,16 +1400,18 @@ class Worker(threading.Thread):
         minimum_gib = float(self.st.settings().get("video_min_free_vram") or 0)
         memory_waits = {}
         busy = {r["instance_id"] for r in db.q("SELECT instance_id FROM jobs WHERE status='running'")}
-        for inst in db.q("SELECT * FROM instances WHERE enabled=1"):
+        for inst in self.st.render_instances():
             if inst["id"] in busy or not self.st.health.get(inst["id"], {}).get("ok"):
                 continue
-            roles = [r.strip() for r in (inst["roles"] or "").split(",") if r.strip() in JOB_STAGES]
+            roles = [] if inst.get('resume_only') else [r.strip() for r in (inst["roles"] or "").split(",") if r.strip() in JOB_STAGES]
             inspected = self.st.production.readiness.get('servers', [])
             readiness = next((s['stages'] for s in inspected if s['id'] == inst['id']), None)
             resumable = db.q("SELECT * FROM jobs WHERE status='pending' AND (prompt_id IS NOT NULL OR submission_client_id IS NOT NULL) AND instance_id=? ORDER BY id", (inst['id'],))
             if not roles and not resumable:
                 continue
-            candidates = resumable + db.q(f"SELECT * FROM jobs WHERE status='pending' AND stage IN ({','.join('?' * len(roles))}) AND prompt_id IS NULL AND submission_client_id IS NULL ORDER BY priority DESC,id", roles)
+            candidates = resumable
+            if roles:
+                candidates += db.q(f"SELECT * FROM jobs WHERE status='pending' AND stage IN ({','.join('?' * len(roles))}) AND prompt_id IS NULL AND submission_client_id IS NULL ORDER BY priority DESC,id", roles)
             job = None
             from render_queue import eligible_server
             for candidate in candidates:
@@ -2059,7 +2084,9 @@ class API:
     def queue_state(self, insts=None):
         st, db = self.st, self.st.db
         if insts is None:
-            insts = db.q("SELECT * FROM instances ORDER BY id")
+            insts = st.instances()
+        if st.projects:
+            insts = [*insts, *(server for server in st.render_instances() if server.get('resume_only'))]
         jobs = db.q("SELECT * FROM jobs WHERE status IN ('pending','running') "
                     "OR id IN (SELECT id FROM jobs WHERE status='done' ORDER BY finished DESC,id DESC LIMIT 100) "
                     "OR id IN (SELECT id FROM jobs WHERE status IN ('error','cancelled') ORDER BY finished DESC,id DESC LIMIT 100) ORDER BY id DESC")
@@ -2103,7 +2130,8 @@ class API:
         # Refresh periodically even if nothing wrote to the project database.
         interval = 4 if active else 60
         health = [(key, value.get('ok'), value.get('info')) for key, value in sorted(st.health.copy().items())]
-        value = (st.state_session, changes, version, int(time.time() / interval), health, st.alignment.setup_state, (st.data/'.keep-rendering').is_file())
+        shared = st.projects.configuration_revision if st.projects else None
+        value = (st.state_session, changes, version, shared, int(time.time() / interval), health, st.alignment.setup_state, (st.data/'.keep-rendering').is_file())
         return '"' + hashlib.sha256(repr(value).encode()).hexdigest() + '"'
 
     def state(self, _=None):
@@ -2170,7 +2198,7 @@ class API:
         for a in assets:
             a.update(url=self.media(a["image"]), sheets=asset_takes.get(a["id"], []), active=asset_active.get(a["id"], []),
                      clips=clips.get(a["id"], []), voice_active=voice_active.get(a["id"], []))
-        insts = db.q("SELECT * FROM instances ORDER BY id")
+        insts = st.instances()
         for i in insts:
             h = st.health.get(i["id"])
             i["health"] = {"ok": h["ok"], "info": h["info"]} if h else None
@@ -2219,6 +2247,11 @@ class API:
             vals["tts_language"] = norm_choice(vals["tts_language"], TTS_LANGUAGES, "Auto")
         if "tts_model" in vals:
             vals["tts_model"] = norm_choice(vals["tts_model"], ["0.6B", "1.7B"], "1.7B")
+        if self.st.projects:
+            from project_workspace import SHARED_SETTINGS
+            shared = {key:str(vals.pop(key)) for key in SHARED_SETTINGS.intersection(vals)}
+            if shared:
+                self.st.projects.change_configuration(lambda config: config['settings'].update(shared))
         for k, v in vals.items():
             self.st.db.x("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (k, str(v)))
         return {"ok": True}
@@ -2228,7 +2261,9 @@ class API:
         url = b["url"].strip().rstrip("/")
         if not url.startswith("http"):
             url = "http://" + url
-        if b.get("id"):
+        if self.st.projects:
+            self.st.projects.save_server(b.get('id'), dict(name=b['name'], url=url, roles=roles, enabled=int(bool(b.get('enabled', True)))))
+        elif b.get("id"):
             self.st.db.x("UPDATE instances SET name=?, url=?, roles=?, enabled=? WHERE id=?",
                          (b["name"], url, roles, 1 if b.get("enabled", True) else 0, b["id"]))
         else:
@@ -2237,7 +2272,10 @@ class API:
         return {"ok": True}
 
     def instance_delete(self, b):
-        self.st.db.x("DELETE FROM instances WHERE id=?", (b["id"],))
+        if self.st.projects:
+            self.st.projects.save_server(b['id'], None)
+        else:
+            self.st.db.x("DELETE FROM instances WHERE id=?", (b["id"],))
         return {"ok": True}
 
     def instance_check(self, _):
@@ -2251,7 +2289,10 @@ class API:
         if key not in WF_KEYS:
             raise ValueError("Unknown workflow slot")
         if b.get("remove"):
-            self.st.db.x("DELETE FROM workflows WHERE stage=?", (key,))
+            if self.st.projects:
+                self.st.projects.change_configuration(lambda config: config['workflows'].pop(key, None))
+            else:
+                self.st.db.x("DELETE FROM workflows WHERE stage=?", (key,))
             return {"ok": True}
         if b.get("starter"):
             s = STARTERS[key][b["starter"]]
@@ -2262,12 +2303,24 @@ class API:
         problems = check_workflow(wf, key)
         if problems:
             return {"ok": False, "problems": problems}
-        self.st.db.x("INSERT OR REPLACE INTO workflows(stage,json,name,fps,max_frames,updated) VALUES(?,?,?,?,?,?)",
-                     (key, json.dumps(wf), name, fps, maxf, time.time()))
+        row = dict(stage=key, json=json.dumps(wf), name=name, fps=fps, max_frames=maxf, updated=time.time())
+        if self.st.projects:
+            self.st.projects.change_configuration(lambda config: config['workflows'].update({key:row}))
+        else:
+            self.st.db.x("INSERT OR REPLACE INTO workflows(stage,json,name,fps,max_frames,updated) VALUES(?,?,?,?,?,?)",
+                         tuple(row.values()))
         return {"ok": True}
 
     def workflow_meta(self, b):
-        self.st.db.x("UPDATE workflows SET fps=?, max_frames=? WHERE stage=?", (int(b["fps"]), int(b["max_frames"]), b["stage"]))
+        fps, frames, stage = int(b["fps"]), int(b["max_frames"]), b["stage"]
+        if self.st.projects:
+            def update(config):
+                if stage not in config['workflows']:
+                    raise ValueError('Configure this workflow before changing its timing.')
+                config['workflows'][stage].update(fps=fps, max_frames=frames)
+            self.st.projects.change_configuration(update)
+        else:
+            self.st.db.x("UPDATE workflows SET fps=?, max_frames=? WHERE stage=?", (fps, frames, stage))
         return {"ok": True}
 
     def shot_voices(self, body):
@@ -2721,7 +2774,7 @@ class API:
                     'error': 'No ready server for ' + b['stage']}
         with self.st.production.lock:
             r = self._generate(b)
-        takers = [i for i in self.st.db.q("SELECT roles FROM instances WHERE enabled=1") if b["stage"] in (i["roles"] or "").split(",")]
+        takers = [i for i in self.st.instances(enabled_only=True) if b["stage"] in (i["roles"] or "").split(",")]
         if r.get("queued") and not takers:
             r["skipped"] = [f"No server is set to take {b['stage']} jobs. Tick it under Settings, ComfyUI servers."] + r["skipped"]
         return r
@@ -3122,6 +3175,8 @@ def make_handler(st, api):
                         return self._send(200, {"ok": False, "error": "Open the desktop app to manage projects."})
                     return self._send(200, {"ok": True, "projects": st.projects.state()})
                 if path in ("/api/state", "/api/queue/state"):
+                    if st.projects:
+                        st.projects.refresh_configuration()
                     queue_only = path != "/api/state"
                     etag = api.state_etag(queue_only)
                     headers = {"ETag": etag}
@@ -3132,6 +3187,8 @@ def make_handler(st, api):
                 if path == "/api/csv/export":
                     return self._send(200, api.csv_export(), "text/csv", {"Content-Disposition": 'attachment; filename="shotlist.csv"'})
                 if path.startswith("/api/workflow/"):
+                    if st.projects:
+                        st.projects.refresh_configuration()
                     key = path.rsplit("/", 1)[-1]
                     row = st.wf_row(key)
                     return self._send(200, row["json"] if row else "{}", "application/json",
@@ -3148,6 +3205,14 @@ def make_handler(st, api):
         def do_POST(self):
             try:
                 path = urllib.parse.urlparse(self.path).path
+                shared_write = st.projects and path in ('/api/settings', '/api/instance/save', '/api/instance/delete',
+                                                       '/api/workflow', '/api/workflow/meta')
+                if shared_write:
+                    origin = f"http://127.0.0.1:{self.server.server_port}"
+                    if (self.headers.get("Host") != origin.removeprefix("http://")
+                            or self.headers.get("Origin") not in (None, origin)
+                            or self.headers.get_content_type() != "application/json"):
+                        return self._send(403, {"ok": False, "error": "Shared settings require the local desktop app."})
                 if path == "/api/projects":
                     origin = f"http://127.0.0.1:{self.server.server_port}"
                     if (not st.projects or self.headers.get("Host") != origin.removeprefix("http://")
@@ -3163,6 +3228,8 @@ def make_handler(st, api):
                 if not fn:
                     return self._send(404, {"error": "not found"})
                 with st.production.lock:
+                    if st.projects:
+                        st.projects.refresh_configuration()
                     if path in EDIT_ROUTES:
                         st.editor.checkpoint(path.removeprefix('/api/'))
                     result = getattr(api, fn)(body)
@@ -3259,7 +3326,7 @@ def main():
                     command = [sys.executable, '--backend']
                 else:
                     command = [sys.executable, str(Path(__file__).resolve())]
-                st.projects = ProjectWorkspace(st, config, command)
+                st.projects = ProjectWorkspace(st, config, command, DEFAULT_INSTANCES)
                 atomic_text(project / '.controller-port', str(srv.server_port))
 
             import signal
