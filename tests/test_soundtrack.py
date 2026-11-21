@@ -130,7 +130,7 @@ class SoundtrackTests(unittest.TestCase):
         app.assemble(self.st,False,.25)
         original=api.state()['audio_exports'][0]
         self.assertEqual(original['edit_status'],'current')
-        self.assertEqual(original['build']['fps'],24)
+        self.assertEqual(original['build']['fps'],16)
         self.cue()
         self.assertEqual(api.state()['audio_exports'][0]['edit_status'],'changed')
         source=self.audio.exports()[0]

@@ -204,7 +204,7 @@ Draft generation uses the configured smaller dimensions and frame cap; defaults 
 
 ### Finish the picture
 
-Lip sync is optional. It needs dialogue audio, a keyframe and a compatible S2V workflow/server. It creates a talking clip; it does not replace the voice-generation step.
+Generate and select dialogue first. For motion shots with selected audio, **Animate with voice** automatically uses an audio-capable animation workflow or a ready Lip sync/S2V default. It sends the corresponding dialogue section to ComfyUI and embeds the selected voice in the generated take. The separate Lip sync action remains available, including for still shots.
 
 Upscaling is optional and needs the intended source clip. Choose finishing takes deliberately. Retiming is applied during assembly: hold frames, blend or RIFE when available. Workflow fps and episode output fps are separate settings.
 
@@ -289,7 +289,7 @@ New episode builds retain a dialogue-only master, so repeated soundtrack exports
 
 Run **Studio → Check episode quality** and address missing picture, missing dialogue, insufficient motion coverage, selected drafts, outdated takes and cut-off dialogue.
 
-In Assemble, confirm sound inclusion and build the episode. Defaults are 1920×1080 at 24 fps; project output settings can differ. Review the build log. Missing picture can become black and insufficient motion can hold frames, so a successful encode is not a production-quality approval.
+In Assemble, confirm sound inclusion and build the episode. Defaults are 1920×1080 at 16 fps; project output settings can differ. Review the build log. Missing picture can become black and insufficient motion can hold frames, so a successful encode is not a production-quality approval.
 
 Assembly writes the episode, per-shot clips and a `timeline.edl` for further editing in DaVinci Resolve. Preserve the referenced clips when transferring the EDL.
 
@@ -360,3 +360,67 @@ Selected media, retained render inputs, archived episodes, history and exports a
 Failed renders distinguish memory, model/file, node-pack, connection, timeout and input problems. Repair guidance links to the relevant shot or Settings section, with the full technical error in a disclosure. **Retry same inputs** retains the original configuration; use a new generation after changing resolution, models or prompts. **Reconnect render** uses the saved remote prompt when possible.
 
 The bottom-left badge shows **Anime Studio v2.11**. Click it for the source commit, branch and build time. A local build with uncommitted changes is labelled accordingly; the badge is not a claim that a release was published.
+
+## 18. Shot sound, mixing and transitions
+
+Use **Export with sound** on a shot, or **Export current shot with sound** in Studio, to render its selected picture, dialogue and cues within that shot's timeline range. Absolute and shot-anchored cues are cropped to the range, including sounds that began earlier. The result appears in Assemble with a download link.
+
+Choose **Render scene preview** in Studio, or **Render scene with sound** in Production. This uses the same picture conversion, transitions, dialogue timing and mixer as episode assembly. An unchanged scene reuses its cached MP4. Scene shots must be consecutive. Source selections, media stamps, timing, cues and mixer changes invalidate the cache.
+
+**Audio mixer**, available in Studio and Assemble, controls Dialogue, Music, Ambience and Effects independently. Gain, mute, solo and stereo pan preview immediately while Studio plays. Live meters show each bus's peak level. Save the mixer to apply it to renders. Automatic ducking lowers music while dialogue is audible. Use rendered previews for final mix review.
+
+Open a shot's **Transitions & audio timing** dialog to choose a cut, dissolve or fade through black into the next shot. Transitions preserve shot lengths and absolute cue positions. A dissolve reveals the incoming picture over the outgoing final frame at the cut. Negative dialogue offsets start speech before the picture (J-cut). A dialogue tail allows the recording to continue into the next shot (L-cut). Overlap adjacent dialogue and set fades to crossfade it. The source recording must contain enough audio for a tail.
+
+**Sound library** stores reusable source recordings across episodes in the project. Import a sound, name it, choose a category and add comma-separated tags. Search by any of those fields, audition the sound and choose **Add to episode**. Select its track and timing in the existing audio cue dialog. Removing a library entry retains files referenced by existing cues, history and exports.
+
+## 19. Reliable playback and export jobs
+
+Shot clip playback now waits for the dialogue clock to start and synchronizes the video against the selected take's position in the shot. Continuation previews skip the duplicated boundary frame when finding their dialogue offset. Loading and playback failures appear on the preview. Replacing a take or leaving its player stops its audio.
+
+Studio, subtitles, anchored cues and export use output-frame boundaries for shot durations. For example, a 0.1-second edit at 16 fps occupies two frames. The saved editorial duration remains available for further editing.
+
+Exports run from a captured database and copies of their required media, while editing and render queue controls remain responsive. Assemble lists each export's status and completed media operations. **Cancel export** stops its local media subprocesses. **Resume captured export** retries its captured inputs after cancellation, an error or an app restart. A source changed before it could be captured produces an explicit error; start a new export to use changed inputs.
+
+Live mixer tracks feed summed buses. Bus meters measure the combined output, and Studio and exports use the same block RMS ducking parameters. **Export stems and loudness report** runs in the background and its downloads appear with the export job. New stems use the rendered episode's saved mix configuration, even if current controls have changed. Older exports without a saved recipe use the current mix and identify that fallback in the result.
+
+Scoped preview cache keys include the selected picture, audible dialogue and cues, media stamps and render settings. Changing unrelated script text does not invalidate the preview. Dissolve and fade boundaries render each affected shot once and then concatenate the results, avoiding repeated encoding of the accumulated episode.
+
+### Shot playback with sound
+
+In Shots, choose a clip take and press **Play with sound**. The app prepares a local MP4 containing that take's picture, selected shot dialogue, and overlapping timed music, ambience and effects. Preparation runs independently from episode exports and never submits a ComfyUI render. The same file supplies picture and sound to the native video controls, including seeking, volume, fullscreen and looping. **Save preview** downloads that combined file.
+
+The first play prepares and caches a preview up to 1280 pixels wide. Later plays reuse it; dialogue, timing, source files, cues or mixer changes produce a new cache entry. Source clip timing and frame rate are retained. Continuation previews use the corresponding section of shot dialogue, accounting for duplicate boundary frames. Previewing an alternate take does not approve it. Clip previews show the complete take; shot trims and the assembled continuation chain are applied by **Export with sound**.
+
+Assigned dialogue replaces embedded clip audio to avoid hearing voices twice. If no dialogue is assigned, existing embedded clip audio is retained. Timed cues and saved mixer gain, mute, solo, pan and ducking are applied; the separate episode-wide music bed is reserved for episode/scene playback and exports. Missing files produce a visible Retry action. The player identifies unassigned dialogue or a muted mix instead of silently running a second audio player.
+
+### Voice-aware clip generation
+
+The selected shot dialogue is copied into the render snapshot when you queue Animate, Continue or Lip sync. Editing or regenerating a voice afterward leaves the queued render unchanged. Repeat/retry uses the captured voice; generating a new take uses the new selection. Generation includes the voice in the take's own MP4, so opening the generated file outside Anime Studio also plays it. Upscaled takes retain the selected voice as well.
+
+Compatible workflows receive a bounded WAV aligned to that clip's source time, including dialogue offsets and fades. Continuations receive the later dialogue section with the duplicate boundary frame accounted for. The voice and picture keep their original time scale; audio is never sped up to change frame rate. S2V's required generation padding is trimmed to the requested frame count in the saved take.
+
+An explicitly assigned generation recipe and end-on-next-shot constraints are retained. Audio-aware assigned recipes receive the voice directly. If the selected recipe cannot use audio, or the default S2V workflow is unavailable on enabled servers, generation keeps the picture workflow and embeds the voice; the queue confirmation explains that audio-driven animation was unavailable. It never claims that attaching a soundtrack alone creates lip sync.
+
+For manual ComfyUI server setup, configure or verify **Settings → Workflows → Lip sync** and run **Production → Check readiness**. On the rendering server, run a compatible S2V template with its required nodes/models, then export its API workflow if it differs from the configured default. Label its connected image/audio loaders `START_IMAGE` and `AUDIO_IN`, and enter its actual generation fps and frame limit in the app. Enable the server for Clip/Continue jobs so automatically routed renders can use it. No server installation or remote GPU render is performed by an app rebuild.
+
+### GPU memory failures during voice animation
+
+`CLIPTextEncode: VRAM grow failed` means prompt encoding could not allocate GPU memory, before video sampling starts. S2V prompt encoding stays on GPU: new jobs use `CLIPLoader.device=default` and remove explicit CPU overrides from captured S2V graphs. Other workflows and existing snapshots are preserved. The app does not silently switch voice animation to CPU.
+
+On the rendering server, run `nvidia-smi` to inspect **free memory on the GPU ComfyUI is using** and the processes holding allocations. A 12 GB card with only 1 GB free cannot satisfy a new 2 GB allocation. Identify the owners before stopping any process. If the competing process is Ollama, `ollama ps` identifies its loaded models; stop only models you intend to unload. If the allocation belongs to idle ComfyUI, restart ComfyUI after checking no renders are active. Do not use CPU/low-VRAM flags as an automatic replacement for GPU prompt encoding.
+
+After freeing memory, Retry can use the same GPU snapshot. After changing a workflow, generate a **new** job; Retry intentionally retains its captured inputs. Reducing resolution/frame count can reduce video-sampling memory, but does not directly reduce the text encoder's model-weight allocation. The 14B video model still needs sufficient peak GPU memory even after prompt encoding succeeds. The shot-length/Continue notice is about segment coverage, not an explanation of this encoder failure.
+
+Reference: [ComfyUI CLIPLoader documentation](https://github.com/Comfy-Org/embedded-docs/blob/main/comfyui_embedded_docs/docs/CLIPLoader/en.md).
+
+### Native 16 fps Studio playback
+
+Studio and new episode exports default to 16 fps to match generated shots. The playhead, previous/next-frame actions, trim increments, frame timecode, animatics and camera previews use the project frame rate. Playback stays at normal speed: one source second remains one real second, with audio at its original rate.
+
+Existing projects and older saved episodes using the legacy 24 fps default are upgraded to 16 fps once. Source files, completed exports and captured render/export jobs retain their original media and timing. A later explicit output-setting change is preserved across restarts.
+
+### Studio audio playback
+
+With the mixer active, Studio decodes audio once and schedules buffered sources through its audio buses. Healthy playback does not repeatedly seek a separate dialogue media element. Seeking replaces scheduled sources at the new offset; pausing or leaving Studio stops them. Timed sounds, trimmed source loops, bus gain/pan/mute/solo, meters and ducking continue through the same mixer. Playback remains at 16 fps with audio at normal speed.
+
+The decode cache targets 128 MiB for inactive buffers, retaining active sources. First use of a long audio file requires decoding it; a rendered scene preview remains useful for reviewing a precombined export. Native acceptance checks now require sustained real-time timeline advancement, measured audible output, picture/audio agreement, seeking and silence after pause. Checking only the frame-rate label or a small amount of timeline advancement is insufficient.

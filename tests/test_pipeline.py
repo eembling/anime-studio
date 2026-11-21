@@ -269,6 +269,23 @@ def main():
     check(wf.get("22", {}).get("inputs", {}).get("length") == 73 and
           wf.get("11", {}).get("inputs", {}).get("audio", "").startswith("anime_j"),
           "S2V gets uploaded dialogue and at least 73 frames")
+    check(wf.get("2", {}).get("inputs", {}).get("device") == "default",
+          "S2V keeps text encoding on GPU and never silently switches to CPU")
+    # Ordinary Animate must use the selected voice without a separate Lip sync action.
+    post("/api/shot/save", {"id": lip, "kind": "motion"})
+    r = post("/api/generate", {"stage": "animate", "shot_ids": [lip], "takes": 1})
+    check(r.get("audio_conditioned") == 1 and r.get("audio_included") == 1,
+          "Animate automatically uses selected voice for audio-driven generation")
+    wait_jobs()
+    voiced = [take for take in shot(lip)["takes"] if take["stage"] == "animate"][-1]
+    voiced_file = RUN/"data"/voiced["path"]
+    info = json.loads(subprocess.check_output(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(voiced_file)]))
+    check({stream["codec_type"] for stream in info["streams"]} == {"video", "audio"},
+          "generated Animate take itself contains video and the selected voice")
+    import array
+    samples = array.array('f')
+    samples.frombytes(subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(voiced_file), "-vn", "-f", "f32le", "-ac", "1", "-"]))
+    check(max(map(abs, samples), default=0) > .01, "generated clip dialogue is audible without the Shot preview mixer")
     post("/api/shot/delete", {"ids": [lip]})
 
     # Guided scene preparation uses the real dispatcher and stops before expensive animation.

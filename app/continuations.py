@@ -41,9 +41,20 @@ class Continuations:
         chain = chain[:segment+1]; source = chain[-1]
         covered = self.st.chain_seconds(chain); remaining = float(shot['duration'])+float(shot.get('trim_in') or 0)-covered
         recipe, values = self.st.creative.current_recipe('animate', sid)
+        key = 'animate'
+        if shot.get('audio'):
+            from clip_audio import choose_workflow, gpu_s2v
+            row={'json':json.dumps(recipe['workflow']),'fps':recipe['fps'],'max_frames':recipe['max_frames']}
+            selected,actual,conditioned,_=choose_workflow(self.st,'continue',key,row,not recipe.get('id') and not shot['end_next'])
+            if conditioned and selected=='lipsync':
+                if actual!=gpu_s2v(row):
+                    recipe=dict(recipe,id=None,name='Voice-driven continuation',workflow=json.loads(actual['json']),fps=actual['fps'],max_frames=actual['max_frames'],controls=[])
+                    values={}
+                recipe=dict(recipe,workflow=json.loads(actual['json']))
+                key=selected
         fps, maxf = float(recipe['fps']), int(recipe['max_frames'])
         if fps<=0 or maxf<2: raise ValueError('Set a positive animation fps and a frame limit of at least two.')
-        key = 'animate'; capacity=(maxf-1)/fps
+        capacity=(maxf-1)/fps
         pinned_end = any(n.get('_meta',{}).get('title','').upper()=='END_IMAGE' for n in recipe['workflow'].values())
         if pinned_end and remaining>capacity+.001:
             raise ValueError('Use an animation recipe without END_IMAGE for earlier sections. Endpoint targeting is only for the final section.')
@@ -58,7 +69,7 @@ class Continuations:
                 capacity=max(1/fps,remaining-final_capacity)
         if pinned_end: key='animate_flf'
         saved=self.row(sid,segment)
-        token=digest([shot['id'],segment,[t['id'] for t in chain],self.st.production.file_stamp(source['path']),shot['duration'],shot.get('trim_in'),recipe,values])
+        token=digest([shot['id'],segment,[t['id'] for t in chain],self.st.production.file_stamp(source['path']),shot['duration'],shot.get('trim_in'),self.st.production.file_stamp(shot.get('audio')),shot.get('dialogue_offset'),recipe,values])
         frame=self.st.last_frame(self.st.abs(source['path'])) if boundary else None
         return {'shot_id':sid,'segment':segment,'section':segment+2,'start':covered,'end':covered+max(0,min(remaining,capacity)),
                 'remaining':max(0,remaining),'requested_seconds':max(0,min(remaining,capacity)), 'fps':fps,'max_frames':maxf,'capacity':capacity,

@@ -39,7 +39,7 @@ class Workspace:
         if body['action']=='cut':
             next_shot=st.neighbor(shot,1)
             if not next_shot:raise ValueError('Choose a shot with a following cut.')
-            return {'ok':True,'left':self.frame(shot,float(shot['duration'])-1/(int(st.settings()['out_fps']) or 24)),'right':self.frame(next_shot,0),'left_seq':shot['seq'],'right_seq':next_shot['seq']}
+            return {'ok':True,'left':self.frame(shot,float(shot['duration'])-1/(int(st.settings()['out_fps']) or 16)),'right':self.frame(next_shot,0),'left_seq':shot['seq'],'right_seq':next_shot['seq']}
         raise ValueError('Unknown timeline action.')
     def frame(self,shot,local):
         from anime_studio import ffmpeg,media_seconds

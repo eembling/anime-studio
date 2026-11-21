@@ -7,13 +7,14 @@ nodes built into ComfyUI, so nothing needs installing on the server - just model
 
   ComfyUI server : character sheets, keyframes (Qwen-Image-Edit 2509), animation (Wan 2.2 I2V,
                    first/last-frame mode), optional lip sync (Wan S2V) and upscaling
-  This Mac       : script -> shot list, temporary voices (macOS `say`), 16 -> 24 fps conversion,
+  This Mac       : script -> shot list, temporary voices (macOS `say`), 16 fps playback,
                    assembly, DaVinci Resolve export (EDL + per-shot clips)
 
     python3 anime_studio.py --port 8700 --data ~/Documents/AnimeStudio
 """
 from script_dialogue import dialogue_line, script_blocks, recovery_preview, recover_dialogue
 import hashlib
+from timeline import frames as timeline_frames, layout as timeline_layout
 import argparse
 import base64
 import copy
@@ -41,7 +42,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "2.12"
+VERSION = "2.22"
 for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebrew/bin")):
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
@@ -211,7 +212,7 @@ DEFAULT_SETTINGS = {
     "kf_width": "1280", "kf_height": "720",
     "sheet_width": "1536", "sheet_height": "864",
     "vid_width": "848", "vid_height": "480",
-    "out_width": "1920", "out_height": "1080", "out_fps": "24",
+    "out_width": "1920", "out_height": "1080", "out_fps": "16",
     "default_voice": "",
     "line_gap": "0.3",
     "tts_model": "1.7B", "tts_language": "Auto",
@@ -365,7 +366,7 @@ def norm_choice(value, options, default):
 
 
 def find_rife():
-    """Optional: rife-ncnn-vulkan (https://github.com/nihui/rife-ncnn-vulkan) for smooth 16->24 fps on the Mac."""
+    """Optional: rife-ncnn-vulkan (https://github.com/nihui/rife-ncnn-vulkan) for optional source frame-rate conversion on the Mac."""
     hit = shutil.which("rife-ncnn-vulkan")
     if hit:
         return Path(hit)
@@ -378,13 +379,19 @@ def find_rife():
 
 
 class Studio:
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, export_worker=False):
         self.data = Path(data_dir).expanduser().resolve()
         for sub in ("uploads", "shots", "cast", "jobs", "exports", "voices", "cache"):
             (self.data / sub).mkdir(parents=True, exist_ok=True)
         self.db = DB(self.data / "studio.db")
         for k, v in DEFAULT_SETTINGS.items():
             self.db.x("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
+        if not export_worker:
+            from timeline import upgrade_legacy_fps
+            saved=self.settings()
+            for key,value in upgrade_legacy_fps(saved).items():
+                if saved.get(key)!=value:
+                    self.db.x('INSERT OR REPLACE INTO settings VALUES(?,?)',(key,value))
         if not self.db.one("SELECT id FROM instances"):
             for name, url, roles in DEFAULT_INSTANCES:
                 self.db.x("INSERT INTO instances(name,url,roles) VALUES(?,?,?)", (name, url, roles))
@@ -424,6 +431,8 @@ class Studio:
         self.sections = Continuations(self)
         from job_snapshots import JobSnapshots
         self.snapshots = JobSnapshots(self)
+        from finishing import Finishing
+        self.finishing = Finishing(self)
         from studio_tools import StudioTools
         self.editor = StudioTools(self)
         from alignment import Alignment
@@ -432,6 +441,11 @@ class Studio:
         self.alignment=Alignment(self)
         self.storage=StorageManager(self)
         self.workspace=Workspace(self)
+        if not export_worker:
+            from export_jobs import ExportJobs
+            self.exports=ExportJobs(self)
+        from shot_previews import ShotPreviews
+        self.shot_previews=ShotPreviews(self)
 
     def tools(self, refresh=False):
         if self.tools_cache is None or refresh:
@@ -735,8 +749,9 @@ def detect_slots(wf, key):
         m["start_image"] = (_tagged(wf, "START_IMAGE") or loads)[:1]
         if key == "animate_flf":
             m["end_image"] = (_tagged(wf, "END_IMAGE") or [k for k in loads if k not in m["start_image"]])[:1]
-        if key == "lipsync":
-            m["audio_in"] = (_tagged(wf, "AUDIO_IN") or [k for k in keys if cls(k) == "LoadAudio"])[:1]
+        from clip_audio import audio_inputs
+        connected_audio=set(audio_inputs(wf))
+        m["audio_in"] = [k for k in _tagged(wf, "AUDIO_IN") if k in connected_audio] or [k for k in keys if k in connected_audio and cls(k)=="LoadAudio"]
         m["size"] = _tagged(wf, "SIZE") or [k for k in keys if {"width", "height", "length"} <= set(ins(k))][:1]
     elif key == "upscale":
         m["video_in"] = (_tagged(wf, "VIDEO_IN") or [k for k in keys if cls(k) in VIDEO_LOADERS])[:1]
@@ -843,7 +858,10 @@ def build_workflow(template, key, p):
         for k in m[slot]:
             wf[k]["inputs"]["image"] = imgs[field_name]
     for k in m["audio_in"]:
-        wf[k]["inputs"]["audio"] = imgs["audio"]
+        if imgs.get("audio"):
+            wf[k]["inputs"]["audio"] = imgs["audio"]
+        elif key in ("voice","lipsync"):
+            raise ValueError("This workflow requires an audio input.")
     for k in m.get("ref_text", []):
         _set_text(wf[k], p.get("ref_text", ""))
     if key in ("voice", "voice_design"):   # fill well-known TTS inputs wherever a node has them
@@ -895,7 +913,8 @@ def collect_outputs(entry):
 # Media helpers (run on the Mac)
 # ======================================================================================
 def ffmpeg(args):
-    r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"] + args, capture_output=True, text=True)
+    from export_runtime import run
+    r = run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"] + args)
     if r.returncode != 0:
         raise RuntimeError("ffmpeg: " + (r.stderr or "")[-1500:])
 
@@ -1406,8 +1425,10 @@ class Worker(threading.Thread):
                     raise RuntimeError("ffmpeg is needed on this Mac to turn frames into video: brew install ffmpeg")
                 self._progress(job["id"], f"stitching {len(imgs)} frames at {fps} fps")
                 stitch_frames(imgs, fps, dest)
+            from clip_audio import embed as embed_clip_audio
+            dest = embed_clip_audio(st, job, dest)
             made.append((dest, fps))
-        nframes = len(imgs) if imgs and not vids else None
+        nframes = len(imgs) if imgs and not vids and not st.snapshots.meta(job).get('clip_audio') else None
         for path, fps in made:
             tid = st.db.x("INSERT INTO takes(shot_id,asset_id,stage,path,fps,seed,job_id,created,frames,segment,draft,input_signature) "
                           "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -1436,19 +1457,24 @@ def tc(frames, fps, hour=0):
     return f"{hour + f // (fps * 3600):02d}:{f // (fps * 60) % 60:02d}:{f // fps % 60:02d}:{f % fps:02d}"
 
 
-def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=True):
+def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=True, shot_ids=None):
     A = st.assembly
     A.update(running=True, log=[], output=None, folder=None, kind='animatic' if preview else 'episode')
     log = A["log"]
-    cues = st.soundtrack.cues() if use_timed and not preview and scene is None else []
+    cues = st.soundtrack.cues() if use_timed and not preview else []
     try:
         if not st.tools(refresh=True)["ffmpeg"]:
             raise RuntimeError("ffmpeg not found. Install it with: brew install ffmpeg")
         S = st.settings()
         W, H, FPS = int(S["out_width"]), int(S["out_height"]), int(S["out_fps"])
         if preview:
-            W, H, FPS = 960, 540, 24
-        shots = [s for s in st.ordered_shots() if scene is None or s['scene'] == scene]
+            W, H = 960, 540
+        all_shots = st.ordered_shots()
+        shots = [s for s in all_shots if (scene is None or s['scene']==scene) and (shot_ids is None or s['id'] in shot_ids)]
+        start = 0
+        for shot in all_shots:
+            if shots and shot['id']==shots[0]['id']:break
+            start += timeline_frames(shot['duration'],FPS)/FPS
         if not shots:
             raise RuntimeError("No shots yet.")
         bed = S.get('music', '') if use_music else ''
@@ -1456,7 +1482,7 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
             'picture': st.soundtrack.picture_signature(shots, S), 'mix': st.soundtrack.mix_signature(cues, bed),
             'width': W, 'height': H, 'fps': FPS, 'music': bool(use_music), 'timed': bool(use_timed),
             'volume': float(music_volume),
-        } if not preview and scene is None else None
+        } if not preview and scene is None and shot_ids is None else None
         name = re.sub(r"[^A-Za-z0-9_-]+", "_", S.get("title") or "episode").strip("_") or "episode"
         name += "_animatic" if preview else ""
         out = st.data / "exports" / f"{name}_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
@@ -1468,7 +1494,7 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
         for i, s in enumerate(shots, 1):
             dur = max(0.5, float(s["duration"] or 4))
             trim_in = float(s.get("trim_in") or 0)
-            nfr = int(round(dur * FPS))
+            nfr = timeline_frames(dur, FPS)
             seg = out / "shots" / f"{i:04d}_shot.mp4"
             chain = st.chain(s)
             take = st.take(s["final_take"]) or (chain[0] if chain else None)
@@ -1528,10 +1554,30 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
         joined, final = out / "_joined.mp4", out / f"{name}.mp4"
         ffmpeg(["-f", "concat", "-safe", "0", "-i", str(out / "concat.txt"), "-c", "copy", str(joined)])
         master = out / '_dialogue_master.mp4'
-        joined.rename(master)
+        if not preview:
+            if any((shot.get('transition') or 'cut')!='cut' for shot in shots[:-1]):
+                joined.unlink()
+                st.finishing.join_picture(shots, segs, joined, FPS)
+            duration = rec / FPS
+            dialogue = st.finishing.window_tracks(st.finishing.dialogue_tracks(all_shots), start, duration)
+            st.finishing.audio(joined, master, dialogue, duration)
+            joined.unlink()
+            cues = st.finishing.window_tracks(cues, start, duration)
+            # Keep a music bed at the same source phase as the whole episode.
+            if bed:
+                from soundtrack import probe
+                seconds, _ = probe(st.abs(bed))
+                cues.append(dict(name='Music bed',kind='music',path=bed,start=0,offset=0,duration=duration,
+                                 source_seconds=seconds,window_skip=start,original_duration=start+duration,
+                                 volume=music_volume,fade_in=0,fade_out=0,loop=1,enabled=1))
+                bed = ''
+        else:
+            joined.rename(master)
         log.append('Mixing episode audio...' if cues or use_music else 'Saving dialogue-only episode...')
+        if build is not None:
+            build['mix_recipe']={'cues':cues,'bed':bed,'volume':float(music_volume),'mixer':st.finishing.mixer(),'engine':'block-rms-v1'}
         st.soundtrack.mix(master, final, cues, bed, float(music_volume), log)
-        if not preview and scene is None:
+        if not preview and scene is None and shot_ids is None:
             st.soundtrack.register(master, final, rec / FPS, build=build)
         (out / "concat.txt").unlink()
         (out / "shotlist.csv").write_text(API(st).csv_export())
@@ -1646,6 +1692,11 @@ class API:
             job['requires_flf'] = job['stage'] in ('animate','continue') and job['shot_id'] in end_next
         queue = queue_snapshot(jobs, history, insts, st.health, readiness)
         production = st.production.snapshot(shots)
+        timing = {row['id']: row for row in timeline_layout(shots, int(st.settings()['out_fps']))}
+        for shot in shots:
+            shot['timeline_start'] = timing[shot['id']]['start']
+            shot['timeline_duration'] = timing[shot['id']]['duration']
+            shot['timeline_frames'] = timing[shot['id']]['frames']
         A = dict(st.assembly, log=list(st.assembly["log"]))
         A["output_url"] = self.media(A.get("output"))
         S = st.settings()
@@ -1659,7 +1710,7 @@ class API:
                 "version": VERSION, "platform": sys.platform, "production": production, "render_queue": queue,
                 "audio_cues": [dict(c, url=self.media(c['path'])) for c in cues],
                 "audio_exports": [dict(e, url=self.media(e['output'])) for e in st.soundtrack.export_states(S, cues)],
-                "editor": st.editor.state(), "creative": st.creative.state(), "voice_recovery_count": len(voice_recovery_rows)}
+                "export_jobs": st.exports.rows() if hasattr(st,'exports') else [], "finishing": st.finishing.state(), "editor": st.editor.state(), "creative": st.creative.state(), "voice_recovery_count": len(voice_recovery_rows)}
 
     # ---- settings / servers / workflows / tools
     def settings(self, b):
@@ -1739,6 +1790,8 @@ class API:
 
     def quit(self, _):
         self.st.alignment.shutdown()
+        self.st.exports.shutdown()
+        self.st.shot_previews.shutdown()
         threading.Timer(0.5, lambda: os._exit(0)).start()
         return {"ok": True}
 
@@ -2090,6 +2143,10 @@ class API:
                 result=self._generate_request(b)
                 for job in self.st.db.q("SELECT * FROM jobs WHERE id>? AND status='pending'",(before,)):
                     self.st.snapshots.capture(job)
+                audio_jobs=[self.st.snapshots.meta(job) for job in self.st.db.q("SELECT * FROM jobs WHERE id>? AND status='pending'",(before,)) if self.st.snapshots.meta(job).get('clip_audio')]
+                result['audio_conditioned']=sum(bool(meta.get('audio_conditioned')) for meta in audio_jobs)
+                result['audio_included']=len(audio_jobs)
+                result['audio_notes']=list(dict.fromkeys(meta['audio_note'] for meta in audio_jobs if meta.get('audio_note')))
                 return result
             except Exception:
                 for job in self.st.db.q("SELECT id FROM jobs WHERE id>? AND status='pending'",(before,)):
@@ -2105,7 +2162,8 @@ class API:
                 return self.st.creative.generate(b)
         if b['stage'] == 'keyframe' and any(self.st.creative.direction(sid).get('conditioning') for sid in b.get('shot_ids', [])):
             return {'ok':False,'queued':0,'skipped':[],'error':'Assign a compatible keyframe recipe in Generation lab before using pose/depth/layout conditioning.'}
-        if not self.st.production.ready(b['stage'], b.get('shot_ids', [])):
+        voiced_animation=b['stage']=='animate' and bool(b.get('shot_ids')) and all((self.st.db.one('SELECT audio FROM shots WHERE id=?',(sid,)) or {}).get('audio') for sid in b['shot_ids'])
+        if not voiced_animation and not self.st.production.ready(b['stage'], b.get('shot_ids', [])):
             return {'ok': False, 'queued': 0, 'skipped': ['No ready server for this workflow. Run Production → Check readiness for details.'],
                     'error': 'No ready server for ' + b['stage']}
         with self.st.production.lock:
@@ -2342,6 +2400,13 @@ class API:
     def workspace_action(self,b):
         return self.st.workspace.action(b)
 
+    def shot_preview(self,b):
+        return self.st.shot_previews.request(b)
+
+    def finishing_action(self,b):
+        with self.st.production.lock:
+            return self.st.finishing.action(b)
+
     def alignment_action(self,b):
         return self.st.alignment.action(b)
 
@@ -2364,7 +2429,7 @@ class API:
                    'timeline': self.st.editor.timeline, 'continuity': self.st.editor.continuity,
                    'library': self.st.editor.library, 'backup': self.st.editor.backup,
                    'import': self.st.editor.restore_backup, 'subtitles': self.st.editor.subtitles,
-                   'delivery': self.st.editor.delivery,
+                   'delivery': lambda body:self.st.exports.submit(dict(body,kind='stems')),
                    'qc': lambda _: {'ok': True, 'issues': self.st.editor.qc(self.state()['shots'])}}
         action = b.get('tool')
         if action not in actions:
@@ -2373,14 +2438,10 @@ class API:
             return actions[action](b)
 
     def assemble(self, b):
-        if self.st.assembly["running"]:
-            return {"ok": False, "error": "Already assembling."}
-        with self.st.production.lock:
-            if self.st.assembly['running']:
-                return {'ok': False, 'error': 'Already assembling.'}
-            self.st.assembly['running'] = True
-            threading.Thread(target=assemble, args=(self.st, b.get("use_music"), b.get("music_volume", 0.25), bool(b.get('preview')), b.get('scene'), bool(b.get('use_timed', True))), daemon=True).start()
-        return {"ok": True}
+        return self.st.exports.submit(dict(b,kind='episode'))
+
+    def export_action(self,b):
+        return self.st.exports.action(b)
 
 
 EDIT_ROUTES = {'/api/settings','/api/shot/save','/api/shot/delete','/api/shot/move',
@@ -2388,6 +2449,9 @@ EDIT_ROUTES = {'/api/settings','/api/shot/save','/api/shot/delete','/api/shot/mo
     '/api/voice_take/delete','/api/clip/delete','/api/line/set','/api/line/direction',
     '/api/audio/cue/save','/api/audio/cue/delete','/api/script/revision'}
 ROUTES = {
+    '/api/export':'export_action',
+    '/api/finishing':'finishing_action',
+    '/api/shot/preview':'shot_preview',
     '/api/creative': 'creative_action',
     '/api/section': 'section_action',
     '/api/workspace':'workspace_action',
@@ -2439,8 +2503,8 @@ def make_handler(st, api):
                     return self._send(200, INDEX_HTML, "text/html; charset=utf-8")
                 if path == '/shot_voices.js':
                     return self._send(200, (Path(__file__).resolve().parent / 'shot_voices.js').read_text(), 'text/javascript; charset=utf-8')
-                if path in ('/settings.js','/settings.css','/continuations.js','/workspace.js','/workspace.css'):
-                    return self._send(200, (Path(__file__).resolve().parent / path[1:]).read_text(), 'text/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8')
+                if path in ('/studio_audio.js','/settings.js','/settings.css','/continuations.js','/workspace.js','/workspace.css','/finishing.js','/finishing.css','/shot_playback.js','/mix_processor.js','/audio_mix.json'):
+                    return self._send(200, (Path(__file__).resolve().parent / path[1:]).read_text(), 'application/json' if path.endswith('.json') else 'text/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8')
                 if path == '/creative.css':
                     return self._send(200, (Path(__file__).resolve().parent / 'creative.css').read_text(), 'text/css; charset=utf-8')
                 if path == '/creative.js':
@@ -2544,6 +2608,8 @@ def main():
     import signal
     def stop_local(signum,frame):
         st.alignment.shutdown()
+        st.exports.shutdown()
+        st.shot_previews.shutdown()
         raise SystemExit(0)
     signal.signal(signal.SIGTERM,stop_local)
     signal.signal(signal.SIGINT,stop_local)

@@ -83,10 +83,14 @@ class SpeechAndDiagnosticsTests(unittest.TestCase):
  def test_multilingual_tokenization_can_merge_recognized_subwords(self):
   r=match_words('こんにちは',[{'text':'こんに','start':0,'end':.5,'probability':.99},{'text':'ちは','start':.5,'end':1,'probability':.99}]);self.assertTrue(r['usable']);self.assertEqual(r['words'][0]['end'],1)
  def test_errors_provide_specific_repair_guidance_and_honest_retry_labels(self):
-  for message,category in [('CUDA out of memory','memory'),('Missing node: SomeNode','nodes'),('model not found: file.safetensors','model'),('Connection refused','connection'),('Timed out after 3600s','timeout'),('Dialogue line changed','inputs')]:
+  for message,category in [('VRAM grow failed: 2100297728 bytes','memory'),('CUDA out of memory','memory'),('Missing node: SomeNode','nodes'),('model not found: file.safetensors','model'),('Connection refused','connection'),('Timed out after 3600s','timeout'),('Dialogue line changed','inputs')]:
    with self.subTest(category=category):
     r=diagnose({'error':message});self.assertEqual(r['category'],category);self.assertTrue(r['guidance']);self.assertEqual(r['retry_label'],'Retry same inputs')
   self.assertEqual(diagnose({'error':'Connection refused','prompt_id':'existing'})['retry_label'],'Reconnect render')
+  memory=diagnose({'error':'ComfyUI error: CLIPTextEncode VRAM grow failed: 2100297728 bytes'})
+  self.assertEqual(memory['title'],'The prompt encoder ran out of GPU memory')
+  self.assertIn('NEW clip',memory['guidance'])
+  self.assertEqual(memory['action'],'servers')
 
 class SnapshotDispatchTests(unittest.TestCase):
  setUp=ImprovedWorkspaceTests.setUp

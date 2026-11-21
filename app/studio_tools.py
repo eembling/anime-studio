@@ -1,6 +1,7 @@
 """Editorial history, episode library, scene maintenance, continuity and delivery."""
 import hashlib
 import json
+from timeline import frames as timeline_frames, layout as timeline_layout
 import math
 import shutil
 import sqlite3
@@ -10,11 +11,11 @@ import uuid
 import zipfile
 from pathlib import Path
 
-EDITORIAL = ('settings', 'shots', 'assets', 'takes', 'voice_takes', 'voice_clips',
+EDITORIAL = ('sound_library', 'settings', 'shots', 'assets', 'takes', 'voice_takes', 'voice_clips',
              'audio_cues', 'episode_audio_exports', 'production_approvals', 'production_plans', 'continuity',
              'asset_looks', 'scene_looks', 'continuity_reviews', 'shot_direction', 'generation_recipes',
              'shot_recipes', 'character_pronunciations', 'line_performances', 'performance_takes', 'creative_runs', 'shot_sections', 'section_takes')
-SHARED = {'assets', 'voice_clips', 'asset_looks', 'generation_recipes', 'character_pronunciations'}
+SHARED = {'sound_library', 'assets', 'voice_clips', 'asset_looks', 'generation_recipes', 'character_pronunciations'}
 
 
 def number(value, minimum=0):
@@ -85,6 +86,9 @@ class StudioTools:
         snapshot = dict(snapshot) if isinstance(snapshot, dict) else snapshot
         if not isinstance(snapshot, dict) or 'shots' not in snapshot or 'settings' not in snapshot:
             raise ValueError('Invalid project checkpoint')
+        from timeline import upgrade_legacy_fps
+        settings=upgrade_legacy_fps({row['key']:row['value'] for row in snapshot['settings']})
+        snapshot['settings']=[dict(key=key,value=value) for key,value in settings.items()]
         for table in ('scene_looks','continuity_reviews','shot_direction','shot_recipes','line_performances','performance_takes','creative_runs','shot_sections','section_takes'):
             snapshot.setdefault(table, [])
         if 'assets' in snapshot:
@@ -99,7 +103,7 @@ class StudioTools:
             columns = {c['name'] for c in db.q('PRAGMA table_info(' + table + ')')}
             if any(not isinstance(r, dict) or not set(r).issubset(columns) for r in rows):
                 raise ValueError('Incompatible checkpoint columns')
-        paths = {'shots': ('audio',), 'assets': ('image',), 'takes': ('path',),
+        paths = {'sound_library': ('path',), 'shots': ('audio',), 'assets': ('image',), 'takes': ('path',),
                  'voice_takes': ('path',), 'voice_clips': ('path',), 'audio_cues': ('path',),
                  'episode_audio_exports': ('master','output')}
         for table, fields in paths.items():
@@ -423,18 +427,19 @@ class StudioTools:
         shots = self.st.ordered_shots()
         rows = []; start = 0
         for shot in shots:
-            trim = shot.get('trim_in') or 0
+            trim = (shot.get('trim_in') or 0) - (shot.get('dialogue_offset') or 0)
             cursor = 0
             for line in self.st.shot_lines(shot):
                 from anime_studio import media_seconds
                 length = media_seconds(self.st.abs(line['audio'])) if line.get('audio') else max(.5, len(line['text'])/14)
                 timing = self.st.creative.timing(shot['id'], line)
                 cursor += timing.get('lead_in', 0)
-                left, right = max(0,cursor-trim), min(shot['duration'],cursor+length-trim)
+                left, right = max(-start,cursor-trim), min(shot['duration']+(shot.get('dialogue_tail') or 0)+(shot.get('dialogue_offset') or 0),cursor+length-trim)
                 if right > left:
                     rows.append({'start':start+left,'end':start+right,'text':line['text'],'speaker':line.get('speaker','')})
                 cursor += length + timing.get('pause_after', float(self.st.settings().get('line_gap', .3)))
-            start += shot['duration']
+            start += timeline_frames(shot['duration'],int(self.st.settings()['out_fps']))/int(self.st.settings()['out_fps'])
+        rows = [dict(row,end=min(start,row['end'])) for row in rows if row['start']<min(start,row['end'])]
         if body.get('rows') is not None:
             rows = body['rows']
         if body.get('rows') is None and self.st.settings().get('subtitle_rows') and not body.get('regenerate'):
@@ -458,25 +463,29 @@ class StudioTools:
         return {'ok':True,'rows':rows}
 
     def delivery(self, body):
-        self.idle()
         from anime_studio import ffmpeg
         from soundtrack import probe
         output = self.st.db.one('SELECT * FROM episode_audio_exports WHERE id=?',(body['id'],))
         if not output or not output['clean']: raise ValueError('Choose an episode with a dialogue-only master')
         folder=self.st.data/'exports'/('delivery-'+uuid.uuid4().hex[:8]);folder.mkdir()
         master=self.safe_path(output['master']);duration, _=probe(master)
-        ffmpeg(['-i',str(master),'-vn','-c:a','pcm_s24le',str(folder/'dialogue.wav')])
-        for kind in ('music','sfx'):
-            silent=folder/('silent-'+kind+'.mp4')
-            ffmpeg(['-i',str(master),'-f','lavfi','-i','anullsrc=r=48000:cl=stereo','-map','0:v:0','-map','1:a:0','-c:v','copy','-c:a','aac','-t',str(duration),str(silent)])
-            mixed=folder/(kind+'.mp4')
-            self.st.soundtrack.mix(silent,mixed,[c for c in self.st.soundtrack.cues() if c['kind']==kind],self.st.settings().get('music','') if kind=='music' else '',float(body.get('music_volume',.25)))
-            ffmpeg(['-i',str(mixed),'-vn','-c:a','pcm_s24le',str(folder/(kind+'.wav'))])
-            silent.unlink();mixed.unlink()
-        analysis=subprocess.run(['ffmpeg','-hide_banner','-i',str(self.safe_path(output['output'])),'-af','loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json','-f','null','-'],capture_output=True,text=True)
+        recipe=json.loads(output.get('build_json') or '{}').get('mix_recipe')
+        recipe_source='saved'
+        if not recipe:
+            recipe_source='current'
+            recipe={'cues':self.st.soundtrack.cues(),'bed':self.st.settings().get('music',''),
+                    'volume':float(body.get('music_volume',.25)),'mixer':self.st.finishing.mixer(),'engine':'block-rms-v1'}
+        mixed=folder/'mix.mp4'
+        self.st.finishing.mix_audio(master,mixed,recipe['cues'],recipe['bed'],recipe['volume'],duration,
+                                   stem_dir=folder,mixer_override=recipe['mixer'],engine=recipe.get('engine','legacy-sidechain'))
+        mixed.unlink();mixed.with_suffix('.audio.json').unlink(missing_ok=True)
+        if not any(cue['kind']=='ambience' for cue in recipe['cues']):
+            (folder/'ambience.wav').unlink()
+        from export_runtime import run
+        analysis=run(['ffmpeg','-hide_banner','-i',str(self.safe_path(output['output'])),'-af','loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json','-f','null','-'])
         if analysis.returncode: raise ValueError('Loudness analysis failed: '+analysis.stderr[-1200:])
         (folder/'loudness.txt').write_text(analysis.stderr)
-        return {'ok':True,'files':{f.name:'/media/'+self.st.rel(f) for f in folder.iterdir() if f.suffix in ('.wav','.txt')}}
+        return {'ok':True,'recipe_source':recipe_source,'files':{f.name:'/media/'+self.st.rel(f) for f in folder.iterdir() if f.suffix in ('.wav','.txt')}}
 
     def state(self):
         db=self.st.db

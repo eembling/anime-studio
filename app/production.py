@@ -88,8 +88,12 @@ class Production:
                     common['next'] = nxt and nxt['keyframe_take']
             if stage == 'upscale':
                 common['clips'] = [t['id'] for t in st.chain(shot)]
-            if stage == 'lipsync':
+            if stage in ('animate','continue','lipsync','upscale') and shot['audio']:
                 common['audio'] = self.file_stamp(shot['audio'])
+                common['dialogue_timing'] = [shot.get('dialogue_offset'),shot.get('dialogue_fade')]
+                if stage in ('animate','continue'):
+                    voice_workflow=st.wf_row('lipsync')
+                    common['voice_workflow']={key:value for key,value in voice_workflow.items() if key!='updated'} if voice_workflow else None
         creative = st.creative.signature_data(shot, stage, recipe_override) if hasattr(st, 'creative') else None
         if creative: common['creative'] = creative
         return digest(common)

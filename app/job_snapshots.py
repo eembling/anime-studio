@@ -23,11 +23,20 @@ class JobSnapshots:
         params=copy.deepcopy(params);folder=st.data/'uploads'/'job-inputs'/uuid.uuid4().hex
         folder.mkdir(parents=True)
         try:
+            from clip_audio import capture as capture_clip_audio, condition as condition_clip_audio, gpu_s2v
+            pinned=capture_clip_audio(st,job,folder,row.get('fps'))
+            key,params,actual,conditioned,note=condition_clip_audio(st,job,key,params,row,folder,pinned)
+            switched=actual!=gpu_s2v(row);row=actual
             for slot,source in list(params.get('files',{}).items()):
                 source=st.creative.path(st.rel(source));dest=folder/(slot.replace('/','_')+source.suffix)
                 shutil.copyfile(source,dest);params['files'][slot]=st.rel(dest)
             meta={'key':key,'params':params,'workflow':json.loads(row['json']), 'fps':row.get('fps'),
-                  'max_frames':row.get('max_frames'),'controls':st.creative.meta(job).get('values',{})}
+                  'max_frames':row.get('max_frames'),'controls':{} if switched else st.creative.meta(job).get('values',{})}
+            if any(node['class_type']=='WanSoundImageToVideo' for node in meta['workflow'].values()):
+                meta['controls']={key:value for key,value in meta['controls'].items() if not (key.endswith('.device') and meta['workflow'].get(key.split('.',1)[0],{}).get('class_type')=='CLIPLoader')}
+            meta['clip_audio']=pinned
+            meta['audio_conditioned']=conditioned
+            meta['audio_note']=note
             if job['stage']=='upscale':
                 source=st.db.one('SELECT t.fps FROM takes t JOIN shots s ON s.clip_take=t.id WHERE s.id=?',(job['shot_id'],))
                 meta['fps']=(source or {}).get('fps') or 16

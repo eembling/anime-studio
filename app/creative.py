@@ -239,7 +239,7 @@ class CreativeStudio:
         shot = self.shot(body['shot_id']); image = self.st.take_path(shot['keyframe_take'])
         if not image:
             raise ValueError('Select a keyframe to preview the camera move.')
-        vf = self.camera_filter(shot, 640, 360, 24)
+        vf = self.camera_filter(shot, 640, 360, int(self.st.settings()['out_fps']))
         if not vf:
             raise ValueError('Save the shot direction first.')
         path = self.st.data/'cache'/('camera-'+uuid.uuid4().hex+'.mp4')
