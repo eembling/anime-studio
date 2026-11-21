@@ -706,15 +706,58 @@ def http_json(method, url, obj=None, timeout=30):
     return json.loads(raw) if raw else None
 
 
-def comfy_upload(base, path, name):
+def comfy_upload(base, path, name, progress=None):
     """Upload any input file (image, video, audio) to ComfyUI's input folder root."""
     b = uuid.uuid4().hex
-    body = (f'--{b}\r\nContent-Disposition: form-data; name="overwrite"\r\n\r\ntrue\r\n'
+    header = (f'--{b}\r\nContent-Disposition: form-data; name="overwrite"\r\n\r\ntrue\r\n'
             f'--{b}\r\nContent-Disposition: form-data; name="type"\r\n\r\ninput\r\n'
             f'--{b}\r\nContent-Disposition: form-data; name="image"; filename="{name}"\r\n'
-            f'Content-Type: application/octet-stream\r\n\r\n').encode() + Path(path).read_bytes() + f"\r\n--{b}--\r\n".encode()
-    j = json.loads(http("POST", base + "/upload/image", body, {"Content-Type": f"multipart/form-data; boundary={b}"}, 600))
-    return f"{j['subfolder']}/{j['name']}" if j.get("subfolder") else j["name"]
+            f'Content-Type: application/octet-stream\r\n\r\n').encode()
+    trailer = f"\r\n--{b}--\r\n".encode()
+    path = Path(path)
+    size = path.stat().st_size
+
+    def chunks():
+        yield header
+        uploaded = 0
+        with path.open('rb') as stream:
+            while chunk := stream.read(1 << 20):
+                if progress:
+                    progress(uploaded, size)
+                yield chunk
+                uploaded += len(chunk)
+        if progress:
+            progress(uploaded, size)
+        yield trailer
+
+    headers = {"Content-Type": f"multipart/form-data; boundary={b}",
+               "Content-Length": str(len(header) + size + len(trailer))}
+    response = json.loads(http("POST", base + "/upload/image", chunks(), headers, 600))
+    return f"{response['subfolder']}/{response['name']}" if response.get("subfolder") else response["name"]
+
+
+def comfy_download(url, destination, progress=None):
+    """Publish only a fully downloaded output on the local filesystem."""
+    partial = destination.with_name(destination.name + '.part')
+    try:
+        with _opener.open(url, timeout=300) as response, partial.open('wb') as stream:
+            length = response.headers.get('Content-Length')
+            expected = int(length) if length is not None else None
+            received = 0
+            if progress:
+                progress(received, expected)
+            while chunk := response.read(1 << 20):
+                received += len(chunk)
+                if progress:
+                    progress(received, expected)
+                stream.write(chunk)
+            if expected is not None and received != expected:
+                raise RuntimeError(f"ComfyUI output transfer ended after {received} of {expected} bytes.")
+            if not received:
+                raise RuntimeError("ComfyUI returned an empty output.")
+        partial.replace(destination)
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 # ======================================================================================
@@ -1421,7 +1464,8 @@ class Worker(threading.Thread):
             for i, f in enumerate(files):
                 q = urllib.parse.urlencode({"filename": f["filename"], "subfolder": f.get("subfolder", ""), "type": f.get("type", "output")})
                 dest = out_dir / f"{i:06d}_{Path(f['filename']).name}"
-                dest.write_bytes(http("GET", f"{base}/view?{q}", timeout=300))
+                comfy_download(f"{base}/view?{q}", dest,
+                               lambda current, total: transfer_progress(f"Downloading {i+1}/{len(files)}", current, total))
                 local.append(dest)
             with st.production.lock:
                 if (db.one("SELECT status FROM jobs WHERE id=?", (job_id,)) or {}).get("status") != "running":
