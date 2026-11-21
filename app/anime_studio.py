@@ -788,7 +788,7 @@ def check_workflow(wf, key):
     if key == "animate_flf" and not m["end_image"]:
         p.append("No end image (title a Load Image node END_IMAGE).")
     if key == "lipsync" and not m["audio_in"]:
-        p.append("No audio input (Load Audio node, title AUDIO_IN).")
+        p.append("No audio input reaches visual conditioning. Use native Wan S2V or tag the custom visual node AUDIO_CONDITIONING and the loader AUDIO_IN.")
     if key == "voice" and not m["prompt"]:
         p.append("No text input for the line (title the text node PROMPT).")
     if key == "voice_design" and not m["prompt"]:
