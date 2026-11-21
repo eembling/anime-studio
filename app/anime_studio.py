@@ -23,6 +23,7 @@ import csv
 import glob
 import io
 import json
+import math
 import mimetypes
 import os
 import random
@@ -387,6 +388,11 @@ class Studio:
         for sub in ("uploads", "shots", "cast", "jobs", "exports", "voices", "cache"):
             (self.data / sub).mkdir(parents=True, exist_ok=True)
         self.db = DB(self.data / "studio.db")
+        self.db.x("CREATE TABLE IF NOT EXISTS render_project (id INTEGER PRIMARY KEY CHECK (id=1), namespace TEXT NOT NULL)")
+        self.db.x("INSERT OR IGNORE INTO render_project VALUES(1,?)", (uuid.uuid4().hex,))
+        self.render_namespace = self.db.one("SELECT namespace FROM render_project WHERE id=1")["namespace"]
+        if "remote_client_id" not in {row["name"] for row in self.db.q("PRAGMA table_info(jobs)")}:
+            self.db.x("ALTER TABLE jobs ADD COLUMN remote_client_id TEXT")
         from voice_video import initialize as initialize_voice_video
         initialize_voice_video(self.db)
         for k, v in DEFAULT_SETTINGS.items():
@@ -700,15 +706,58 @@ def http_json(method, url, obj=None, timeout=30):
     return json.loads(raw) if raw else None
 
 
-def comfy_upload(base, path, name):
+def comfy_upload(base, path, name, progress=None):
     """Upload any input file (image, video, audio) to ComfyUI's input folder root."""
     b = uuid.uuid4().hex
-    body = (f'--{b}\r\nContent-Disposition: form-data; name="overwrite"\r\n\r\ntrue\r\n'
+    header = (f'--{b}\r\nContent-Disposition: form-data; name="overwrite"\r\n\r\ntrue\r\n'
             f'--{b}\r\nContent-Disposition: form-data; name="type"\r\n\r\ninput\r\n'
             f'--{b}\r\nContent-Disposition: form-data; name="image"; filename="{name}"\r\n'
-            f'Content-Type: application/octet-stream\r\n\r\n').encode() + Path(path).read_bytes() + f"\r\n--{b}--\r\n".encode()
-    j = json.loads(http("POST", base + "/upload/image", body, {"Content-Type": f"multipart/form-data; boundary={b}"}, 600))
-    return f"{j['subfolder']}/{j['name']}" if j.get("subfolder") else j["name"]
+            f'Content-Type: application/octet-stream\r\n\r\n').encode()
+    trailer = f"\r\n--{b}--\r\n".encode()
+    path = Path(path)
+    size = path.stat().st_size
+
+    def chunks():
+        yield header
+        uploaded = 0
+        with path.open('rb') as stream:
+            while chunk := stream.read(1 << 20):
+                if progress:
+                    progress(uploaded, size)
+                yield chunk
+                uploaded += len(chunk)
+        if progress:
+            progress(uploaded, size)
+        yield trailer
+
+    headers = {"Content-Type": f"multipart/form-data; boundary={b}",
+               "Content-Length": str(len(header) + size + len(trailer))}
+    response = json.loads(http("POST", base + "/upload/image", chunks(), headers, 600))
+    return f"{response['subfolder']}/{response['name']}" if response.get("subfolder") else response["name"]
+
+
+def comfy_download(url, destination, progress=None):
+    """Publish only a fully downloaded output on the local filesystem."""
+    partial = destination.with_name(destination.name + '.part')
+    try:
+        with _opener.open(url, timeout=300) as response, partial.open('wb') as stream:
+            length = response.headers.get('Content-Length')
+            expected = int(length) if length is not None else None
+            received = 0
+            if progress:
+                progress(received, expected)
+            while chunk := response.read(1 << 20):
+                received += len(chunk)
+                if progress:
+                    progress(received, expected)
+                stream.write(chunk)
+            if expected is not None and received != expected:
+                raise RuntimeError(f"ComfyUI output transfer ended after {received} of {expected} bytes.")
+            if not received:
+                raise RuntimeError("ComfyUI returned an empty output.")
+        partial.replace(destination)
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 # ======================================================================================
@@ -736,6 +785,46 @@ def _tagged(wf, tag):
     return sorted([k for k, n in wf.items() if _title(n).upper() == tag], key=_nid)
 
 
+def visual_prompt_slots(wf, tag):
+    """Inspect conditioning socket ancestry rather than graph order."""
+    pending = [key for key, node in wf.items()
+               if node['class_type'] in SAVE_NODES and not node['class_type'].startswith('SaveAudio')]
+    seen, bindings = set(), set()
+    socket = 'positive' if tag == 'PROMPT' else 'negative'
+    while pending:
+        key = pending.pop()
+        if key in seen or key not in wf:
+            continue
+        seen.add(key)
+        for field, value in wf[key].get('inputs', {}).items():
+            if isinstance(value, list) and len(value) == 2 and isinstance(value[1], int):
+                if field == socket:
+                    bindings.add(str(value[0]))
+                pending.append(str(value[0]))
+
+    # Trace upstream from the relevant conditioning sockets. Stop at the
+    # encoder so shared CLIP loaders do not cross positive/negative paths.
+    pending, seen, encoders = list(bindings), set(), set()
+    while pending:
+        key = pending.pop()
+        if key in seen or key not in wf:
+            continue
+        seen.add(key)
+        node = wf[key]
+        if node['class_type'] in TEXT_ENCODERS or _title(node).upper() == tag:
+            encoders.add(key)
+            continue
+        for field, value in node.get('inputs', {}).items():
+            if field in ('positive', 'negative') and field != socket:
+                continue
+            if isinstance(value, list) and len(value) == 2 and isinstance(value[1], int):
+                pending.append(str(value[0]))
+    tagged = _tagged(wf, tag)
+    if tagged:
+        return [key for key in tagged if key in encoders]
+    return sorted(encoders, key=_nid)
+
+
 def detect_slots(wf, key):
     keys = sorted(wf.keys(), key=_nid)
     cls = lambda k: wf[k].get("class_type") or ""
@@ -747,6 +836,9 @@ def detect_slots(wf, key):
          "save": [k for k in keys if cls(k) in SAVE_NODES],
          "seeds": [[k, f] for k in keys for f in ("seed", "noise_seed") if isinstance(ins(k).get(f), int)],
          "refs": [], "start_image": [], "end_image": [], "video_in": [], "audio_in": [], "size": [], "ref_text": []}
+    if key in ("keyframe", "animate", "animate_flf", "lipsync"):
+        m["prompt"] = visual_prompt_slots(wf, "PROMPT")
+        m["negative"] = visual_prompt_slots(wf, "NEGATIVE")
     if key == "keyframe":
         m["refs"] = [k for i in (1, 2, 3) for k in _tagged(wf, f"REF{i}")] or loads[:3]
         m["size"] = _tagged(wf, "SIZE") or [k for k in keys if "Latent" in cls(k) and {"width", "height"} <= set(ins(k))][:1]
@@ -783,12 +875,18 @@ def check_workflow(wf, key):
     m, p = detect_slots(wf, key), []
     if key in ("keyframe", "animate", "animate_flf", "lipsync") and not m["prompt"]:
         p.append("No prompt node (title a text-encode node PROMPT).")
+    if key in ("keyframe", "animate", "animate_flf", "lipsync"):
+        for tag, slot in (("PROMPT", "prompt"), ("NEGATIVE", "negative")):
+            if set(_tagged(wf, tag)) - set(m[slot]):
+                p.append(f"Tagged {tag} node does not feed its matching visual conditioning input.")
+        if set(m["prompt"]) & set(m["negative"]):
+            p.append("Positive and negative conditioning share a text encoder. Bind separate prompt nodes.")
     if key in ("animate", "animate_flf", "lipsync") and not m["start_image"] and not (key == 'lipsync' and m['video_in']):
         p.append("No start image (title a Load Image node START_IMAGE).")
     if key == "animate_flf" and not m["end_image"]:
         p.append("No end image (title a Load Image node END_IMAGE).")
     if key == "lipsync" and not m["audio_in"]:
-        p.append("No audio input (Load Audio node, title AUDIO_IN).")
+        p.append("No audio input reaches visual conditioning. Use native Wan S2V or tag the custom visual node AUDIO_CONDITIONING and the loader AUDIO_IN.")
     if key == "voice" and not m["prompt"]:
         p.append("No text input for the line (title the text node PROMPT).")
     if key == "voice_design" and not m["prompt"]:
@@ -975,6 +1073,32 @@ def media_seconds(path):
     return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else 0.0
 
 
+def validate_render_cadence(path, fps):
+    """Read presentation timestamps and preserve the recipe's real-time cadence."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_frames",
+         "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", str(path)],
+        capture_output=True, text=True, timeout=300,
+    )
+    try:
+        if result.returncode or result.stderr:
+            raise ValueError(result.stderr)
+        timestamps = [float(frame["best_effort_timestamp_time"])
+                      for frame in json.loads(result.stdout)["frames"]]
+        origin = timestamps[0]
+        if any(not math.isfinite(value) for value in timestamps):
+            raise ValueError("Non-finite timestamp")
+    except (ValueError, KeyError, IndexError) as exc:
+        raise ValueError("The generated file does not contain readable video timestamps.") from exc
+    # Allow millisecond container quantization, such as WebM's 62/63 ms
+    # spacing at 16 fps. Compare against the first presentation timestamp.
+    if any(abs(value - origin - index / fps) > .002
+           for index, value in enumerate(timestamps)):
+        raise ValueError(f"The generated video does not use the recipe’s {fps:g} fps cadence. "
+                         "Set the workflow output frame rate to match the recipe and generate a new take.")
+    return len(timestamps)
+
+
 def retime(st, take, mode, out_fps, log=None):
     """Return a file at out_fps. hold = repeat frames, blend = ffmpeg motion interpolation, rife = rife-ncnn-vulkan."""
     src, fps = st.abs(take["path"]), float(take["fps"] or 0)
@@ -1048,6 +1172,20 @@ def list_voices():
 # ======================================================================================
 # Job worker: one job at a time per ComfyUI server, matched by role
 # ======================================================================================
+def find_remote_submission(base, client_id):
+    """Match the unique client ID recorded in ComfyUI's queue/history metadata."""
+    queued = http_json("GET", base + "/queue", timeout=8)
+    history = http_json("GET", base + "/history?max_items=1000", timeout=15)
+    entries = queued.get("queue_running", []) + queued.get("queue_pending", [])
+    entries += [entry.get("prompt") for entry in history.values()]
+    matches = {entry[1] for entry in entries
+               if isinstance(entry, (list, tuple)) and len(entry) > 3
+               and isinstance(entry[3], dict) and entry[3].get("client_id") == client_id}
+    if len(matches) > 1:
+        raise RuntimeError("Several ComfyUI renders match this submission. Verify the server queue before repeating it.")
+    return next(iter(matches), None)
+
+
 class Worker(threading.Thread):
     daemon = True
 
@@ -1097,22 +1235,22 @@ class Worker(threading.Thread):
             roles = [r.strip() for r in (inst["roles"] or "").split(",") if r.strip() in JOB_STAGES]
             inspected = self.st.production.readiness.get('servers', [])
             readiness = next((s['stages'] for s in inspected if s['id'] == inst['id']), None)
-            resumable = db.q("SELECT * FROM jobs WHERE status='pending' AND prompt_id IS NOT NULL AND instance_id=? ORDER BY id", (inst['id'],))
+            resumable = db.q("SELECT * FROM jobs WHERE status='pending' AND (prompt_id IS NOT NULL OR submission_client_id IS NOT NULL) AND instance_id=? ORDER BY id", (inst['id'],))
             if not roles and not resumable:
                 continue
-            candidates = resumable + db.q(f"SELECT * FROM jobs WHERE status='pending' AND stage IN ({','.join('?' * len(roles))}) AND prompt_id IS NULL ORDER BY priority DESC,id", roles)
+            candidates = resumable + db.q(f"SELECT * FROM jobs WHERE status='pending' AND stage IN ({','.join('?' * len(roles))}) AND prompt_id IS NULL AND submission_client_id IS NULL ORDER BY priority DESC,id", roles)
             job = None
             for candidate in candidates:
                 if candidate.get("prompt_id") and candidate.get("instance_id") != inst["id"]:
                     continue
                 shot = db.one('SELECT end_next FROM shots WHERE id=?', (candidate['shot_id'],))
-                if not candidate.get('prompt_id') and candidate.get('snapshot_json'):
+                if not (candidate.get('prompt_id') or candidate.get('submission_client_id')) and candidate.get('snapshot_json'):
                     if not self.st.snapshots.compatible(candidate,inst):continue
-                elif not candidate.get('prompt_id') and candidate.get('creative_json'):
+                elif not (candidate.get('prompt_id') or candidate.get('submission_client_id')) and candidate.get('creative_json'):
                     if not self.st.creative.compatible(candidate, inst): continue
-                elif not candidate.get('prompt_id') and readiness is not None and not readiness.get(candidate['stage'], {}).get('ready'):
+                elif not (candidate.get('prompt_id') or candidate.get('submission_client_id')) and readiness is not None and not readiness.get(candidate['stage'], {}).get('ready'):
                     continue
-                if not candidate.get('snapshot_json') and not candidate.get('creative_json') and not candidate.get('prompt_id') and candidate['stage'] in ('animate', 'continue') and shot and shot['end_next'] and not (readiness or {}).get('animate_flf', {}).get('ready'):
+                if not candidate.get('snapshot_json') and not candidate.get('creative_json') and not (candidate.get('prompt_id') or candidate.get('submission_client_id')) and candidate['stage'] in ('animate', 'continue') and shot and shot['end_next'] and not (readiness or {}).get('animate_flf', {}).get('ready'):
                     continue
                 job = candidate
                 break
@@ -1268,6 +1406,17 @@ class Worker(threading.Thread):
             st.creative.started(job,inst)
             job = db.one("SELECT * FROM jobs WHERE id=?", (job_id,))
             pid = job.get("prompt_id")
+            client_id = job.get("submission_client_id")
+            if client_id and not pid:
+                try:
+                    pid = find_remote_submission(base, client_id)
+                except Exception as exc:
+                    raise RuntimeError("Submission unconfirmed. Reconnect to check ComfyUI again. " + str(exc)) from exc
+                if not pid:
+                    raise RuntimeError("Submission unconfirmed. Check the original ComfyUI queue before repeating this render. "
+                                       "Reconnect checks the existing submission without sending it again.")
+                db.x("UPDATE jobs SET prompt_id=? WHERE id=?", (pid, job_id))
+            client_id = client_id or (f"anime-studio-{job_id}" if pid else f"anime-studio-{uuid.uuid4().hex}")
             from render_queue import workflow_models, prompt_graph
             if not pid:
                 db.x("UPDATE jobs SET models_json=NULL WHERE id=?",(job_id,))
@@ -1301,22 +1450,37 @@ class Worker(threading.Thread):
                     self._progress(job_id, f"Sampler {data.get('value',0)}/{data['max']} (current node)")
                 elif data.get('node'):
                     self._progress(job_id, 'Executing node ' + str(data['node']))
-            events = ProgressEvents(base, f'anime-studio-{job_id}', progress_event).start()
+            # Already accepted jobs may predate namespaced submissions.
+            client_id = job.get("remote_client_id") or f"anime-studio-{job_id}"
+            if not pid:
+                client_id = f"anime-studio-{st.render_namespace}-{uuid.uuid4().hex}"
+            events = ProgressEvents(base, client_id, progress_event).start()
             if not pid:
                 self._progress(job_id, "uploading inputs")
-                p["images"] = {slot: comfy_upload(base, path, f"anime_j{job_id}_{slot}{Path(path).suffix.lower()}")
+                attempt = client_id.removeprefix("anime-studio-")
+                p["prefix"] = f"anime/{st.render_namespace}/{attempt}_{job['stage']}"
+                p["images"] = {slot: comfy_upload(base, path, f"anime_j{job_id}_{attempt}_{slot}{Path(path).suffix.lower()}")
                                for slot, path in p["files"].items()}
                 wf = build_workflow(tpl, key, p)
                 wf = st.snapshots.patch(job,wf) if job.get("snapshot_json") else st.creative.patch_controls(job, wf)
                 submitted_graph = wf
+                # After this write a restart must reconcile, even if it happened just before send.
+                if not db.u("UPDATE jobs SET submission_client_id=? WHERE id=? AND status='running'", (client_id, job_id)):
+                    return
                 try:
-                    res = http_json("POST", base + "/prompt", {"prompt": wf, "client_id": f"anime-studio-{job_id}"}, 60)
+                    res = http_json("POST", base + "/prompt", {"prompt": wf, "client_id": client_id}, 60)
                 except RuntimeError as e:
-                    raise RuntimeError(explain_missing_nodes(str(e), base) or str(e)) from None
-                if res.get("node_errors"):
+                    if str(e).startswith("HTTP 400 "):
+                        db.x("UPDATE jobs SET submission_client_id=NULL WHERE id=?", (job_id,))
+                        raise RuntimeError(explain_missing_nodes(str(e), base) or str(e)) from None
+                    raise RuntimeError("Submission unconfirmed. Reconnect to find the original render. " + str(e)) from e
+                except OSError as exc:
+                    raise RuntimeError("Submission unconfirmed. Reconnect to find the original render. " + str(exc)) from exc
+                if not res.get("prompt_id") and res.get("node_errors"):
+                    db.x("UPDATE jobs SET submission_client_id=NULL WHERE id=?", (job_id,))
                     raise RuntimeError("ComfyUI rejected the workflow: " + json.dumps(res["node_errors"])[:2500])
                 pid = res["prompt_id"]
-                db.x("UPDATE jobs SET prompt_id=?, models_json=?, progress='queued on ComfyUI' WHERE id=?", (pid, json.dumps(workflow_models(wf)), job_id))
+                db.x("UPDATE jobs SET prompt_id=?, models_json=?, remote_client_id=?, progress='queued on ComfyUI' WHERE id=?", (pid, json.dumps(workflow_models(wf)), client_id, job_id))
             t0, timeout, fails, entry = time.time(), int(float(st.settings().get("job_timeout") or 3600)), 0, None
             while True:
                 if (db.one("SELECT status FROM jobs WHERE id=?", (job_id,)) or {}).get("status") != "running":
@@ -1346,7 +1510,7 @@ class Worker(threading.Thread):
                     self._progress(job_id, f"rendering {int(time.time() - t0)}s")
                 time.sleep(2)
             if entry.get("status", {}).get("status_str") == "error":
-                db.x("UPDATE jobs SET prompt_id=NULL WHERE id=?", (job_id,))
+                db.x("UPDATE jobs SET prompt_id=NULL,submission_client_id=NULL WHERE id=?", (job_id,))
                 msgs = [m for m in entry["status"].get("messages", []) if m and m[0] == "execution_error"]
                 raise RuntimeError("ComfyUI error: " + json.dumps(msgs[-1][1] if msgs else entry["status"])[:2500])
             graph = submitted_graph or prompt_graph(entry.get('prompt'), pid)
@@ -1361,7 +1525,8 @@ class Worker(threading.Thread):
             for i, f in enumerate(files):
                 q = urllib.parse.urlencode({"filename": f["filename"], "subfolder": f.get("subfolder", ""), "type": f.get("type", "output")})
                 dest = out_dir / f"{i:06d}_{Path(f['filename']).name}"
-                dest.write_bytes(http("GET", f"{base}/view?{q}", timeout=300))
+                comfy_download(f"{base}/view?{q}", dest,
+                               lambda current, total: transfer_progress(f"Downloading {i+1}/{len(files)}", current, total))
                 local.append(dest)
             with st.production.lock:
                 if (db.one("SELECT status FROM jobs WHERE id=?", (job_id,)) or {}).get("status") != "running":
@@ -1448,10 +1613,11 @@ class Worker(threading.Thread):
             folder = st.data / "shots" / f"{job['shot_id']:04d}"
         folder.mkdir(parents=True, exist_ok=True)
         made = []
+        video_frames = None
         if stage in ("sheet", "keyframe"):
             if job.get("creative_json") and not imgs: raise ValueError("The recipe saved no image candidate.")
             for i, f in enumerate(imgs or local):
-                ffmpeg(["-i", str(f), "-frames:v", "1", "-f", "null", "-"])
+                ffmpeg(["-xerror", "-i", str(f), "-frames:v", "1", "-f", "null", "-"])
                 dest = folder / f"{stage}_j{job['id']}_{output_id}_{i}{f.suffix.lower()}"
                 shutil.move(str(f), dest)
                 made.append((dest, 0))
@@ -1463,7 +1629,7 @@ class Worker(threading.Thread):
                 fps = (st.snapshots.workflow(job) or st.creative.workflow(job) or {}).get("fps") or st.wf_fps(key)
             dest = folder / f"{stage}_j{job['id']}_{output_id}.mp4"
             if vids:
-                ffmpeg(["-i", str(vids[0]), "-map", "0:v:0", "-f", "null", "-"])
+                validate_render_cadence(vids[0], fps)
                 dest = dest.with_suffix(vids[0].suffix.lower())
                 shutil.move(str(vids[0]), dest)
             else:
@@ -1473,13 +1639,13 @@ class Worker(threading.Thread):
                 stitch_frames(imgs, fps, dest)
             from clip_audio import embed as embed_clip_audio
             dest = embed_clip_audio(st, job, dest)
+            video_frames = validate_render_cadence(dest, fps)
             made.append((dest, fps))
-        nframes = len(imgs) if imgs and not vids and not st.snapshots.meta(job).get('clip_audio') else None
         for path, fps in made:
             tid = st.db.x("INSERT INTO takes(shot_id,asset_id,stage,path,fps,seed,job_id,created,frames,segment,draft,input_signature) "
                           "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                           (job["shot_id"], job["asset_id"], stage, st.rel(path), fps, job["seed"], job["id"], time.time(),
-                           nframes if fps else None, job.get("segment"), 1 if job.get("draft") else 0, signature))
+                           video_frames if fps else None, job.get("segment"), 1 if job.get("draft") else 0, signature))
             st.sections.saved_take(tid,job)
             if st.creative.meta(job).get("manual"):
                 continue
@@ -2537,6 +2703,13 @@ ROUTES = {
 }
 
 
+def range_offset(value, size):
+    digits = value.lstrip("0")
+    if len(digits) > len(str(size)):
+        return size
+    return int(digits or "0")
+
+
 def make_handler(st, api):
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -2621,13 +2794,15 @@ def make_handler(st, api):
                 return self._send(404, {"error": "not found"})
             size = p.stat().st_size
             start, end, code = 0, size - 1, 200
-            m = re.match(r"bytes=(\d*)-(\d*)", self.headers.get("Range") or "")
+            m = re.fullmatch(r"bytes=([0-9]*)-([0-9]*)", self.headers.get("Range") or "")
             if m and (m.group(1) or m.group(2)):
                 if m.group(1):
-                    start = int(m.group(1))
-                    end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+                    start = range_offset(m.group(1), size)
+                    end = min(range_offset(m.group(2), size), size - 1) if m.group(2) else size - 1
                 else:
-                    start = max(0, size - int(m.group(2)))
+                    start = max(0, size - range_offset(m.group(2), size))
+                if start >= size or end < start:
+                    return self._send(416, b"", extra={"Content-Range": f"bytes */{size}"})
                 code = 206
             self.send_response(code)
             self.send_header("Content-Type", mimetypes.guess_type(p.name)[0] or "application/octet-stream")
