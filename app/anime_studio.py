@@ -23,6 +23,7 @@ import csv
 import glob
 import io
 import json
+import math
 import mimetypes
 import os
 import random
@@ -387,6 +388,11 @@ class Studio:
         for sub in ("uploads", "shots", "cast", "jobs", "exports", "voices", "cache"):
             (self.data / sub).mkdir(parents=True, exist_ok=True)
         self.db = DB(self.data / "studio.db")
+        self.db.x("CREATE TABLE IF NOT EXISTS render_project (id INTEGER PRIMARY KEY CHECK (id=1), namespace TEXT NOT NULL)")
+        self.db.x("INSERT OR IGNORE INTO render_project VALUES(1,?)", (uuid.uuid4().hex,))
+        self.render_namespace = self.db.one("SELECT namespace FROM render_project WHERE id=1")["namespace"]
+        if "remote_client_id" not in {row["name"] for row in self.db.q("PRAGMA table_info(jobs)")}:
+            self.db.x("ALTER TABLE jobs ADD COLUMN remote_client_id TEXT")
         from voice_video import initialize as initialize_voice_video
         initialize_voice_video(self.db)
         for k, v in DEFAULT_SETTINGS.items():
@@ -779,6 +785,46 @@ def _tagged(wf, tag):
     return sorted([k for k, n in wf.items() if _title(n).upper() == tag], key=_nid)
 
 
+def visual_prompt_slots(wf, tag):
+    """Inspect conditioning socket ancestry rather than graph order."""
+    pending = [key for key, node in wf.items()
+               if node['class_type'] in SAVE_NODES and not node['class_type'].startswith('SaveAudio')]
+    seen, bindings = set(), set()
+    socket = 'positive' if tag == 'PROMPT' else 'negative'
+    while pending:
+        key = pending.pop()
+        if key in seen or key not in wf:
+            continue
+        seen.add(key)
+        for field, value in wf[key].get('inputs', {}).items():
+            if isinstance(value, list) and len(value) == 2 and isinstance(value[1], int):
+                if field == socket:
+                    bindings.add(str(value[0]))
+                pending.append(str(value[0]))
+
+    # Trace upstream from the relevant conditioning sockets. Stop at the
+    # encoder so shared CLIP loaders do not cross positive/negative paths.
+    pending, seen, encoders = list(bindings), set(), set()
+    while pending:
+        key = pending.pop()
+        if key in seen or key not in wf:
+            continue
+        seen.add(key)
+        node = wf[key]
+        if node['class_type'] in TEXT_ENCODERS or _title(node).upper() == tag:
+            encoders.add(key)
+            continue
+        for field, value in node.get('inputs', {}).items():
+            if field in ('positive', 'negative') and field != socket:
+                continue
+            if isinstance(value, list) and len(value) == 2 and isinstance(value[1], int):
+                pending.append(str(value[0]))
+    tagged = _tagged(wf, tag)
+    if tagged:
+        return [key for key in tagged if key in encoders]
+    return sorted(encoders, key=_nid)
+
+
 def detect_slots(wf, key):
     keys = sorted(wf.keys(), key=_nid)
     cls = lambda k: wf[k].get("class_type") or ""
@@ -790,6 +836,9 @@ def detect_slots(wf, key):
          "save": [k for k in keys if cls(k) in SAVE_NODES],
          "seeds": [[k, f] for k in keys for f in ("seed", "noise_seed") if isinstance(ins(k).get(f), int)],
          "refs": [], "start_image": [], "end_image": [], "video_in": [], "audio_in": [], "size": [], "ref_text": []}
+    if key in ("keyframe", "animate", "animate_flf", "lipsync"):
+        m["prompt"] = visual_prompt_slots(wf, "PROMPT")
+        m["negative"] = visual_prompt_slots(wf, "NEGATIVE")
     if key == "keyframe":
         m["refs"] = [k for i in (1, 2, 3) for k in _tagged(wf, f"REF{i}")] or loads[:3]
         m["size"] = _tagged(wf, "SIZE") or [k for k in keys if "Latent" in cls(k) and {"width", "height"} <= set(ins(k))][:1]
@@ -826,12 +875,18 @@ def check_workflow(wf, key):
     m, p = detect_slots(wf, key), []
     if key in ("keyframe", "animate", "animate_flf", "lipsync") and not m["prompt"]:
         p.append("No prompt node (title a text-encode node PROMPT).")
+    if key in ("keyframe", "animate", "animate_flf", "lipsync"):
+        for tag, slot in (("PROMPT", "prompt"), ("NEGATIVE", "negative")):
+            if set(_tagged(wf, tag)) - set(m[slot]):
+                p.append(f"Tagged {tag} node does not feed its matching visual conditioning input.")
+        if set(m["prompt"]) & set(m["negative"]):
+            p.append("Positive and negative conditioning share a text encoder. Bind separate prompt nodes.")
     if key in ("animate", "animate_flf", "lipsync") and not m["start_image"] and not (key == 'lipsync' and m['video_in']):
         p.append("No start image (title a Load Image node START_IMAGE).")
     if key == "animate_flf" and not m["end_image"]:
         p.append("No end image (title a Load Image node END_IMAGE).")
     if key == "lipsync" and not m["audio_in"]:
-        p.append("No audio input (Load Audio node, title AUDIO_IN).")
+        p.append("No audio input reaches visual conditioning. Use native Wan S2V or tag the custom visual node AUDIO_CONDITIONING and the loader AUDIO_IN.")
     if key == "voice" and not m["prompt"]:
         p.append("No text input for the line (title the text node PROMPT).")
     if key == "voice_design" and not m["prompt"]:
@@ -992,6 +1047,32 @@ def media_seconds(path):
     err = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(path)], capture_output=True, text=True).stderr
     m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", err)
     return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else 0.0
+
+
+def validate_render_cadence(path, fps):
+    """Read presentation timestamps and preserve the recipe's real-time cadence."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_frames",
+         "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", str(path)],
+        capture_output=True, text=True, timeout=300,
+    )
+    try:
+        if result.returncode or result.stderr:
+            raise ValueError(result.stderr)
+        timestamps = [float(frame["best_effort_timestamp_time"])
+                      for frame in json.loads(result.stdout)["frames"]]
+        origin = timestamps[0]
+        if any(not math.isfinite(value) for value in timestamps):
+            raise ValueError("Non-finite timestamp")
+    except (ValueError, KeyError, IndexError) as exc:
+        raise ValueError("The generated file does not contain readable video timestamps.") from exc
+    # Allow millisecond container quantization, such as WebM's 62/63 ms
+    # spacing at 16 fps. Compare against the first presentation timestamp.
+    if any(abs(value - origin - index / fps) > .002
+           for index, value in enumerate(timestamps)):
+        raise ValueError(f"The generated video does not use the recipe’s {fps:g} fps cadence. "
+                         "Set the workflow output frame rate to match the recipe and generate a new take.")
+    return len(timestamps)
 
 
 def retime(st, take, mode, out_fps, log=None):
@@ -1320,28 +1401,27 @@ class Worker(threading.Thread):
                     self._progress(job_id, f"Sampler {data.get('value',0)}/{data['max']} (current node)")
                 elif data.get('node'):
                     self._progress(job_id, 'Executing node ' + str(data['node']))
-            events = ProgressEvents(base, f'anime-studio-{job_id}', progress_event).start()
-            def transfer_progress(label, current, total):
-                row = db.one("SELECT status FROM jobs WHERE id=?", (job_id,))
-                if not row or row["status"] != "running":
-                    raise RuntimeError("Render transfer cancelled.")
-                self._progress(job_id, f"{label}: {current:,}" + (f" / {total:,} bytes" if total is not None else " bytes"))
-
+            # Already accepted jobs may predate namespaced submissions.
+            client_id = job.get("remote_client_id") or f"anime-studio-{job_id}"
+            if not pid:
+                client_id = f"anime-studio-{st.render_namespace}-{uuid.uuid4().hex}"
+            events = ProgressEvents(base, client_id, progress_event).start()
             if not pid:
                 self._progress(job_id, "uploading inputs")
-                p["images"] = {slot: comfy_upload(base, path, f"anime_j{job_id}_{slot}{Path(path).suffix.lower()}",
-                                                      lambda current, total: transfer_progress("Uploading " + slot, current, total))
+                attempt = client_id.removeprefix("anime-studio-")
+                p["prefix"] = f"anime/{st.render_namespace}/{attempt}_{job['stage']}"
+                p["images"] = {slot: comfy_upload(base, path, f"anime_j{job_id}_{attempt}_{slot}{Path(path).suffix.lower()}")
                                for slot, path in p["files"].items()}
                 wf = build_workflow(tpl, key, p)
                 wf = st.snapshots.patch(job,wf) if job.get("snapshot_json") else st.creative.patch_controls(job, wf)
                 try:
-                    res = http_json("POST", base + "/prompt", {"prompt": wf, "client_id": f"anime-studio-{job_id}"}, 60)
+                    res = http_json("POST", base + "/prompt", {"prompt": wf, "client_id": client_id}, 60)
                 except RuntimeError as e:
                     raise RuntimeError(explain_missing_nodes(str(e), base) or str(e)) from None
                 if res.get("node_errors"):
                     raise RuntimeError("ComfyUI rejected the workflow: " + json.dumps(res["node_errors"])[:2500])
                 pid = res["prompt_id"]
-                db.x("UPDATE jobs SET prompt_id=?, models_json=?, progress='queued on ComfyUI' WHERE id=?", (pid, json.dumps(workflow_models(wf)), job_id))
+                db.x("UPDATE jobs SET prompt_id=?, models_json=?, remote_client_id=?, progress='queued on ComfyUI' WHERE id=?", (pid, json.dumps(workflow_models(wf)), client_id, job_id))
             t0, timeout, fails, entry = time.time(), int(float(st.settings().get("job_timeout") or 3600)), 0, None
             while True:
                 if (db.one("SELECT status FROM jobs WHERE id=?", (job_id,)) or {}).get("status") != "running":
@@ -1472,6 +1552,7 @@ class Worker(threading.Thread):
             folder = st.data / "shots" / f"{job['shot_id']:04d}"
         folder.mkdir(parents=True, exist_ok=True)
         made = []
+        video_frames = None
         if stage in ("sheet", "keyframe"):
             if job.get("creative_json") and not imgs: raise ValueError("The recipe saved no image candidate.")
             for i, f in enumerate(imgs or local):
@@ -1486,6 +1567,7 @@ class Worker(threading.Thread):
                 fps = (st.snapshots.workflow(job) or st.creative.workflow(job) or {}).get("fps") or st.wf_fps(key)
             dest = folder / f"{stage}_j{job['id']}_{output_id}.mp4"
             if vids:
+                validate_render_cadence(vids[0], fps)
                 dest = dest.with_suffix(vids[0].suffix.lower())
                 shutil.move(str(vids[0]), dest)
             else:
@@ -1495,13 +1577,13 @@ class Worker(threading.Thread):
                 stitch_frames(imgs, fps, dest)
             from clip_audio import embed as embed_clip_audio
             dest = embed_clip_audio(st, job, dest)
+            video_frames = validate_render_cadence(dest, fps)
             made.append((dest, fps))
-        nframes = len(imgs) if imgs and not vids and not st.snapshots.meta(job).get('clip_audio') else None
         for path, fps in made:
             tid = st.db.x("INSERT INTO takes(shot_id,asset_id,stage,path,fps,seed,job_id,created,frames,segment,draft,input_signature) "
                           "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                           (job["shot_id"], job["asset_id"], stage, st.rel(path), fps, job["seed"], job["id"], time.time(),
-                           nframes if fps else None, job.get("segment"), 1 if job.get("draft") else 0, signature))
+                           video_frames if fps else None, job.get("segment"), 1 if job.get("draft") else 0, signature))
             st.sections.saved_take(tid,job)
             if st.creative.meta(job).get("manual"):
                 continue
@@ -2559,6 +2641,13 @@ ROUTES = {
 }
 
 
+def range_offset(value, size):
+    digits = value.lstrip("0")
+    if len(digits) > len(str(size)):
+        return size
+    return int(digits or "0")
+
+
 def make_handler(st, api):
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -2643,13 +2732,15 @@ def make_handler(st, api):
                 return self._send(404, {"error": "not found"})
             size = p.stat().st_size
             start, end, code = 0, size - 1, 200
-            m = re.match(r"bytes=(\d*)-(\d*)", self.headers.get("Range") or "")
+            m = re.fullmatch(r"bytes=([0-9]*)-([0-9]*)", self.headers.get("Range") or "")
             if m and (m.group(1) or m.group(2)):
                 if m.group(1):
-                    start = int(m.group(1))
-                    end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+                    start = range_offset(m.group(1), size)
+                    end = min(range_offset(m.group(2), size), size - 1) if m.group(2) else size - 1
                 else:
-                    start = max(0, size - int(m.group(2)))
+                    start = max(0, size - range_offset(m.group(2), size))
+                if start >= size or end < start:
+                    return self._send(416, b"", extra={"Content-Range": f"bytes */{size}"})
                 code = 206
             self.send_response(code)
             self.send_header("Content-Type", mimetypes.guess_type(p.name)[0] or "application/octet-stream")
