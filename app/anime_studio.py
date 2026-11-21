@@ -1148,6 +1148,20 @@ def list_voices():
 # ======================================================================================
 # Job worker: one job at a time per ComfyUI server, matched by role
 # ======================================================================================
+def find_remote_submission(base, client_id):
+    """Match the unique client ID recorded in ComfyUI's queue/history metadata."""
+    queued = http_json("GET", base + "/queue", timeout=8)
+    history = http_json("GET", base + "/history?max_items=1000", timeout=15)
+    entries = queued.get("queue_running", []) + queued.get("queue_pending", [])
+    entries += [entry.get("prompt") for entry in history.values()]
+    matches = {entry[1] for entry in entries
+               if isinstance(entry, (list, tuple)) and len(entry) > 3
+               and isinstance(entry[3], dict) and entry[3].get("client_id") == client_id}
+    if len(matches) > 1:
+        raise RuntimeError("Several ComfyUI renders match this submission. Verify the server queue before repeating it.")
+    return next(iter(matches), None)
+
+
 class Worker(threading.Thread):
     daemon = True
 
@@ -1197,22 +1211,22 @@ class Worker(threading.Thread):
             roles = [r.strip() for r in (inst["roles"] or "").split(",") if r.strip() in JOB_STAGES]
             inspected = self.st.production.readiness.get('servers', [])
             readiness = next((s['stages'] for s in inspected if s['id'] == inst['id']), None)
-            resumable = db.q("SELECT * FROM jobs WHERE status='pending' AND prompt_id IS NOT NULL AND instance_id=? ORDER BY id", (inst['id'],))
+            resumable = db.q("SELECT * FROM jobs WHERE status='pending' AND (prompt_id IS NOT NULL OR submission_client_id IS NOT NULL) AND instance_id=? ORDER BY id", (inst['id'],))
             if not roles and not resumable:
                 continue
-            candidates = resumable + db.q(f"SELECT * FROM jobs WHERE status='pending' AND stage IN ({','.join('?' * len(roles))}) AND prompt_id IS NULL ORDER BY priority DESC,id", roles)
+            candidates = resumable + db.q(f"SELECT * FROM jobs WHERE status='pending' AND stage IN ({','.join('?' * len(roles))}) AND prompt_id IS NULL AND submission_client_id IS NULL ORDER BY priority DESC,id", roles)
             job = None
             for candidate in candidates:
                 if candidate.get("prompt_id") and candidate.get("instance_id") != inst["id"]:
                     continue
                 shot = db.one('SELECT end_next FROM shots WHERE id=?', (candidate['shot_id'],))
-                if not candidate.get('prompt_id') and candidate.get('snapshot_json'):
+                if not (candidate.get('prompt_id') or candidate.get('submission_client_id')) and candidate.get('snapshot_json'):
                     if not self.st.snapshots.compatible(candidate,inst):continue
-                elif not candidate.get('prompt_id') and candidate.get('creative_json'):
+                elif not (candidate.get('prompt_id') or candidate.get('submission_client_id')) and candidate.get('creative_json'):
                     if not self.st.creative.compatible(candidate, inst): continue
-                elif not candidate.get('prompt_id') and readiness is not None and not readiness.get(candidate['stage'], {}).get('ready'):
+                elif not (candidate.get('prompt_id') or candidate.get('submission_client_id')) and readiness is not None and not readiness.get(candidate['stage'], {}).get('ready'):
                     continue
-                if not candidate.get('snapshot_json') and not candidate.get('creative_json') and not candidate.get('prompt_id') and candidate['stage'] in ('animate', 'continue') and shot and shot['end_next'] and not (readiness or {}).get('animate_flf', {}).get('ready'):
+                if not candidate.get('snapshot_json') and not candidate.get('creative_json') and not (candidate.get('prompt_id') or candidate.get('submission_client_id')) and candidate['stage'] in ('animate', 'continue') and shot and shot['end_next'] and not (readiness or {}).get('animate_flf', {}).get('ready'):
                     continue
                 job = candidate
                 break
@@ -1368,6 +1382,17 @@ class Worker(threading.Thread):
             st.creative.started(job,inst)
             job = db.one("SELECT * FROM jobs WHERE id=?", (job_id,))
             pid = job.get("prompt_id")
+            client_id = job.get("submission_client_id")
+            if client_id and not pid:
+                try:
+                    pid = find_remote_submission(base, client_id)
+                except Exception as exc:
+                    raise RuntimeError("Submission unconfirmed. Reconnect to check ComfyUI again. " + str(exc)) from exc
+                if not pid:
+                    raise RuntimeError("Submission unconfirmed. Check the original ComfyUI queue before repeating this render. "
+                                       "Reconnect checks the existing submission without sending it again.")
+                db.x("UPDATE jobs SET prompt_id=? WHERE id=?", (pid, job_id))
+            client_id = client_id or (f"anime-studio-{job_id}" if pid else f"anime-studio-{uuid.uuid4().hex}")
             from render_queue import workflow_models, prompt_graph
             if not pid:
                 db.x("UPDATE jobs SET models_json=NULL WHERE id=?",(job_id,))
@@ -1414,11 +1439,20 @@ class Worker(threading.Thread):
                                for slot, path in p["files"].items()}
                 wf = build_workflow(tpl, key, p)
                 wf = st.snapshots.patch(job,wf) if job.get("snapshot_json") else st.creative.patch_controls(job, wf)
+                # After this write a restart must reconcile, even if it happened just before send.
+                if not db.u("UPDATE jobs SET submission_client_id=? WHERE id=? AND status='running'", (client_id, job_id)):
+                    return
                 try:
                     res = http_json("POST", base + "/prompt", {"prompt": wf, "client_id": client_id}, 60)
                 except RuntimeError as e:
-                    raise RuntimeError(explain_missing_nodes(str(e), base) or str(e)) from None
-                if res.get("node_errors"):
+                    if str(e).startswith("HTTP 400 "):
+                        db.x("UPDATE jobs SET submission_client_id=NULL WHERE id=?", (job_id,))
+                        raise RuntimeError(explain_missing_nodes(str(e), base) or str(e)) from None
+                    raise RuntimeError("Submission unconfirmed. Reconnect to find the original render. " + str(e)) from e
+                except OSError as exc:
+                    raise RuntimeError("Submission unconfirmed. Reconnect to find the original render. " + str(exc)) from exc
+                if not res.get("prompt_id") and res.get("node_errors"):
+                    db.x("UPDATE jobs SET submission_client_id=NULL WHERE id=?", (job_id,))
                     raise RuntimeError("ComfyUI rejected the workflow: " + json.dumps(res["node_errors"])[:2500])
                 pid = res["prompt_id"]
                 db.x("UPDATE jobs SET prompt_id=?, models_json=?, remote_client_id=?, progress='queued on ComfyUI' WHERE id=?", (pid, json.dumps(workflow_models(wf)), client_id, job_id))
@@ -1451,7 +1485,7 @@ class Worker(threading.Thread):
                     self._progress(job_id, f"rendering {int(time.time() - t0)}s")
                 time.sleep(2)
             if entry.get("status", {}).get("status_str") == "error":
-                db.x("UPDATE jobs SET prompt_id=NULL WHERE id=?", (job_id,))
+                db.x("UPDATE jobs SET prompt_id=NULL,submission_client_id=NULL WHERE id=?", (job_id,))
                 msgs = [m for m in entry["status"].get("messages", []) if m and m[0] == "execution_error"]
                 raise RuntimeError("ComfyUI error: " + json.dumps(msgs[-1][1] if msgs else entry["status"])[:2500])
             files = collect_outputs(entry)
