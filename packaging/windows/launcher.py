@@ -1,4 +1,5 @@
 """Windows desktop entry point and private backend entry point for frozen builds."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -36,17 +37,30 @@ def main():
     os.environ['ANIME_STUDIO_CONFIG']=str(config)
     data=resolve_storage(config,override=os.environ.get('ANIME_STUDIO_DATA'))
     port=int(os.environ.get('ANIME_STUDIO_PORT','8700'))
-    with socket.socket() as probe:probe.bind(('127.0.0.1',port))
+    project = hashlib.sha256(str(data.resolve()).encode()).hexdigest()
+    def current(ping):
+        return ping.get('app') == 'anime-studio' and ping.get('project') == project
+
+    try:
+        ping=request(port,'/api/ping')
+    except Exception:
+        ping=None
+    if ping is not None and not current(ping):
+        raise RuntimeError('The selected port already serves a different project.')
     args=[sys.executable,'--backend','--host','127.0.0.1','--port',str(port),'--data',str(data)]
     if not getattr(sys,'frozen',False):args.insert(1,str(Path(__file__).resolve()))
     with (config/'app.log').open('a',encoding='utf-8') as log:
-        backend=subprocess.Popen(args,stdout=log,stderr=log,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        backend=None
+        if ping is None:
+            with socket.socket() as probe:probe.bind(('127.0.0.1',port))
+            flags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+            backend=subprocess.Popen(args,stdout=log,stderr=log,creationflags=flags)
         try:
             for _ in range(120):
-                if backend.poll() is not None:raise RuntimeError('Anime Studio server exited. See '+str(config/'app.log'))
+                if backend is not None and backend.poll() is not None:raise RuntimeError('Anime Studio server exited. See '+str(config/'app.log'))
                 try:
                     ping=request(port,'/api/ping')
-                    if ping.get('app')=='anime-studio':break
+                    if current(ping):break
                 except Exception:time.sleep(.25)
             else:raise RuntimeError('Anime Studio server did not become ready. See '+str(config/'app.log'))
             import webview
@@ -65,11 +79,16 @@ def main():
             window.events.loaded+=loaded
             webview.start(gui='edgechromium',private_mode=False,storage_path=str(config/'WebView'))
         finally:
-            if backend.poll() is None:
-                try:request(port,'/api/quit',{})
-                except Exception:backend.terminate()
-                try:backend.wait(timeout=8)
-                except subprocess.TimeoutExpired:backend.kill();backend.wait()
+            if not (data/'.keep-rendering').is_file():
+                try:
+                    if current(request(port,'/api/ping')):
+                        request(port,'/api/quit',{})
+                except Exception:
+                    if backend is not None and backend.poll() is None:backend.terminate()
+                if backend is not None:
+                    try:backend.wait(timeout=8)
+                    except subprocess.TimeoutExpired:backend.kill();backend.wait()
+
 
 
 if __name__=='__main__':
