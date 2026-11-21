@@ -1,0 +1,54 @@
+name: Windows speech alignment
+on:
+  pull_request:
+    paths:
+      - app/alignment.py
+      - app/alignment_worker.py
+      - .github/workflows/windows-alignment.yml
+
+permissions:
+  contents: read
+
+jobs:
+  alignment:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Prepare a synthetic dialogue recording
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.Speech
+          $voice = New-Object System.Speech.Synthesis.SpeechSynthesizer
+          $voice.SetOutputToWaveFile("$env:RUNNER_TEMP\alignment-fixture.wav")
+          $voice.Speak("The rain is falling softly.")
+          $voice.Dispose()
+      - name: Exercise optional alignment setup and recognition
+        shell: pwsh
+        run: |
+          python packaging/windows/fetch_tools.py
+          $env:PATH = "$(Resolve-Path packaging/windows/tools);$env:PATH"
+          $env:PYTHONPATH = "app"
+          @'
+          import tempfile, os
+          from pathlib import Path
+          from anime_studio import Studio
+
+          with tempfile.TemporaryDirectory() as directory:
+              with tempfile.TemporaryDirectory() as project:
+                  studio = Studio(project)
+                  alignment = studio.alignment
+                  alignment.root = Path(directory) / "Optional alignment"
+                  alignment.install()
+                  assert alignment.ready(), alignment.setup_state
+                  studio.db.x("INSERT INTO alignment_jobs VALUES('fixture',1,'line','token','running','{}',NULL,0)")
+                  alignment.run("fixture", Path(os.environ["RUNNER_TEMP"]) / "alignment-fixture.wav", "The rain is falling softly.")
+                  job = alignment.state()["jobs"][0]
+                  assert job["status"] == "done", job
+                  assert job["result"]["usable"], job
+                  studio.shot_previews.shutdown()
+                  studio.db.conn.close()
+          '@ | python -
