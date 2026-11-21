@@ -310,6 +310,7 @@ class DB:
                     "Choose Project Folder and select the existing AnimeStudio Data folder to grant access. "
                     "Do not delete or replace studio.db. Original SQLite error: " + str(exc)) from exc
             raise
+        self.progress_writes = 0
         self._transaction_active = False
         self.conn.row_factory = sqlite3.Row
         self.lock = threading.RLock()
@@ -431,6 +432,7 @@ class Studio:
         for sub in ("uploads", "shots", "cast", "jobs", "exports", "voices", "cache"):
             (self.data / sub).mkdir(parents=True, exist_ok=True)
         self.db = DB(self.data / "studio.db")
+        self.state_session = uuid.uuid4().hex
         self.db.x("CREATE TABLE IF NOT EXISTS render_imports(token TEXT PRIMARY KEY)")
         if not export_worker:
             for manifest in (self.data / "jobs").glob("*/*.render-import"):
@@ -1337,7 +1339,12 @@ class Worker(threading.Thread):
             self.st.db.x("UPDATE jobs SET progress=? WHERE id=? AND status='pending'", (value, job['id']))
 
     def _progress(self, job_id, text):
-        self.st.db.x("UPDATE jobs SET progress=? WHERE id=? AND status='running'", (text, job_id))
+        db = self.st.db
+        with db.lock:
+            before = db.conn.total_changes
+            db.x("UPDATE jobs SET progress=? WHERE id=? AND status='running' AND progress IS NOT ?",
+                 (text, job_id, text))
+            db.progress_writes += db.conn.total_changes - before
 
     def compose(self, job):
         """Returns (workflow_key, params)."""
@@ -1910,6 +1917,56 @@ class API:
     def media(self, p):
         return ("/media/" + urllib.parse.quote(p)) if p else None
 
+    def queue_state(self, insts=None):
+        st, db = self.st, self.st.db
+        if insts is None:
+            insts = db.q("SELECT * FROM instances ORDER BY id")
+        jobs = db.q("SELECT * FROM jobs WHERE status IN ('pending','running') "
+                    "OR id IN (SELECT id FROM jobs WHERE status='done' ORDER BY finished DESC,id DESC LIMIT 100) "
+                    "OR id IN (SELECT id FROM jobs WHERE status IN ('error','cancelled') ORDER BY finished DESC,id DESC LIMIT 100) ORDER BY id DESC")
+        counts = {r["status"]: r["n"] for r in db.q("SELECT status, COUNT(*) n FROM jobs GROUP BY status")}
+        from render_queue import queue_snapshot
+        history = db.q("SELECT stage,draft,instance_id,'done' AS status,started,finished,workload FROM render_timing_history ORDER BY finished DESC LIMIT 1000")
+        readiness = {server['id']: server['stages'] for server in st.production.readiness.get('servers', [])}
+        end_next = {shot['id'] for shot in db.q('SELECT id FROM shots WHERE end_next=1')}
+        for job in jobs:
+            job['requires_flf'] = job['stage'] in ('animate','continue') and job['shot_id'] in end_next
+        queue = queue_snapshot(jobs, history, insts, st.health, readiness,
+                               compatibility=lambda job, inst: st.job_compatible(job, inst, cached_only=True))
+        return {'jobs': jobs, 'job_counts': counts, 'render_queue': queue}
+
+    def queue_poll(self):
+        data = self.queue_state()
+        jobs = data.pop('jobs')
+        # Limit the live view to titles for the rows it can display.
+        labels = {}
+        for table, key, field in (('shots', 'shot_id', 'seq'), ('assets', 'asset_id', 'name')):
+            ids = sorted({row[key] for row in jobs if row.get(key) is not None})
+            marks = ','.join('?' for _ in ids)
+            labels[table] = {row['id']: row[field] for row in self.st.db.q(
+                f'SELECT id,{field} FROM {table} WHERE id IN ({marks})', ids)} if ids else {}
+        labels['servers'] = {row['id']: row['name'] for row in self.st.db.q('SELECT id,name FROM instances')}
+        for rows in data['render_queue'].values():
+            for row in rows:
+                row['snapshot_json'] = bool(row.get('snapshot_json'))
+                for field in ('creative_json', 'models_json'):
+                    row.pop(field, None)
+        data['queue_labels'] = labels
+        return data
+
+    def state_etag(self, queue_only=False):
+        st, db = self.st, self.st.db
+        with db.lock:
+            changes = db.conn.total_changes - (0 if queue_only else db.progress_writes)
+            version = db.conn.execute('PRAGMA data_version').fetchone()[0]
+            active = db.one("SELECT id FROM jobs WHERE status='running' LIMIT 1") if queue_only else None
+        # Full state includes filesystem availability and transient tool state.
+        # Refresh periodically even if nothing wrote to the project database.
+        interval = 4 if active else 60
+        health = [(key, value.get('ok'), value.get('info')) for key, value in sorted(st.health.copy().items())]
+        value = (st.state_session, changes, version, int(time.time() / interval), health, st.alignment.setup_state)
+        return '"' + hashlib.sha256(repr(value).encode()).hexdigest() + '"'
+
     def state(self, _=None):
         st, db = self.st, self.st.db
         takes, asset_takes, active, asset_active = {}, {}, {}, {}
@@ -1986,18 +2043,8 @@ class API:
                             "slots": detect_slots(wf, key), "problems": check_workflow(wf, key)}
             else:
                 wfs[key] = None
-        jobs = db.q("SELECT * FROM jobs WHERE status IN ('pending','running') "
-                    "OR id IN (SELECT id FROM jobs WHERE status='done' ORDER BY finished DESC,id DESC LIMIT 100) "
-                    "OR id IN (SELECT id FROM jobs WHERE status IN ('error','cancelled') ORDER BY finished DESC,id DESC LIMIT 100) ORDER BY id DESC")
-        counts = {r["status"]: r["n"] for r in db.q("SELECT status, COUNT(*) n FROM jobs GROUP BY status")}
-        from render_queue import queue_snapshot
-        history = db.q("SELECT stage,draft,instance_id,'done' AS status,started,finished,workload FROM render_timing_history ORDER BY finished DESC LIMIT 1000")
-        readiness = {server['id']: server['stages'] for server in st.production.readiness.get('servers', [])}
-        end_next = {shot['id'] for shot in shots if shot['end_next']}
-        for job in jobs:
-            job['requires_flf'] = job['stage'] in ('animate','continue') and job['shot_id'] in end_next
-        queue = queue_snapshot(jobs, history, insts, st.health, readiness,
-                               compatibility=lambda job, inst: st.job_compatible(job, inst, cached_only=True))
+        queue_data = self.queue_state(insts)
+        jobs, counts, queue = (queue_data[key] for key in ('jobs', 'job_counts', 'render_queue'))
         production = st.production.snapshot(shots)
         timing = {row['id']: row for row in timeline_layout(shots, int(st.settings()['out_fps']))}
         for shot in shots:
@@ -2847,8 +2894,14 @@ def make_handler(st, api):
                     return self._send(200, (Path(__file__).resolve().parent / 'production.js').read_text(encoding='utf-8'), 'text/javascript; charset=utf-8')
                 if path == "/api/ping":
                     return self._send(200, {"ok": True, "app": "anime-studio", "version": VERSION})
-                if path == "/api/state":
-                    return self._send(200, api.state())
+                if path in ("/api/state", "/api/queue/state"):
+                    queue_only = path != "/api/state"
+                    etag = api.state_etag(queue_only)
+                    headers = {"ETag": etag}
+                    if self.headers.get("If-None-Match") == etag:
+                        return self._send(304, b"", extra=headers)
+                    data = api.queue_poll() if queue_only else api.state()
+                    return self._send(200, data, extra=headers)
                 if path == "/api/csv/export":
                     return self._send(200, api.csv_export(), "text/csv", {"Content-Disposition": 'attachment; filename="shotlist.csv"'})
                 if path.startswith("/api/workflow/"):

@@ -7,7 +7,7 @@ function setup(){
  const main={scrollTop:1800,scrollLeft:12},frames=[],events={};
  const ctx={tab:'shots',$:s=>main,requestAnimationFrame:fn=>frames.push(fn),render:()=>{main.scrollTop=0;main.scrollLeft=0},
   document:{addEventListener:(type,fn)=>events[type]=fn,querySelectorAll:()=>[]}};
- vm.createContext(ctx);vm.runInContext(script.slice(script.indexOf('const TAB_SCROLL='),script.indexOf('let LASTSTATE=')),ctx);
+ vm.createContext(ctx);vm.runInContext(script.slice(script.indexOf('const TAB_SCROLL='),script.indexOf('const STATE_ETAGS=')),ctx);
  return{ctx,main,events,flush:()=>{while(frames.length)frames.shift()()}};
 }
 test('DOM refresh retains vertical and horizontal position, including next-frame layout changes',()=>{
