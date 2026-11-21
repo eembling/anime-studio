@@ -1,0 +1,127 @@
+name: Desktop release
+on:
+  push:
+    branches: ['codex/github-release-*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Dependencies
+        run: |
+          brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+          python -m pip install Pillow==11.3.0
+      - name: Validate and test
+        run: |
+          python packaging/version.py
+          python -m unittest discover -s tests -p 'test_*.py'
+          node --test tests/test_*.cjs
+          python tests/test_pipeline.py
+      - name: Native build and smoke test
+        run: |
+          bash build_app.sh
+          python packaging/smoke.py macos "$PWD/dist/Anime Studio.app"
+          test "$(uname -m)" = arm64
+          mkdir -p release-assets
+          VERSION=$(python packaging/version.py)
+          ditto -c -k --sequesterRsrc --keepParent "dist/Anime Studio.app" "release-assets/Anime-Studio-$VERSION-macOS-arm64.zip"
+          cp packaging/RELEASE.md release-assets/INSTALL.md
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-release
+          path: release-assets/*
+          if-no-files-found: error
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Dependencies
+        shell: pwsh
+        run: |
+          python -m pip install -r packaging/windows/requirements.txt Pillow==11.3.0
+          python packaging/windows/fetch_tools.py
+          "$pwd\packaging\windows\tools" | Out-File -FilePath $env:GITHUB_PATH -Append
+      - name: Validate and test
+        shell: pwsh
+        run: |
+          python packaging/version.py
+          python -m unittest discover -s tests -p 'test_*.py'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test tests/test_*.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build installer
+        shell: pwsh
+        run: |
+          python packaging/windows/build.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $version = python packaging/version.py
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) { choco install innosetup --version=6.6.1 -y --no-progress }
+          & $iscc "/DAppVersion=$version" packaging/windows/installer.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install and smoke test desktop
+        shell: pwsh
+        run: |
+          $version = python packaging/version.py
+          $setup = "$pwd\release-assets\Anime-Studio-$version-Windows-x64-Setup.exe"
+          $install = "$env:RUNNER_TEMP\Anime Studio Installed"
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=`"$install`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Installer failed: $($p.ExitCode)" }
+          python packaging/smoke.py windows "$install\AnimeStudio.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $project = "$env:LOCALAPPDATA\AnimeStudio\Project Data"
+          New-Item -ItemType Directory -Force $project | Out-Null
+          Set-Content "$project\preserve.txt" 'user project'
+          $p = Start-Process "$install\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          if ($p.ExitCode -ne 0 -or !(Test-Path "$project\preserve.txt") -or (Test-Path "$install\AnimeStudio.exe")) { throw 'Uninstall validation failed' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-release
+          path: release-assets/*
+          if-no-files-found: error
+  publish:
+    needs: [macos, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: '*-release'
+          merge-multiple: true
+          path: release-assets
+      - name: Verify and publish both platforms
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(python packaging/version.py)
+          test -s "release-assets/Anime-Studio-$VERSION-macOS-arm64.zip"
+          test -s "release-assets/Anime-Studio-$VERSION-Windows-x64-Setup.exe"
+          (cd release-assets && sha256sum *.zip *.exe > SHA256SUMS)
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo 'This version already has a published release; refusing to replace it.' >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo 'Version tag already exists; refusing to move it.' >&2
+            exit 1
+          fi
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "Anime Studio $VERSION" --notes-file packaging/RELEASE.md --draft release-assets/*
+          gh release edit "v$VERSION" --draft=false

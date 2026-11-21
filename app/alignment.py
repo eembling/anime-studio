@@ -1,6 +1,7 @@
 """Local speech timing jobs. Recognition mismatches are exposed, never disguised as alignment."""
 import difflib,json,re,subprocess,sys,threading,time,unicodedata,uuid,shutil,os,signal
 from pathlib import Path
+from platform_runtime import config_directory, terminate_process
 
 def normalized(text):return ''.join(c for c in unicodedata.normalize('NFKC',text).casefold() if c.isalnum())
 
@@ -28,7 +29,7 @@ def match_words(text, recognized):
 
 class Alignment:
     def __init__(self,studio):
-        self.st=studio;self.root=Path.home()/'Library/Application Support/AnimeStudio/Alignment'
+        self.st=studio;self.root=config_directory()/'Alignment'
         self.setup_state={'status':'idle'};self.lock=threading.Lock();self.processes=set()
         studio.db.x('CREATE TABLE IF NOT EXISTS alignment_jobs(id TEXT PRIMARY KEY,shot_id INTEGER,line_id TEXT,token TEXT,status TEXT,json TEXT,error TEXT,created REAL)')
         studio.db.x("UPDATE alignment_jobs SET status='error',error='Alignment was interrupted. Run alignment again.' WHERE status='running'")
@@ -36,6 +37,7 @@ class Alignment:
     def state(self):return {'ready':self.ready(),'setup':self.setup_state,'jobs':[dict(r,result=json.loads(r.pop('json') or '{}')) for r in self.st.db.q('SELECT * FROM alignment_jobs ORDER BY created DESC LIMIT 30')]}
     def action(self,body):
         if body['action']=='setup':
+            if sys.platform == 'win32':raise ValueError('Automatic local speech alignment setup is currently supported on macOS. Edit performance timing manually on Windows.')
             with self.lock:
                 if self.setup_state['status']=='running':return {'ok':True}
                 self.setup_state={'status':'running','message':'Installing local speech engine and downloading the base model…'}
@@ -62,17 +64,15 @@ class Alignment:
             return subprocess.CompletedProcess(args,p.returncode,out,err)
         finally:
             if p.poll() is None:
-                try:os.killpg(p.pid,signal.SIGTERM)
-                except ProcessLookupError:pass
+                terminate_process(p)
                 try:p.wait(2)
-                except subprocess.TimeoutExpired:os.killpg(p.pid,signal.SIGKILL);p.wait()
+                except subprocess.TimeoutExpired:terminate_process(p,force=True);p.wait()
             with self.lock:self.processes.discard(p)
     def shutdown(self):
         with self.lock:processes=list(self.processes)
         for p in processes:
             if p.poll() is None:
-                try:os.killpg(p.pid,signal.SIGTERM)
-                except ProcessLookupError:pass
+                terminate_process(p)
 
     def install(self):
         try:

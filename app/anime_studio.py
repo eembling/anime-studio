@@ -462,7 +462,7 @@ class Studio:
         return {r["key"]: r["value"] for r in self.db.q("SELECT key,value FROM settings")}
 
     def rel(self, p):
-        return str(Path(p).resolve().relative_to(self.data))
+        return Path(p).resolve().relative_to(self.data).as_posix()
 
     def abs(self, rel):
         return self.data / rel
@@ -1806,6 +1806,8 @@ class API:
             raise RuntimeError("Can only show files inside the project folder.")
         if sys.platform == "darwin":
             subprocess.Popen(["open", "-R", str(p)] if p.is_file() else ["open", str(p)])
+        elif sys.platform == "win32":
+            os.startfile(str(p))
         return {"ok": True}
 
     def quit(self, _):

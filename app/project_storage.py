@@ -1,6 +1,5 @@
 """Resolve app-owned storage and copy legacy projects without replacing their originals."""
 import argparse
-import fcntl
 import hashlib
 import json
 import os
@@ -9,6 +8,7 @@ import sqlite3
 import sys
 import uuid
 from pathlib import Path
+from platform_runtime import storage_lock, config_directory
 
 
 def atomic_text(path, text):
@@ -82,8 +82,7 @@ def resolve_storage(config, app_dir=None, override=None, home=None):
         result = Path(override).expanduser().resolve()
         result.mkdir(parents=True, exist_ok=True)
         return result
-    with (config/'storage.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with storage_lock(config/'storage.lock'):
         remembered = config/'data-folder'
         if remembered.is_file():
             saved_path = remembered.read_text().strip()
@@ -102,7 +101,8 @@ def resolve_storage(config, app_dir=None, override=None, home=None):
             if app_dir:
                 candidates.append(Path(app_dir)/'AnimeStudio Data')
             home = Path(home) if home else Path.home()
-            candidates.extend([home/'Documents/AnimeStudio Data', home/'Documents/AnimeStudio'])
+            if sys.platform != 'win32':
+                candidates.extend([home/'Documents/AnimeStudio Data', home/'Documents/AnimeStudio'])
             source = next((p for p in candidates if (p/'studio.db').is_file()), None)
             if source:
                 result = migrate_project(source, config)
@@ -115,7 +115,7 @@ def resolve_storage(config, app_dir=None, override=None, home=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config-dir', default=str(Path.home()/'Library/Application Support/AnimeStudio'))
+    parser.add_argument('--config-dir', default=str(config_directory()))
     parser.add_argument('--app-dir')
     parser.add_argument('--override')
     args = parser.parse_args()
