@@ -33,10 +33,11 @@ def main():
         anime_studio.main();return
     from platform_runtime import config_directory
     from project_storage import resolve_storage
+    from project_workspace import launch_port
     config=Path(os.environ.get('ANIME_STUDIO_CONFIG',str(config_directory())))
     os.environ['ANIME_STUDIO_CONFIG']=str(config)
     data=resolve_storage(config,override=os.environ.get('ANIME_STUDIO_DATA'))
-    port=int(os.environ.get('ANIME_STUDIO_PORT','8700'))
+    port=launch_port(data, int(os.environ.get('ANIME_STUDIO_PORT','8700')))
     project = hashlib.sha256(str(data.resolve()).encode()).hexdigest()
     def current(ping):
         return ping.get('app') == 'anime-studio' and ping.get('project') == project
@@ -47,7 +48,7 @@ def main():
         ping=None
     if ping is not None and not current(ping):
         raise RuntimeError('The selected port already serves a different project.')
-    args=[sys.executable,'--backend','--host','127.0.0.1','--port',str(port),'--data',str(data)]
+    args=[sys.executable,'--backend','--projects','--host','127.0.0.1','--port',str(port),'--data',str(data)]
     if not getattr(sys,'frozen',False):args.insert(1,str(Path(__file__).resolve()))
     with (config/'app.log').open('a',encoding='utf-8') as log:
         backend=None
@@ -55,6 +56,7 @@ def main():
             with socket.socket() as probe:probe.bind(('127.0.0.1',port))
             flags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
             backend=subprocess.Popen(args,stdout=log,stderr=log,creationflags=flags)
+        active_port = port
         try:
             for _ in range(120):
                 if backend is not None and backend.poll() is not None:raise RuntimeError('Anime Studio server exited. See '+str(config/'app.log'))
@@ -66,6 +68,11 @@ def main():
             import webview
             window=webview.create_window('Anime Studio',f'http://127.0.0.1:{port}',width=1440,height=960,min_size=(900,600))
             def loaded():
+                nonlocal active_port
+                from urllib.parse import urlsplit
+                visible = urlsplit(window.get_current_url() or '')
+                if visible.hostname == '127.0.0.1' and visible.port:
+                    active_port = visible.port
                 if os.environ.get('ANIME_STUDIO_SMOKE')=='1':
                     title=window.evaluate_js('document.title')
                     if not title:raise RuntimeError('Desktop UI failed to load')
@@ -79,15 +86,16 @@ def main():
             window.events.loaded+=loaded
             webview.start(gui='edgechromium',private_mode=False,storage_path=str(config/'WebView'))
         finally:
-            if not (data/'.keep-rendering').is_file():
-                try:
-                    if current(request(port,'/api/ping')):
-                        request(port,'/api/quit',{})
-                except Exception:
-                    if backend is not None and backend.poll() is None:backend.terminate()
-                if backend is not None:
-                    try:backend.wait(timeout=8)
-                    except subprocess.TimeoutExpired:backend.kill();backend.wait()
+            try:
+                status = request(active_port, '/api/ping')
+                if status.get('app') == 'anime-studio' and status.get('projects') and not status.get('background_rendering'):
+                    request(active_port, '/api/quit', {})
+                    if active_port == port and backend is not None:
+                        backend.wait(timeout=8)
+            except Exception:
+                if active_port == port and backend is not None and backend.poll() is None:
+                    if not (data/'.keep-rendering').is_file():
+                        backend.terminate()
 
 
 

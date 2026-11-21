@@ -162,6 +162,9 @@ def queue_snapshot(jobs, history, instances, health=None, readiness=None, now=No
     for rank, job in enumerate(queued, 1):
         job['queue_position'] = rank
         job['estimated_progress'] = 0
+        if job.get('progress') == 'Another project is rendering on this server.':
+            job['wait_reason'] = job['progress']
+            continue
         checks = {sid: eligible_server(job, server, health.get(sid, {}), readiness.get(sid), compatibility)
                   for sid, server in servers.items()}
         eligible = [sid for sid, ready in checks.items() if ready]

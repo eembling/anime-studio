@@ -41,6 +41,10 @@ def terminate_process(process, force=False):
         except ProcessLookupError:pass
 
 
+class ControllerBusy(RuntimeError):
+    pass
+
+
 @contextlib.contextmanager
 def project_controller(path):
     """Hold one nonblocking lock for the lifetime of a project controller."""
@@ -51,11 +55,11 @@ def project_controller(path):
             try:
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
             except OSError as exc:
-                raise RuntimeError('This project already has a render controller.') from exc
+                raise ControllerBusy('This project already has a render controller.') from exc
         else:
             import fcntl
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
-                raise RuntimeError('This project already has a render controller.') from exc
+                raise ControllerBusy('This project already has a render controller.') from exc
         yield

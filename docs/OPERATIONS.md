@@ -324,3 +324,11 @@ For a custom workflow, tag its text node PROMPT and its optional negative encode
 Download the checkpoint listed in the [ACE-Step 1.5 Turbo ComfyUI template](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/audio_ace_step_1_5_checkpoint.json). Test a short instrumental cue on the server. In Settings, select the ACE-Step starter under Music cues, enable the Music cues task on that server, and check readiness.
 
 In Studio, move the playhead to the start point and select Generate music cue. Enter the arrangement and instrumentation in the prompt. Tempo is available when the selected workflow exposes a BPM input. Audition candidates in the Sound library. Use Add to episode for a fresh cue or Replace music cue to preserve the timing and mixer placement of an existing cue while changing its source. The chosen cue feeds the same music bus used by the preview, final mix and stems.
+
+### Working across projects
+
+Use **Projects** in the sidebar to create a named project or open a folder containing an existing `studio.db`. New projects live in the application's managed storage. Opening a project adds it to the list and makes it the project that opens the next time you launch the desktop app.
+
+Projects keep separate scripts, cast, media, ComfyUI connections, and render queues. When you switch, the previous controller remains active and imports its results into its own project. The Projects screen shows queued and active jobs for local controllers. Projects on this workstation take turns submitting work to a shared ComfyUI endpoint. To share that dispatch lock, use the same server address in each project.
+
+Closing the desktop window uses **Keep rendering when Anime Studio closes** for the project on screen. Controllers left running by a switch continue independently. To stop one, open that project, turn off that setting, and close the app. Process and queue recovery after a system restart still occurs when each project is opened.

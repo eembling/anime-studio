@@ -14,7 +14,7 @@ func htmlEscaped(_ text: String) -> String {
     text.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate, WKDownloadDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate, WKDownloadDelegate, WKScriptMessageHandler {
     var window: NSWindow!
     var webView: WKWebView!
     var server: Process?
@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         buildMenu()
         restoreFolderAccess()
         let config = WKWebViewConfiguration()
+        config.userContentController.add(self, name: "chooseProjectFolder")
         // Studio starts the next dialogue/cue after an asynchronous media load.
         // The transport still requires Play, but those later tracks must not
         // require a separate WebKit user gesture at each shot boundary.
@@ -59,8 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     func restoreFolderAccess() {
         // Managed app-owned storage never resolves or requests access to the old Documents bookmark.
         if URL(fileURLWithPath: dataDir).standardizedFileURL.path.hasPrefix(configDirectory.standardizedFileURL.path + "/") { return }
-        let bookmark = configDirectory.appendingPathComponent("project-folder.bookmark")
-        guard let data = try? Data(contentsOf: bookmark) else { return }
+        let bookmarks = configDirectory.appendingPathComponent("Project Bookmarks")
+        let dedicated = bookmarks.appendingPathComponent(projectIdentifier)
+        let legacy = configDirectory.appendingPathComponent("project-folder.bookmark")
+        guard let data = (try? Data(contentsOf: dedicated)) ?? (try? Data(contentsOf: legacy)) else { return }
         var stale = false
         guard let url = try? URL(resolvingBookmarkData: data, options: [.withSecurityScope], relativeTo: nil, bookmarkDataIsStale: &stale),
               url.standardizedFileURL.path == URL(fileURLWithPath: dataDir).standardizedFileURL.path else { return }
@@ -72,17 +75,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         return SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
-    var keepRendering: Bool {
+    var originalKeepRendering: Bool {
         FileManager.default.fileExists(atPath: URL(fileURLWithPath: dataDir).appendingPathComponent(".keep-rendering").path)
     }
 
-    func pingController(_ completion: @escaping ([String: Any]?) -> Void) {
-        let url = URL(string: "http://127.0.0.1:\(port)/api/ping")!
+    func pingController(port requestedPort: String? = nil, _ completion: @escaping ([String: Any]?) -> Void) {
+        let url = URL(string: "http://127.0.0.1:\(requestedPort ?? port)/api/ping")!
         URLSession.shared.dataTask(with: URLRequest(url: url, timeoutInterval: 2)) { data, response, _ in
             let valid = (response as? HTTPURLResponse)?.statusCode == 200
             let value = valid ? data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } : nil
             DispatchQueue.main.async { completion(value) }
         }.resume()
+    }
+
+    var visiblePort: String {
+        guard let url = webView.url, url.host == "127.0.0.1", let value = url.port else { return port }
+        return String(value)
+    }
+
+    var openFolderScopes: [URL] = []
+
+    func openProjectFolder(_ url: URL) {
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(visiblePort)/api/projects")!, timeoutInterval: 20)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["action": "open", "path": url.path])
+        if url.startAccessingSecurityScopedResource() { openFolderScopes.append(url) }
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            let result = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            DispatchQueue.main.async {
+                if result?["current"] as? Bool == true { return }
+                if let port = result?["port"] as? Int, (1...65535).contains(port) {
+                    self.rememberProjectBookmark(url)
+                    self.webView.load(URLRequest(url: URL(string: "http://127.0.0.1:\(port)/")!))
+                } else {
+                    let alert = NSAlert()
+                    alert.messageText = "Could not open project"
+                    alert.informativeText = result?["error"] as? String ?? "Check that the project folder is available."
+                    alert.beginSheetModal(for: self.window)
+                }
+            }
+        }.resume()
+    }
+
+    func rememberProjectBookmark(_ url: URL) {
+        let path = url.resolvingSymlinksInPath().standardizedFileURL.path
+        let key = SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()
+        let bookmarks = configDirectory.appendingPathComponent("Project Bookmarks")
+        if let bookmark = try? url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil) {
+            try? FileManager.default.createDirectory(at: bookmarks, withIntermediateDirectories: true)
+            try? bookmark.write(to: bookmarks.appendingPathComponent(key), options: .atomic)
+        }
+    }
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "chooseProjectFolder", message.frameInfo.isMainFrame,
+              message.frameInfo.securityOrigin.host == "127.0.0.1",
+              String(message.frameInfo.securityOrigin.port) == visiblePort else { return }
+        chooseProjectFolderAction(nil)
     }
 
     func isCurrentController(_ ping: [String: Any]?) -> Bool {
@@ -117,7 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         let logURL = URL(fileURLWithPath: dataDir).appendingPathComponent("app.log")
         let p = Process()
         p.executableURL = URL(fileURLWithPath: py)
-        p.arguments = [script, "--host", "127.0.0.1", "--port", port, "--data", dataDir]
+        p.arguments = [script, "--projects", "--host", "127.0.0.1", "--port", port, "--data", dataDir]
         do {
             try FileManager.default.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
             if !FileManager.default.fileExists(atPath: logURL.path) { try Data().write(to: logURL) }
@@ -127,7 +177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
             p.standardError = handle
             p.terminationHandler = { [weak self] process in
                 DispatchQueue.main.async {
-                    guard let self = self, !self.quitting, generation == self.startupGeneration, !self.startupFailed else { return }
+                    guard let self = self, !self.quitting, generation == self.startupGeneration, !self.startupFailed, self.visiblePort == self.port else { return }
                     let log = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
                     self.startupFailure(log.isEmpty ? "The local server exited (status \(process.terminationStatus))." : String(log.suffix(6000)),
                                         accessDenied: databaseAccessDenied(log))
@@ -205,11 +255,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
                 alert.beginSheetModal(for: self.window)
                 return
             }
-            if self.keepRendering || (self.server == nil && self.serverReady) {
-                let alert = NSAlert()
-                alert.messageText = "Close this project before switching folders"
-                alert.informativeText = "Turn off Keep rendering when Anime Studio closes in Settings, then quit and reopen."
-                alert.beginSheetModal(for: self.window)
+            if self.serverReady {
+                self.openProjectFolder(url)
                 return
             }
             // A folder switch may also be requested while the current server is healthy.
@@ -236,13 +283,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard serverReady, !keepRendering, server == nil else { return .terminateNow }
-        pingController { ping in
-            guard self.isCurrentController(ping) else {
+        guard serverReady else { return .terminateNow }
+        let activePort = visiblePort
+        pingController(port: activePort) { ping in
+            guard ping?["app"] as? String == "anime-studio", ping?["projects"] as? Bool == true,
+                  ping?["background_rendering"] as? Bool == false else {
                 sender.reply(toApplicationShouldTerminate: true)
                 return
             }
-            var request = URLRequest(url: URL(string: "http://127.0.0.1:\(self.port)/api/quit")!, timeoutInterval: 3)
+            var request = URLRequest(url: URL(string: "http://127.0.0.1:\(activePort)/api/quit")!, timeoutInterval: 3)
             request.httpMethod = "POST"
             request.httpBody = Data("{}".utf8)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -255,7 +304,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
 
     func applicationWillTerminate(_ notification: Notification) {
         quitting = true
-        if !keepRendering { server?.terminate() }
+        if !serverReady && !originalKeepRendering { server?.terminate() }
+        for url in openFolderScopes { url.stopAccessingSecurityScopedResource() }
         grantedFolder?.stopAccessingSecurityScopedResource()
     }
 

@@ -31,7 +31,8 @@ def main():
                  SWIFT_MODULECACHE_PATH='/tmp/anime-studio-swift-cache')
         subprocess.run(['xcrun','swiftc',str(ROOT/'tests/native_playback.swift'),'-o',str(executable),
                         '-framework','AppKit','-framework','WebKit'],check=True,env=env)
-        process=subprocess.Popen([sys.executable,str(ROOT/'app/anime_studio.py'),'--port','8871','--data',str(folder/'project')],
+        process=subprocess.Popen([sys.executable,str(ROOT/'app/anime_studio.py'),'--projects','--port','8871','--data',str(folder/'project')],
+                                 env=dict(os.environ,ANIME_STUDIO_CONFIG=str(folder/'config')),
                                  stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         try:
             opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -42,6 +43,14 @@ def main():
             else:raise RuntimeError('Disposable app did not start.')
             subprocess.run([str(executable)],check=True,timeout=35)
         finally:
+            from project_workspace import read_catalog, controller_status
+            for item in read_catalog(folder/'config').values():
+                status = controller_status(Path(item['path']))
+                if status and status['port'] != 8871:
+                    try:
+                        opener.open(urllib.request.Request(f"http://127.0.0.1:{status['port']}/api/quit", data=b'{}'), timeout=2).close()
+                    except OSError:
+                        pass
             process.terminate()
             try:process.wait(timeout=5)
             except subprocess.TimeoutExpired:process.kill();process.wait()
