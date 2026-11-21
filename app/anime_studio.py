@@ -462,7 +462,7 @@ class Studio:
         return {r["key"]: r["value"] for r in self.db.q("SELECT key,value FROM settings")}
 
     def rel(self, p):
-        return str(Path(p).resolve().relative_to(self.data))
+        return Path(p).resolve().relative_to(self.data).as_posix()
 
     def abs(self, rel):
         return self.data / rel
@@ -1566,8 +1566,8 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
                     f"* FROM CLIP NAME: {seg.name}", f"* COMMENT: {(s['scene'] or '')[:60]} | {(s['keyframe_prompt'] or '')[:80]}", ""]
             rec += nfr
             log.append(f"Shot {i}: {how}, {dur:.1f}s" + (" + dialogue" if audio else ""))
-        (out / "timeline.edl").write_text("\n".join(edl))
-        (out / "concat.txt").write_text("".join(f"file 'shots/{p.name}'\n" for p in segs))
+        (out / "timeline.edl").write_text("\n".join(edl), encoding='utf-8')
+        (out / "concat.txt").write_text("".join(f"file 'shots/{p.name}'\n" for p in segs), encoding='utf-8')
         joined, final = out / "_joined.mp4", out / f"{name}.mp4"
         ffmpeg(["-f", "concat", "-safe", "0", "-i", str(out / "concat.txt"), "-c", "copy", str(joined)])
         master = out / '_dialogue_master.mp4'
@@ -1597,7 +1597,7 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
         if not preview and scene is None and shot_ids is None:
             st.soundtrack.register(master, final, rec / FPS, build=build)
         (out / "concat.txt").unlink()
-        (out / "shotlist.csv").write_text(API(st).csv_export())
+        (out / "shotlist.csv").write_text(API(st).csv_export(), encoding='utf-8')
         A["output"], A["folder"] = st.rel(final), st.rel(out)
         log.append(f"Done: {final.name}  ({int(rec / FPS // 60)}:{int(rec / FPS % 60):02d})")
         log.append("For DaVinci Resolve: File > Import > Timeline > timeline.edl, and point it at the 'shots' folder.")
@@ -1723,7 +1723,7 @@ class API:
         starters = {k: list(v.keys()) for k, v in STARTERS.items()}
         cues = st.soundtrack.cues()
         S["max_clip_seconds"] = round((st.max_frames() - 1) / float(st.wf_fps()), 2)
-        try:build=json.loads((Path(__file__).parent/'build_info.json').read_text())
+        try:build=json.loads((Path(__file__).parent/'build_info.json').read_text(encoding='utf-8'))
         except (OSError,ValueError):build={'version':VERSION,'commit':'development','branch':'local source'}
         return {"project_id":hashlib.sha256(str(st.data).encode()).hexdigest()[:24],"build":build,"alignment":st.alignment.state(),"settings": S, "tts_languages": TTS_LANGUAGES, "voice_sample": VOICE_SAMPLE, "shots": shots, "assets": assets, "instances": insts, "workflows": wfs, "starters": starters,
                 "jobs": jobs, "job_counts": counts, "assembly": A, "tools": st.tools(), "music_url": self.media(S.get("music")),
@@ -1806,6 +1806,8 @@ class API:
             raise RuntimeError("Can only show files inside the project folder.")
         if sys.platform == "darwin":
             subprocess.Popen(["open", "-R", str(p)] if p.is_file() else ["open", str(p)])
+        elif sys.platform == "win32":
+            os.startfile(str(p))
         return {"ok": True}
 
     def quit(self, _):
@@ -2533,17 +2535,17 @@ def make_handler(st, api):
                 if path in ("/", "/index.html"):
                     return self._send(200, INDEX_HTML, "text/html; charset=utf-8")
                 if path == '/shot_voices.js':
-                    return self._send(200, (Path(__file__).resolve().parent / 'shot_voices.js').read_text(), 'text/javascript; charset=utf-8')
+                    return self._send(200, (Path(__file__).resolve().parent / 'shot_voices.js').read_text(encoding='utf-8'), 'text/javascript; charset=utf-8')
                 if path in ('/voice_video.js','/studio_audio.js','/settings.js','/settings.css','/continuations.js','/workspace.js','/workspace.css','/finishing.js','/finishing.css','/shot_playback.js','/mix_processor.js','/audio_mix.json'):
-                    return self._send(200, (Path(__file__).resolve().parent / path[1:]).read_text(), 'application/json' if path.endswith('.json') else 'text/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8')
+                    return self._send(200, (Path(__file__).resolve().parent / path[1:]).read_text(encoding='utf-8'), 'application/json' if path.endswith('.json') else 'text/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8')
                 if path == '/creative.css':
-                    return self._send(200, (Path(__file__).resolve().parent / 'creative.css').read_text(), 'text/css; charset=utf-8')
+                    return self._send(200, (Path(__file__).resolve().parent / 'creative.css').read_text(encoding='utf-8'), 'text/css; charset=utf-8')
                 if path == '/creative.js':
-                    return self._send(200, (Path(__file__).resolve().parent / 'creative.js').read_text(), 'text/javascript; charset=utf-8')
+                    return self._send(200, (Path(__file__).resolve().parent / 'creative.js').read_text(encoding='utf-8'), 'text/javascript; charset=utf-8')
                 if path == '/editor.js':
-                    return self._send(200, (Path(__file__).resolve().parent / 'editor.js').read_text(), 'text/javascript; charset=utf-8')
+                    return self._send(200, (Path(__file__).resolve().parent / 'editor.js').read_text(encoding='utf-8'), 'text/javascript; charset=utf-8')
                 if path == '/production.js':
-                    return self._send(200, (Path(__file__).resolve().parent / 'production.js').read_text(), 'text/javascript; charset=utf-8')
+                    return self._send(200, (Path(__file__).resolve().parent / 'production.js').read_text(encoding='utf-8'), 'text/javascript; charset=utf-8')
                 if path == "/api/ping":
                     return self._send(200, {"ok": True, "app": "anime-studio", "version": VERSION})
                 if path == "/api/state":
@@ -2632,7 +2634,7 @@ def main():
         d.mkdir(parents=True, exist_ok=True)
         for key, variants in STARTERS.items():
             for name, s in variants.items():
-                (d / f"{key}__{name}_api.json").write_text(json.dumps(s["wf"], indent=2, ensure_ascii=False))
+                (d / f"{key}__{name}_api.json").write_text(json.dumps(s["wf"], indent=2, ensure_ascii=False), encoding='utf-8')
         print("Wrote starter workflows to", d)
         return
     st = Studio(args.data)

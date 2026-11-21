@@ -1,6 +1,5 @@
 """Resolve app-owned storage and copy legacy projects without replacing their originals."""
 import argparse
-import fcntl
 import hashlib
 import json
 import os
@@ -9,12 +8,13 @@ import sqlite3
 import sys
 import uuid
 from pathlib import Path
+from platform_runtime import storage_lock, config_directory
 
 
 def atomic_text(path, text):
     temporary = path.with_name(path.name + '.tmp-' + uuid.uuid4().hex)
     try:
-        temporary.write_text(text)
+        temporary.write_text(text, encoding='utf-8')
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -44,7 +44,7 @@ def migrate_project(source, config):
     signature = fingerprint(source)
     if destination.exists():
         marker = destination / '.migration.json'
-        saved = json.loads(marker.read_text()) if marker.is_file() else {}
+        saved = json.loads(marker.read_text(encoding='utf-8')) if marker.is_file() else {}
         if saved.get('source') == str(source) and saved.get('fingerprint') == signature and (destination/'studio.db').is_file():
             return destination
         raise ValueError('An existing migrated project differs from the legacy source. Both copies were preserved: ' + str(destination))
@@ -66,7 +66,7 @@ def migrate_project(source, config):
             original.close()
         if fingerprint(source) != signature:
             raise ValueError('The project changed during migration. Close the other Anime Studio instance and retry. The original was preserved.')
-        (staging/'.migration.json').write_text(json.dumps({'source':str(source),'fingerprint':signature},indent=2))
+        (staging/'.migration.json').write_text(json.dumps({'source':str(source),'fingerprint':signature},indent=2), encoding='utf-8')
         os.replace(staging, destination)
         return destination
     finally:
@@ -82,11 +82,10 @@ def resolve_storage(config, app_dir=None, override=None, home=None):
         result = Path(override).expanduser().resolve()
         result.mkdir(parents=True, exist_ok=True)
         return result
-    with (config/'storage.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with storage_lock(config/'storage.lock'):
         remembered = config/'data-folder'
         if remembered.is_file():
-            saved_path = remembered.read_text().strip()
+            saved_path = remembered.read_text(encoding='utf-8').strip()
             if not saved_path:
                 raise ValueError('The saved project location is empty. No project was replaced.')
             source = Path(saved_path).expanduser().resolve()
@@ -102,7 +101,8 @@ def resolve_storage(config, app_dir=None, override=None, home=None):
             if app_dir:
                 candidates.append(Path(app_dir)/'AnimeStudio Data')
             home = Path(home) if home else Path.home()
-            candidates.extend([home/'Documents/AnimeStudio Data', home/'Documents/AnimeStudio'])
+            if sys.platform != 'win32':
+                candidates.extend([home/'Documents/AnimeStudio Data', home/'Documents/AnimeStudio'])
             source = next((p for p in candidates if (p/'studio.db').is_file()), None)
             if source:
                 result = migrate_project(source, config)
@@ -115,7 +115,7 @@ def resolve_storage(config, app_dir=None, override=None, home=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config-dir', default=str(Path.home()/'Library/Application Support/AnimeStudio'))
+    parser.add_argument('--config-dir', default=str(config_directory()))
     parser.add_argument('--app-dir')
     parser.add_argument('--override')
     args = parser.parse_args()

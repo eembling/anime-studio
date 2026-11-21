@@ -5,7 +5,7 @@ import math
 import wave
 from pathlib import Path
 
-CONFIG = json.loads((Path(__file__).parent/'audio_mix.json').read_text())
+CONFIG = json.loads((Path(__file__).parent/'audio_mix.json').read_text(encoding='utf-8'))
 
 
 def envelope(pcm, rate=48000):

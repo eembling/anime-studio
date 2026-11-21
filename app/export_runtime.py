@@ -3,6 +3,7 @@ import os
 import signal
 import subprocess
 import threading
+from platform_runtime import terminate_process
 
 LOCAL=threading.local()
 LOCK=threading.Lock()
@@ -40,11 +41,10 @@ def run(command, timeout=3600, binary=False):
                 group.discard(process)
                 if not group:PROCESSES.pop(event,None)
         if process.poll() is None:
-            try:os.killpg(process.pid,signal.SIGTERM)
-            except ProcessLookupError:pass
+            terminate_process(process)
             try:process.communicate(timeout=2)
             except subprocess.TimeoutExpired:
-                os.killpg(process.pid,signal.SIGKILL);process.communicate()
+                terminate_process(process,force=True);process.communicate()
 
 
 def stop(event):
@@ -53,5 +53,4 @@ def stop(event):
         processes=list(PROCESSES.get(event,set()))
     for process in processes:
         if process.poll() is None:
-            try:os.killpg(process.pid,signal.SIGTERM)
-            except ProcessLookupError:pass
+            terminate_process(process)

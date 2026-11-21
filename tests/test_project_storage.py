@@ -1,3 +1,4 @@
+from contextlib import closing
 import sqlite3
 import sys
 import tempfile
@@ -41,7 +42,7 @@ class ProjectStorageTests(unittest.TestCase):
         self.legacy().close()
         original = (self.source / 'studio.db').read_bytes()
         result = storage.resolve_storage(self.config)
-        with sqlite3.connect(result / 'studio.db') as db:
+        with closing(sqlite3.connect(result / 'studio.db')) as db:
             self.assertEqual(db.execute('SELECT value FROM settings').fetchone()[0], 'http://comfy:8188')
             self.assertEqual(db.execute('PRAGMA quick_check').fetchone()[0], 'ok')
         self.assertEqual((result / 'assets/frame.png').read_bytes(), b'frame')
@@ -55,7 +56,7 @@ class ProjectStorageTests(unittest.TestCase):
         db = self.legacy(wal=True)
         self.addCleanup(db.close)
         result = storage.resolve_storage(self.config)
-        with sqlite3.connect(result / 'studio.db') as copied:
+        with closing(sqlite3.connect(result / 'studio.db')) as copied:
             self.assertEqual(copied.execute('SELECT COUNT(*) FROM settings').fetchone()[0], 1)
 
     def test_failed_copy_does_not_change_preference_or_original(self):

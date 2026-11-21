@@ -286,3 +286,12 @@ Character IDs and persistent per-shot line IDs bind generated takes to dialogue,
 Settings is organized by task. Studio adds fitted, synchronized playback, visible picture/dialogue/music/effects tracks, waveform scrubbing, trim handles and cut-boundary previews. Continuations have independent saved prompts, boundary previews, audio coverage and captured generation inputs (issue #9). All newly queued jobs capture workflows, parameters and media; completed jobs can repeat their recorded inputs. Local speech timing, recovery drafts, reviewed storage cleanup and actionable render errors support longer editing sessions. Active renders list their submitted models beneath the progress bar. The bottom-left version badge opens source/build information.
 
 See the [product workflows](docs/PRODUCT-GUIDE.md#17-reliable-rendering-recovery-and-workspace-tools-211) and [operations guide](docs/OPERATIONS.md#local-speech-alignment-211). ComfyUI remains manually maintained; these Mac features do not update the server.
+
+
+## GitHub desktop releases
+
+The Desktop release workflow builds macOS Apple silicon and a per-user Windows x64 installer from the same commit, preserving the current app version. Both platform builds and packaged smoke tests must pass before the publication job creates the version tag and publishes assets. Setup changes run on `codex/github-release-*` branches; a manual dispatch is also available once the workflow is on the default branch. Existing version tags/releases are never replaced.
+
+See [release installation requirements](packaging/RELEASE.md). Windows bundles Python and FFmpeg/FFprobe and requires Windows 11, WebView2 and .NET 4.8. The native macOS arm64 application requires separately installed Python 3.9+ and FFmpeg. No signing secrets are configured: downloads are unsigned, and the macOS app is not Developer ID signed or notarized. Build outputs include SHA-256 checksums. No ComfyUI server changes or generation-model downloads are performed by packaging.
+
+Windows stores projects under `%LOCALAPPDATA%\AnimeStudio`; uninstall preserves them. macOS keeps its existing Application Support storage. Windows supports manual dialogue timing; automatic speech-alignment setup and temporary macOS system voices remain macOS-only.

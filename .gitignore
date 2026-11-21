@@ -19,3 +19,8 @@ tests/_run/
 /AnimeStudio/
 /AnimeStudio.tar.gz
 /episode-*.md
+
+# Release staging
+/build/
+/release-assets/
+/packaging/windows/tools/
