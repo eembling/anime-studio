@@ -249,6 +249,19 @@ class ClipAudioTests(unittest.TestCase):
         self.assertEqual((self.st.data/'shots/key.png').read_bytes(),original)
         self.assertIn('dialogue close-up',params['prompt'])
 
+    def test_custom_crop_is_positioned_and_captured(self):
+        key = self.st.data/'shots/key.png'
+        app.ffmpeg(['-f', 'lavfi', '-i', 'color=blue:s=128x72',
+                    '-vf', 'drawbox=x=0:y=0:w=64:h=72:color=red:t=fill', '-frames:v', '1', str(key)])
+        self.api.shot_save(dict(id=self.sid, voice_framing='closeup', voice_crop={'x':0,'y':50,'size':40}))
+        _, job = self.queue()
+        crop = self.worker.compose(job)[1]['files']['start']
+        pixels = subprocess.check_output(['ffmpeg','-v','error','-i',str(crop),'-f','rawvideo','-pix_fmt','rgb24','-'])
+        self.assertGreater(pixels[0], 200)
+        self.assertLess(pixels[2], 15)
+        self.api.shot_save(dict(id=self.sid, voice_crop={'x':100,'y':50,'size':40}))
+        self.assertEqual(self.worker.compose(job)[1]['files']['start'].read_bytes(), crop.read_bytes())
+
     def test_native_s2v_rejects_incorrect_model_cadence(self):
         self.st.db.x("UPDATE workflows SET fps=24 WHERE stage='lipsync'")
         with self.assertRaisesRegex(ValueError,'requires 16 fps'):
