@@ -23,6 +23,7 @@ class Finishing:
         db = studio.db
         db.x('''CREATE TABLE IF NOT EXISTS sound_library(
             id TEXT PRIMARY KEY, name TEXT, category TEXT, tags TEXT, path TEXT, seconds REAL, created REAL)''')
+        db.x("CREATE TABLE IF NOT EXISTS generated_sounds(id TEXT PRIMARY KEY, job_id INTEGER, shot_id INTEGER, cue TEXT)")
         for column, definition in (
             ('transition', "TEXT DEFAULT 'cut'"), ('transition_seconds', 'REAL DEFAULT 0.5'),
             ('dialogue_offset', 'REAL DEFAULT 0'), ('dialogue_tail', 'REAL DEFAULT 0'),
@@ -39,12 +40,41 @@ class Finishing:
         return dict(defaults, duck=bool(saved.get('duck', False)))
 
     def state(self):
+        generated = {row['id']: dict(json.loads(row['cue']), job_id=row['job_id'], shot_id=row['shot_id'])
+                     for row in self.st.db.q('SELECT * FROM generated_sounds')}
         return {
             'mixer': self.mixer(),
             'audio_config': __import__('audio_processing').CONFIG,
-            'library': [dict(row, url='/media/'+row['path']) for row in
+            'library': [dict(row, url='/media/'+row['path'], generation=generated.get(row['id'])) for row in
                         self.st.db.q('SELECT * FROM sound_library ORDER BY name,id')],
         }
+
+    def save_generated_sound(self, job, audio_files):
+        from anime_studio import ffmpeg
+        from soundtrack import probe
+        from render_queue import models_for_job
+        if len(audio_files) != 1:
+            raise ValueError('The sound recipe must save one audio file per candidate.')
+        spec = json.loads(job['note'])
+        ident = uuid.uuid4().hex
+        st = self.st
+        folder = st.data/'sound-library'
+        folder.mkdir(exist_ok=True)
+        target = folder/(ident+'.wav')
+        try:
+            ffmpeg(['-i', str(audio_files[0]), '-map', '0:a:0', '-ar', '48000', '-c:a', 'pcm_s24le', str(target)])
+            duration, streams = probe(target)
+            if not duration or 'audio' not in streams:
+                raise ValueError('The sound recipe returned unreadable audio.')
+            category = {'sfx':'Generated effects','ambience':'Generated ambience'}[spec['kind']]
+            st.db.x('INSERT INTO sound_library VALUES(?,?,?,?,?,?,?)',
+                    (ident, spec['name'], category, 'ComfyUI', st.rel(target), duration, time.time()))
+            st.db.x('INSERT INTO generated_sounds VALUES(?,?,?,?)',
+                    (ident, job['id'], job['shot_id'], json.dumps(dict(spec, seed=job['seed'], models=models_for_job(job)[0]))))
+        except Exception:
+            st.db.x('DELETE FROM sound_library WHERE id=?', (ident,))
+            target.unlink(missing_ok=True)
+            raise
 
     def action(self, body):
         st = self.st
@@ -88,6 +118,7 @@ class Finishing:
                 raise
         if action == 'library_delete':
             # Retain source files used by existing cues, saved episodes and history.
+            st.db.x('DELETE FROM generated_sounds WHERE id=?', (body['id'],))
             st.db.x('DELETE FROM sound_library WHERE id=?', (body['id'],))
             return {'ok': True}
         if action == 'shot':
