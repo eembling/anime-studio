@@ -387,6 +387,11 @@ class Studio:
         for sub in ("uploads", "shots", "cast", "jobs", "exports", "voices", "cache"):
             (self.data / sub).mkdir(parents=True, exist_ok=True)
         self.db = DB(self.data / "studio.db")
+        self.db.x("CREATE TABLE IF NOT EXISTS render_project (id INTEGER PRIMARY KEY CHECK (id=1), namespace TEXT NOT NULL)")
+        self.db.x("INSERT OR IGNORE INTO render_project VALUES(1,?)", (uuid.uuid4().hex,))
+        self.render_namespace = self.db.one("SELECT namespace FROM render_project WHERE id=1")["namespace"]
+        if "remote_client_id" not in {row["name"] for row in self.db.q("PRAGMA table_info(jobs)")}:
+            self.db.x("ALTER TABLE jobs ADD COLUMN remote_client_id TEXT")
         from voice_video import initialize as initialize_voice_video
         initialize_voice_video(self.db)
         for k, v in DEFAULT_SETTINGS.items():
@@ -1277,21 +1282,27 @@ class Worker(threading.Thread):
                     self._progress(job_id, f"Sampler {data.get('value',0)}/{data['max']} (current node)")
                 elif data.get('node'):
                     self._progress(job_id, 'Executing node ' + str(data['node']))
-            events = ProgressEvents(base, f'anime-studio-{job_id}', progress_event).start()
+            # Already accepted jobs may predate namespaced submissions.
+            client_id = job.get("remote_client_id") or f"anime-studio-{job_id}"
+            if not pid:
+                client_id = f"anime-studio-{st.render_namespace}-{uuid.uuid4().hex}"
+            events = ProgressEvents(base, client_id, progress_event).start()
             if not pid:
                 self._progress(job_id, "uploading inputs")
-                p["images"] = {slot: comfy_upload(base, path, f"anime_j{job_id}_{slot}{Path(path).suffix.lower()}")
+                attempt = client_id.removeprefix("anime-studio-")
+                p["prefix"] = f"anime/{st.render_namespace}/{attempt}_{job['stage']}"
+                p["images"] = {slot: comfy_upload(base, path, f"anime_j{job_id}_{attempt}_{slot}{Path(path).suffix.lower()}")
                                for slot, path in p["files"].items()}
                 wf = build_workflow(tpl, key, p)
                 wf = st.snapshots.patch(job,wf) if job.get("snapshot_json") else st.creative.patch_controls(job, wf)
                 try:
-                    res = http_json("POST", base + "/prompt", {"prompt": wf, "client_id": f"anime-studio-{job_id}"}, 60)
+                    res = http_json("POST", base + "/prompt", {"prompt": wf, "client_id": client_id}, 60)
                 except RuntimeError as e:
                     raise RuntimeError(explain_missing_nodes(str(e), base) or str(e)) from None
                 if res.get("node_errors"):
                     raise RuntimeError("ComfyUI rejected the workflow: " + json.dumps(res["node_errors"])[:2500])
                 pid = res["prompt_id"]
-                db.x("UPDATE jobs SET prompt_id=?, models_json=?, progress='queued on ComfyUI' WHERE id=?", (pid, json.dumps(workflow_models(wf)), job_id))
+                db.x("UPDATE jobs SET prompt_id=?, models_json=?, remote_client_id=?, progress='queued on ComfyUI' WHERE id=?", (pid, json.dumps(workflow_models(wf)), client_id, job_id))
             t0, timeout, fails, entry = time.time(), int(float(st.settings().get("job_timeout") or 3600)), 0, None
             while True:
                 if (db.one("SELECT status FROM jobs WHERE id=?", (job_id,)) or {}).get("status") != "running":
