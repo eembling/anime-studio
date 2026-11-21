@@ -23,6 +23,7 @@ import csv
 import glob
 import io
 import json
+import math
 import mimetypes
 import os
 import random
@@ -951,6 +952,32 @@ def media_seconds(path):
     return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else 0.0
 
 
+def validate_render_cadence(path, fps):
+    """Read presentation timestamps and preserve the recipe's real-time cadence."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_frames",
+         "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", str(path)],
+        capture_output=True, text=True, timeout=300,
+    )
+    try:
+        if result.returncode or result.stderr:
+            raise ValueError(result.stderr)
+        timestamps = [float(frame["best_effort_timestamp_time"])
+                      for frame in json.loads(result.stdout)["frames"]]
+        origin = timestamps[0]
+        if any(not math.isfinite(value) for value in timestamps):
+            raise ValueError("Non-finite timestamp")
+    except (ValueError, KeyError, IndexError) as exc:
+        raise ValueError("The generated file does not contain readable video timestamps.") from exc
+    # Allow millisecond container quantization, such as WebM's 62/63 ms
+    # spacing at 16 fps. Compare against the first presentation timestamp.
+    if any(abs(value - origin - index / fps) > .002
+           for index, value in enumerate(timestamps)):
+        raise ValueError(f"The generated video does not use the recipe’s {fps:g} fps cadence. "
+                         "Set the workflow output frame rate to match the recipe and generate a new take.")
+    return len(timestamps)
+
+
 def retime(st, take, mode, out_fps, log=None):
     """Return a file at out_fps. hold = repeat frames, blend = ffmpeg motion interpolation, rife = rife-ncnn-vulkan."""
     src, fps = st.abs(take["path"]), float(take["fps"] or 0)
@@ -1421,6 +1448,7 @@ class Worker(threading.Thread):
             folder = st.data / "shots" / f"{job['shot_id']:04d}"
         folder.mkdir(parents=True, exist_ok=True)
         made = []
+        video_frames = None
         if stage in ("sheet", "keyframe"):
             if job.get("creative_json") and not imgs: raise ValueError("The recipe saved no image candidate.")
             for i, f in enumerate(imgs or local):
@@ -1435,6 +1463,7 @@ class Worker(threading.Thread):
                 fps = (st.snapshots.workflow(job) or st.creative.workflow(job) or {}).get("fps") or st.wf_fps(key)
             dest = folder / f"{stage}_j{job['id']}_{output_id}.mp4"
             if vids:
+                validate_render_cadence(vids[0], fps)
                 dest = dest.with_suffix(vids[0].suffix.lower())
                 shutil.move(str(vids[0]), dest)
             else:
@@ -1444,13 +1473,13 @@ class Worker(threading.Thread):
                 stitch_frames(imgs, fps, dest)
             from clip_audio import embed as embed_clip_audio
             dest = embed_clip_audio(st, job, dest)
+            video_frames = validate_render_cadence(dest, fps)
             made.append((dest, fps))
-        nframes = len(imgs) if imgs and not vids and not st.snapshots.meta(job).get('clip_audio') else None
         for path, fps in made:
             tid = st.db.x("INSERT INTO takes(shot_id,asset_id,stage,path,fps,seed,job_id,created,frames,segment,draft,input_signature) "
                           "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                           (job["shot_id"], job["asset_id"], stage, st.rel(path), fps, job["seed"], job["id"], time.time(),
-                           nframes if fps else None, job.get("segment"), 1 if job.get("draft") else 0, signature))
+                           video_frames if fps else None, job.get("segment"), 1 if job.get("draft") else 0, signature))
             st.sections.saved_take(tid,job)
             if st.creative.meta(job).get("manual"):
                 continue
