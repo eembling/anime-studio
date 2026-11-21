@@ -78,11 +78,12 @@ class JobSnapshots:
             st.db.x('INSERT INTO creative_runs VALUES(?,?,?,?,?,?,NULL,NULL,NULL,?,NULL)',(creative['run_id'],jid,old['shot_id'],creative['recipe']['id'],creative['kind'],'pending',json.dumps(creative)))
         return jid
 
-    def compatible(self, job, instance):
+    def compatible(self, job, instance, cached_only=False):
         from anime_studio import build_workflow
         meta=self.meta(job);params=copy.deepcopy(meta['params'])
         # Readiness needs input slots, but must never upload files or submit a job.
         params['images']={slot:path for slot,path in params.get('files',{}).items()}
         graph=self.patch(job,build_workflow(meta['workflow'],meta['key'],params))
         recipe={'workflow':graph,'controls':[]}
-        return not self.st.creative.inspect_recipe(recipe,{},instance)['problems']
+        inspected = self.st.creative.inspect_recipe(recipe, {}, instance, cached_only=cached_only)
+        return None if inspected is None else not inspected['problems']
