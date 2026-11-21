@@ -127,7 +127,7 @@ Before updating a maintained server, finish or intentionally cancel its work, re
 
 [server/download_models.sh](../server/download_models.sh) lists the model files used by the shipped image, animation and upscale starters. It downloads into `~/ComfyUI/models`; inspect that assumption before running it on a differently located installation.
 
-Copy the script to the server and run it there:
+Copy the complete Anime Studio `server` directory to the server and run the helper there.
 
 ```bash
 bash download_models.sh
@@ -135,11 +135,13 @@ bash download_models.sh
 
 The script's downloaded filenames must match the workflow inputs. Its presence in GitHub does not mean it has already run on your server. Verify downloaded files and restart/refresh ComfyUI so its model lists update.
 
-The optional 5B model downloads are commented in the script. Choosing an alternate starter does not install its weights.
+To install the optional 5B starter weights, run `python3 recipe_assets.py fetch /path/to/ComfyUI ti2v`. To check a host without changing it, run `python3 recipe_assets.py verify /path/to/ComfyUI`, optionally followed by a group name. The inventory compares the ComfyUI checkout with the reference release, checks the pinned Qwen node revision and distinguishes missing files from checksum mismatches.
+
+The manifest pins asset bytes and source revisions. A fresh GPU render still needs qualification with the installed Python packages and GPU driver. Record the active environment with `python -m pip freeze` before upgrading and restore from the deployment's environment snapshot if rollback is needed.
 
 ### Voice cloning and voice design
 
-[server/install_tts.sh](../server/install_tts.sh) installs or updates the ComfyUI-Qwen-TTS node pack, installs its requirements in the detected ComfyUI Python environment, and downloads the tokenizer, voice-cloning Base models and VoiceDesign model.
+[server/install_tts.sh](../server/install_tts.sh) installs the pinned ComfyUI-Qwen-TTS node pack, installs its requirements in the detected ComfyUI Python environment, and downloads the tokenizer, voice-cloning Base models and VoiceDesign model.
 
 On the ComfyUI server:
 
@@ -164,7 +166,7 @@ The cloning model setting supports 0.6B and 1.7B. VoiceDesign uses its separate 
 The app includes the `wan22_s2v_14b_fp8` starter. You do not have to upload an API workflow when that built-in starter is compatible with your server.
 
 1. Manually update ComfyUI through your deployment's normal process so the native S2V nodes are available.
-2. Copy [server/install_lipsync.sh](../server/install_lipsync.sh) to the server.
+2. Copy the complete Anime Studio `server` directory to the server.
 3. Run it against the correct ComfyUI directory:
 
 ```bash
