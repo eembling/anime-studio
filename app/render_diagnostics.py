@@ -3,6 +3,10 @@
 def diagnose(job):
     text=(job.get('error') or '').lower();remote=bool(job.get('prompt_id'))
     retry='Reconnect render' if remote else 'Retry same inputs'
+    if 'submission unconfirmed' in text:
+        return {'category':'connection','title':'ComfyUI submission needs confirmation',
+                'guidance':'Reconnect checks the original server queue and history. If the job cannot be found, inspect the server before explicitly repeating the captured render.',
+                'action':'servers','retry_label':'Reconnect render'}
     if not text:return None
     if any(x in text for x in ('out of memory','cuda oom','allocation failed','mps backend out of memory','vram grow failed','vram allocation failed')):
         if 'cliptextencode' in text or 'text encoder' in text:

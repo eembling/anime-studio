@@ -50,7 +50,7 @@ class Finishing:
         }
 
     def save_generated_sound(self, job, audio_files):
-        from anime_studio import ffmpeg
+        from anime_studio import ffmpeg, record_import_file
         from soundtrack import probe
         from render_queue import models_for_job
         if len(audio_files) != 1:
@@ -61,6 +61,7 @@ class Finishing:
         folder = st.data/'sound-library'
         folder.mkdir(exist_ok=True)
         target = folder/(ident+'.wav')
+        record_import_file(target)
         try:
             ffmpeg(['-i', str(audio_files[0]), '-map', '0:a:0', '-ar', '48000', '-c:a', 'pcm_s24le', str(target)])
             duration, streams = probe(target)
