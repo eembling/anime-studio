@@ -348,30 +348,47 @@ class Production:
     def revision(self, body):
         api, st = self.api_type(self.st), self.st
         current = st.ordered_shots()
-        token = digest(current)
-        from script_dialogue import script_blocks
-        blocks = script_blocks(body.get('script', ''))
-        def canonical(text):
-            return re.sub(r'^([^:]+):', lambda m: m.group(1).strip().casefold() + ':', text, count=1)
-        def oldkey(s):
-            return (s['scene'], canonical(s['dialogue'] if s['dialogue'] else s['motion_prompt'] or s['keyframe_prompt']))
+        from script_dialogue import apply_script_block, prepare_script_cast, script_blocks, script_preview_token
+        text = body.get('script', '')
+        token = script_preview_token(st, text)
+        blocks = script_blocks(text, st.default_duration())
+        sources = {shot['id']:json.loads(shot.get('script_source') or '{}') for shot in current}
+
+        def canonical(value):
+            value = re.sub(r'^([^:\n]+):', lambda m: m[1].strip().casefold() + ':', value, flags=re.M)
+            return value.strip().rstrip('.')
+
+        def oldkey(shot):
+            source = sources[shot['id']]
+            value = source.get('text') or shot['dialogue'] or shot['motion_prompt'] or shot['keyframe_prompt']
+            return (source.get('scene', shot['scene']), canonical(value))
+
+        def change_for(shot, block):
+            source = sources[shot['id']]
+            return 'changed' if source and any(source.get(key) != block[key] for key in block) else 'unchanged'
         matcher = difflib.SequenceMatcher(None, [oldkey(s) for s in current], [(b['scene'], canonical(b['text'])) for b in blocks], autojunk=False)
         rows = []
         for tag, i, j, a, z in matcher.get_opcodes():
             for offset, block in enumerate(blocks[a:z]):
                 old = current[i + offset] if i + offset < j else None
-                rows.append(dict(block, index=a + offset, shot_id=old['id'] if old else None, change='unchanged' if tag == 'equal' else 'changed' if old else 'added'))
-        # Reordered unchanged passages keep their original shot IDs even across diff insert/delete blocks.
-        claimed = {r['shot_id'] for r in rows if r['change'] == 'unchanged'}
+                rows.append(dict(block, index=a + offset, shot_id=old['id'] if old else None, change=change_for(old, block) if tag == 'equal' else 'changed' if old else 'added'))
+        # Reordered matches keep shot IDs even across insert/delete blocks.
+        current_by_id = {shot['id']: shot for shot in current}
+        matches = {shot_id: oldkey(shot) for shot_id, shot in current_by_id.items()}
+        def row_key(row):
+            return row['scene'], canonical(row['text'])
+
+        claimed = {row['shot_id'] for row in rows if matches.get(row['shot_id']) == row_key(row)}
         for row in rows:
-            if row['change'] == 'unchanged':
+            key = row_key(row)
+            if matches.get(row['shot_id']) == key:
                 continue
-            exact = next((shot for shot in current if shot['id'] not in claimed and oldkey(shot) == (row['scene'], canonical(row['text']))), None)
+            exact = next((shot_id for shot_id, match in matches.items() if shot_id not in claimed and match == key), None)
             if exact:
-                row.update(shot_id=exact['id'], change='unchanged')
-                claimed.add(exact['id'])
+                row.update(shot_id=exact, change=change_for(current_by_id[exact], blocks[row['index']]))
+                claimed.add(exact)
         for row in rows:
-            if row['change'] != 'unchanged' and row['shot_id'] in claimed:
+            if row['shot_id'] in claimed and matches[row['shot_id']] != row_key(row):
                 row.update(shot_id=None, change='added')
         used = {r['shot_id'] for r in rows}
         removed = [{'id': s['id'], 'scene': s['scene'], 'text': oldkey(s)[1]} for s in current if s['id'] not in used]
@@ -390,39 +407,25 @@ class Production:
         if set(remove) & set(targets) or any(i not in {s['id'] for s in current} for i in remove):
             raise RuntimeError('Invalid removal selection.')
         seq, changed = [], 0
-        for selection in selections:
-            block = blocks[int(selection['index'])]
-            sid = selection.get('shot_id')
-            if not selection.get('apply'):
-                if sid:
-                    seq.append(int(sid))
-                continue
-            names = {a['name'].lower(): a['id'] for a in st.db.q('SELECT id,name FROM assets')}
-            for entry in block['entries']:
-                if entry['speaker'].lower() not in names:
-                    names[entry['speaker'].lower()] = api.asset_save({'name':entry['speaker'].title(),'kind':'character'})['id']
-            cast = [v for k, v in names.items() if re.search(r'\b' + re.escape(k) + r'\b', block['text'], re.I)]
-            values = {'scene': block['scene'], 'kind': block['kind'], 'asset_ids': cast}
-            if block['speaker']:
-                values['dialogue'] = block['text']
-                if not sid:
-                    values['keyframe_prompt'] = block['speaker'].title() + ' speaking, medium close-up'
-            else:
-                values.update(keyframe_prompt=block['text'], motion_prompt=block['text'], dialogue='')
-            if sid:
-                values['id'] = int(sid)
-            saved = api.shot_save(values)
-            if block['entries']:
-                shot = st.db.one('SELECT * FROM shots WHERE id=?', (saved['id'],))
-                lines = st.shot_lines(shot)
-                for line,entry in zip(lines,block['entries']):
-                    if entry['direction']:line['direction']=entry['direction']
-                st.save_lines(shot['id'],lines)
-            seq.append(int(sid) if sid else saved['id']); changed += 1
-        if remove:
-            api.shot_delete({'ids': remove})
-        seq += [s['id'] for s in current if s['id'] not in seq and s['id'] not in remove]
-        for n, sid in enumerate(seq, 1):
-            st.db.x('UPDATE shots SET seq=? WHERE id=?', (n, sid))
-        api.settings({'settings': {'script': body.get('script', '')}})
+        with st.db.transaction():
+            if token != script_preview_token(st, text):
+                raise RuntimeError('Shots changed since this preview. Preview the revision again.')
+            st.editor.checkpoint('Before applying script revision')
+            prepare_script_cast(api, [blocks[int(row['index'])] for row in selections if row.get('apply')])
+            for selection in selections:
+                sid = int(selection['shot_id']) if selection.get('shot_id') else None
+                if not selection.get('apply'):
+                    if sid:
+                        seq.append(sid)
+                    continue
+                block = blocks[int(selection['index'])]
+                previous = st.db.one('SELECT * FROM shots WHERE id=?', (sid,)) if sid else None
+                seq.append(apply_script_block(api, block, previous))
+                changed += 1
+            if remove:
+                api.shot_delete({'ids': remove})
+            seq += [s['id'] for s in current if s['id'] not in seq and s['id'] not in remove]
+            for n, sid in enumerate(seq, 1):
+                st.db.x('UPDATE shots SET seq=? WHERE id=?', (n, sid))
+            api.settings({'settings': {'script': text}})
         return {'ok': True, 'changed': changed}

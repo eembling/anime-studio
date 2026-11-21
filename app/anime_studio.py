@@ -12,7 +12,8 @@ nodes built into ComfyUI, so nothing needs installing on the server - just model
 
     python3 anime_studio.py --port 8700 --data ~/Documents/AnimeStudio
 """
-from script_dialogue import dialogue_line, script_blocks, recovery_preview, recover_dialogue
+from script_dialogue import (apply_script_block, dialogue_line, prepare_script_cast, recovery_preview,
+                             recover_dialogue, script_blocks, script_preview_token)
 import hashlib
 from timeline import frames as timeline_frames, layout as timeline_layout
 import argparse
@@ -44,7 +45,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "2.24"
+VERSION = "2.25"
 for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebrew/bin")):
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
@@ -288,6 +289,7 @@ MIGRATIONS = [  # columns added after v2.0 - existing projects get them on start
     ("jobs", "voice_character_id", "INTEGER"), ("jobs", "voice_line_id", "TEXT"),
     ("jobs", "voice_autoselect", "INTEGER DEFAULT 0"), ("jobs", "voice_previous_audio", "TEXT"),
     ("shots", "keyframe_reference_order", "TEXT"),
+    ("shots", "script_source", "TEXT"),
     ("jobs", "submission_client_id", "TEXT"),
     ("jobs", "voice_ref_path", "TEXT"), ("jobs", "voice_ref_text", "TEXT"), ("jobs", "voice_direction", "TEXT"),
     ("takes", "input_signature", "TEXT"), ("voice_takes", "input_signature", "TEXT"),
@@ -2113,6 +2115,7 @@ class API:
         voice_recovery_rows,_ = recovery_preview(st)
         voice_suggestions={row["id"]:row["entries"] for row in voice_recovery_rows}
         for s in st.ordered_shots():
+            s.pop('script_source', None)
             lines = st.shot_lines(s)
             for l in lines:
                 l["url"] = self.media(l["audio"])
@@ -2281,38 +2284,27 @@ class API:
 
     # ---- script -> shot list
     def script_draft(self, b):
-        st = self.st
-        text = b.get("script", "")
-        st.db.x("INSERT OR REPLACE INTO settings(key,value) VALUES('script',?)", (text,))
-        names = {a["name"].strip().lower(): a["id"] for a in st.db.q("SELECT id,name FROM assets")}
-        mx = st.db.one("SELECT COALESCE(MAX(seq),0) m FROM shots")["m"]
-        scene, made = "", 0
-        blocks = script_blocks(text)
-        for block in blocks:
-            for entry in block['entries']:
-                who = entry['speaker']
-                if who.casefold() not in names:
-                    names[who.casefold()] = st.db.x("INSERT INTO assets(kind,name) VALUES('character',?)", (who.title() if who.isupper() else who,))
-        for block in blocks:
-            entries = block['entries']
-            if entries:
-                cast = list(dict.fromkeys(names[e['speaker'].casefold()] for e in entries))
-                words = sum(len(e['text'].split()) for e in entries)
-                duration = round(max(2.0, words / 2.6 + 0.8), 1)
-                vals = (mx+made+1, block['scene'], 'still', json.dumps(cast), block['speaker']+' speaking, medium close-up', '',
-                        'slow push-in', block['text'], duration)
-            else:
-                action = block['text']
-                cast = [i for n,i in names.items() if re.search(r'\b'+re.escape(n)+r'\b',action.casefold())][:3]
-                vals = (mx+made+1, block['scene'], 'motion', json.dumps(cast), action, action, '', '', st.default_duration())
-            sid = st.db.x("INSERT INTO shots(seq,scene,kind,asset_ids,keyframe_prompt,motion_prompt,camera,dialogue,duration) VALUES(?,?,?,?,?,?,?,?,?)",vals)
-            if entries:
-                lines = st.shot_lines(st.db.one('SELECT * FROM shots WHERE id=?',(sid,)))
-                for line,entry in zip(lines,entries):line['direction']=entry['direction']
-                st.save_lines(sid,lines)
-            made += 1
-        st.renumber()
-        return {"ok": True, "made": made}
+        st, text = self.st, b.get('script', '')
+        blocks = script_blocks(text, st.default_duration())
+        if b.get('preview'):
+            return {'ok': True, 'rows': blocks, 'token': script_preview_token(st, text)}
+        selected = b.get('indices')
+        if selected is not None:
+            if (not isinstance(selected, list) or any(type(index) is not int or not 0 <= index < len(blocks) for index in selected)
+                    or len(selected) != len(set(selected))):
+                raise ValueError('Select valid shots from the preview.')
+            blocks = [blocks[index] for index in sorted(selected)]
+        if not blocks:
+            return {'ok': True, 'made': 0}
+        with st.db.transaction():
+            if b.get('token') is not None and b['token'] != script_preview_token(st, text):
+                raise ValueError('The script or shot settings changed. Preview the shots again.')
+            st.editor.checkpoint('Before creating shots from script')
+            prepare_script_cast(self, blocks)
+            for block in blocks:
+                apply_script_block(self, block)
+            self.settings({'settings': {'script': text}})
+        return {'ok': True, 'made': len(blocks)}
 
     # ---- cast & locations
     def asset_save(self, b):
@@ -3017,7 +3009,7 @@ class API:
 EDIT_ROUTES = {'/api/settings','/api/shot/save','/api/shot/delete','/api/shot/move',
     '/api/take/delete','/api/approve','/api/asset/save','/api/asset/delete',
     '/api/voice_take/delete','/api/clip/delete','/api/line/set','/api/line/direction',
-    '/api/audio/cue/save','/api/audio/cue/delete','/api/script/revision'}
+    '/api/audio/cue/save','/api/audio/cue/delete'}
 ROUTES = {
     '/api/export':'export_action',
     '/api/finishing':'finishing_action',

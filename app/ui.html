@@ -361,15 +361,27 @@ button:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var
 
 <div id="connection-status" class="warnbox" role="status" hidden></div>
 <section class="tab" id="t-script">
+ <details class="wf"><summary>Write a shot brief</summary>
+ <p>Write a screenplay, or use a scene heading and a <b>Shot</b> heading for each planned shot. Keep your spoken lines under the character’s name.</p>
+ <pre style="white-space:pre-wrap">EXT. ROOFTOP — DUSK
+Shot 1 — Aiko waits
+Keyframe: Aiko grips the rain-soaked railing against a blue skyline.
+Action: She hears footsteps, then turns toward the door.
+Camera: Medium close-up, slow push-in.
+Direction: Her grip tightens before she turns.
+Lighting: Cool skylight with warm spill from the doorway.
+Duration: 4 seconds
+AIKO (under her breath): You came after all.</pre></details>
+
  <div class="script-wrap">
   <div class="page"><textarea id="script" spellcheck="true" aria-label="Script" placeholder="# Rooftop at dusk&#10;&#10;Aiko leans on the fence while the wind moves her scarf. The city glows below.&#10;&#10;AIKO: You came after all.&#10;&#10;KENJI: I always do."></textarea>
-   <div class="acts"><button class="btn" onclick="saveScript()">Save script</button><button class="btn pri" onclick="draftShots()">Create shots from script</button><button class="btn" onclick="previewRevision()">Review script revision</button><span style="flex:1"></span>
+   <div class="acts"><button class="btn" onclick="saveScript()">Save script</button><button class="btn pri" onclick="draftShots()">Plan shots from script</button><button class="btn" onclick="previewRevision()">Review script revision</button><span style="flex:1"></span>
    <button class="btn ghost" onclick="pick('.csv,.tsv,.txt',f=>post('/api/csv/import',{file:f}).then(r=>r.ok!==false&&toast('Imported '+r.imported+' shots')))">Import shot list</button><a class="btn ghost" href="/api/csv/export">Export shot list</a></div></div>
   <div class="notes"><h3>How the script becomes shots</h3>
-   <dl><dt>Blank lines separate blocks</dt><dd>Each block becomes one shot.</dd>
+   <dl><dt>Start a new beat with a blank line</dt><dd>Use a <code>Shot 1 — Name</code> heading to keep several actions and lines in the same shot.</dd>
    <dt><code># Scene name</code>, <code>INT.</code> or <code>EXT.</code></dt><dd>Starts a new scene.</dd>
-   <dt><code>AIKO: line</code> or <code>**AIKO:** line</code></dt><dd>A dialogue shot: a still keyframe with a slow push-in, the speaker as cast, length estimated from the words. Add lip sync later if it needs it.</dd>
-   <dt>Any other paragraph</dt><dd>A motion shot. The text becomes its keyframe and motion prompt, and cast is matched by name.</dd>
+   <dt><code>AIKO (whispering): line</code></dt><dd>Prepares a dialogue shot, links the speaker to Cast, and estimates time for the line. Use <code>(O.S.)</code> or <code>(V.O.)</code> for speech outside the frame.</dd>
+   <dt>Describe the first frame and the action</dt><dd>Use <code>Keyframe</code> for the starting image, <code>Action</code> for movement, and <code>Direction</code> and <code>Camera</code> for performance and framing. Review every field before adding shots.</dd>
    <dt>Spreadsheet instead?</dt><dd>Import a CSV with <code>seq, scene, kind, cast, keyframe_prompt, motion_prompt, camera, dialogue, duration, retime, ref_prev, end_next, notes</code>. Cast names are separated by <code>;</code>.</dd></dl></div>
  </div>
 </section>
@@ -483,7 +495,7 @@ const STAGES=['sheet','keyframe','animate','continue','lipsync','upscale','voice
 const TITLES={effects:['Sound Effects','Import and audition sounds. Copy an effect to place it on the Studio timeline.'],studio:['Studio','Edit the episode, manage history and deliver finished work.'],production:['Production','Preview pacing, check servers, and prepare one scene at a time.'],script:['Script','Write or paste the episode, then turn it into shots.'],cast:['Cast','Characters and locations with their reference sheets.'],voices:['Voices','Generate every line in its character’s voice, choose the best take, and play scenes back.'],shots:['Shots','Keyframe, animate and finish each shot.'],queue:['Render queue','Everything sent to ComfyUI, newest first.'],assemble:['Assemble','Put the episode together and export it for Resolve.'],settings:['Settings','Servers, workflows and project defaults.']};
 const jsq=s=>esc(JSON.stringify((s??'').toString()));   // JS string literal, safe inside an onclick="…" attribute
 const esc=s=>(s??'').toString().replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-async function post(u,b){try{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.ok===false&&j.error)toast(j.error,1);await load(true);return j}catch(e){toast('Can’t reach the Anime Studio server. Reopen the app.',1);return {ok:false}}}
+async function post(u,b,{refresh=true}={}){try{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.ok===false&&j.error)toast(j.error,1);if(refresh)await load(true);return j}catch(e){toast('Can’t reach the Anime Studio server. Reopen the app.',1);return {ok:false}}}
 function toast(m,bad){const t=$('#toast');t.textContent=m;t.className=bad?'bad':'';t.style.display='block';clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',5000)}
 function readFile(f){return new Promise(res=>{const r=new FileReader();r.onload=()=>res({name:f.name,data:r.result});r.readAsDataURL(f)})}
 function pick(accept,cb){const i=document.createElement('input');i.type='file';i.accept=accept;i.onchange=async()=>{if(i.files[0])cb(await readFile(i.files[0]))};i.click()}
@@ -571,15 +583,47 @@ function renderContent(force){if(!S)return;if(force)for(const k in SIG)delete SI
  $('#n-queue').innerHTML=act?`<span class="warn-t">${c.running||0} rendering, ${c.pending||0} waiting</span>`:'';
  $('#servers').innerHTML=S.instances.map(i=>`<div class="srv" title="${esc(i.health?i.health.info:'Checking')}"><span class="dot ${i.health?(i.health.ok?'ok':'bad'):''}"></span>${esc(i.name)}</div>`).join('')+(S.tools.ffmpeg?'':'<div class="srv err"><span class="dot bad"></span>ffmpeg missing</div>');
  $('#stats').innerHTML=tab==='shots'||tab==='assemble'?`<div class="stat"><b>${fmtT(total)}</b><span>runtime</span></div><div class="stat"><b>${S.shots.length}</b><span>shots</span></div><div class="stat"><b class="ok-t">${cn.done}</b><span>ready</span></div>`:'';
- if(tab==='script'&&(force||document.activeElement!==$('#script')))$('#script').value=S.settings.script||'';
+ if(tab==='script')renderScript();
  if(tab!=='studio'&&typeof stopEdit==='function')stopEdit();if(tab==='studio'){renderStudio();updateEffectPaste()}if(tab==='effects')renderEffectsPage();if(tab==='production')renderProduction();renderDesigned();if(tab==='cast')renderCast();if(tab==='voices'&&(force||!document.activeElement.closest('#t-voices input')))renderVoices();if(tab==='shots')renderShots();if(tab==='queue')renderQueue();if(tab==='assemble')renderAssemble();
  if(tab==='settings'&&(force||!document.activeElement.closest('#t-settings input,#t-settings textarea,#t-settings select')))renderSettings();if(typeof renderCreative==='function')renderCreative()}
 
 /* ---------- script ---------- */
-function saveScript(){post('/api/settings',{settings:{script:$('#script').value}}).then(()=>toast('Script saved'))}
-function draftShots(){if(!$('#script').value.trim())return toast('Write or paste a script first',1);
- if(!confirm('Add the shots from this script to the end of the shot list?'))return;
- post('/api/script/draft',{script:$('#script').value}).then(r=>{if(r.ok!==false){toast(`Created ${r.made} shots`);go('shots')}})}
+function renderScript(){
+ const editor=$('#script');
+ const workspace=JSON.stringify([S.project_id,S.settings.active_episode]);
+ const saved=S.settings.script||'';
+ if(editor.dataset.workspace!==workspace||editor.value===editor.defaultValue){
+  if(editor.value!==saved)editor.value=saved;
+  editor.dataset.workspace=workspace;
+ }
+ if(editor.defaultValue!==saved)editor.defaultValue=saved;
+}
+function saveScript(){post('/api/settings',{settings:{script:$('#script').value}}).then(r=>r.ok!==false&&toast('Script saved'))}
+async function draftShots(){
+ const script=$('#script').value;
+ if(!script.trim())return toast('Write or paste a script first',1);
+ const plan=await post('/api/script/draft',{script,preview:true},{refresh:false});
+ if(plan.ok===false)return;
+ if(!plan.rows.length)return toast('No shots found. Add an action paragraph or a speaker and dialogue.',1);
+ modal(`<div class="dlg-h"><h2>Review ${plan.rows.length} planned shots</h2></div>
+ <div class="dlg-b"><p>Checked shots will be added to the end of the shot list.</p>
+ ${plan.rows.map((shot,index)=>`<section class="wf">
+ <label class="check"><input type="checkbox" data-script-index="${index}" checked>
+ <b>${esc(shot.title||'Shot '+(index+1))}</b> · ${esc(shot.scene||'Unassigned scene')} · ${shot.duration} s</label>
+ ${scriptShotDetails(shot,index===0)}</section>`).join('')}</div>
+ <div class="dlg-f"><button class="btn" onclick="closeModal()">Cancel</button>
+ <button class="btn pri" id="add-planned-shots">Add selected shots</button></div>`);
+ $('#add-planned-shots').onclick=async event=>{
+  const button=event.currentTarget;
+  const indices=[...document.querySelectorAll('[data-script-index]:checked')].map(input=>+input.dataset.scriptIndex);
+  if(!indices.length)return toast('Select at least one shot.',1);
+  button.disabled=true;
+  try{
+   const result=await post('/api/script/draft',{script,token:plan.token,indices});
+   if(result.ok!==false){closeModal();toast(`Created ${result.made} shots`);go('shots')}
+  }finally{button.disabled=false}
+ };
+}
 
 /* ---------- cast ---------- */
 function renderCast(){return preserveMainScroll(renderCastContent)}
