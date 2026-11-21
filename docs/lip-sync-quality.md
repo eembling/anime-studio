@@ -59,3 +59,11 @@ Keep FP8 initially on a 12 GB GPU. This change does not install BF16, switch pro
 Use a short, clean, single-speaker line and a front-facing reference with a visible mouth. Compare source framing versus close-up, then compare 20 versus 30 steps with a fixed seed. Listen to consonants and inspect mouth closures, identity stability and the joins between continuations. Include a silent lead-in, a short final section and a line longer than one section.
 
 Automated checks cover graph wiring, immutable captures, model cadence, bounded motion video, audio/video muxing, candidate controls and failure states. Mock/FFmpeg tests do not establish generated visual quality. No live GPU generation is triggered by the test suite.
+
+## Visible speakers and off-screen dialogue
+
+For a shot with voiced lines from multiple characters, assign the visible speakers in Animate with voice. Choose one speaker for Wan S2V. Use the dialogue crop to frame that character, or break a conversation into single-speaker shots.
+
+A two-speaker recipe needs distinct Load Audio nodes titled `AUDIO_IN` and `AUDIO_IN_2`, both on the visual conditioning path. Match Visible speaker 1 and 2 to the recipe's mask order. With native InfiniteTalk, use two-speaker mode and connect both masks in ComfyUI before exporting the API workflow. For a custom visual conditioning node, tag it `AUDIO_CONDITIONING` and expose its audio inputs through supported fields such as `audio_1` and `audio_2`. Run the recipe in ComfyUI with the intended model patch before assigning it in Studio.
+
+Studio captures each speaker's selected lines and inserts silence during the other turns. The generated clip receives the full shot mix, including off-screen dialogue. Whole-shot audio uploads need isolated dialogue if the recipe should animate a single voice. Studio cannot separate overlapping speakers in an uploaded mix.

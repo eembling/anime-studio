@@ -93,8 +93,10 @@ def audio_inputs(workflow):
         node = workflow[key]
         if node['class_type'] == 'WanSoundImageToVideo':
             fields = ('audio_encoder_output',)
+        elif node['class_type'] == 'WanInfiniteTalkToVideo':
+            fields = ('audio_encoder_output_1', 'audio_encoder_output_2', 'mode.audio_encoder_output_2')
         elif (node.get('_meta') or {}).get('title', '').strip().upper() == 'AUDIO_CONDITIONING':
-            fields = ('audio', 'audio_encoder_output', 'audio_features', 'audio_embeds')
+            fields = ('audio', 'audio_encoder_output', 'audio_features', 'audio_embeds', 'audio_1', 'audio_2')
         else:
             continue
         for field in fields:
@@ -103,7 +105,7 @@ def audio_inputs(workflow):
                 conditioning.append(str(value[0]))
     return [key for key in sorted(ancestors(conditioning))
             if workflow[key]['class_type'] == 'LoadAudio' or
-            (workflow[key].get('_meta') or {}).get('title', '').strip().upper() == 'AUDIO_IN']
+            (workflow[key].get('_meta') or {}).get('title', '').strip().upper() in ('AUDIO_IN', 'AUDIO_IN_2')]
 
 
 def gpu_s2v(row):
@@ -184,13 +186,48 @@ def condition(st, job, key, params, row, folder, pinned):
     pinned['fps'] = fps
     # Keep the raw voice separately for the saved clip; upload only a bounded,
     # aligned WAV to the audio-driven model, including any intentional lead-in.
-    from anime_studio import ffmpeg
-    source = st.creative.path(pinned['path'])
-    from anime_studio import media_seconds
-    filters=voice_filter(pinned,media_seconds(source),duration)
-    target = folder/'model-dialogue.wav'
-    ffmpeg(['-i',str(source),'-af',filters,'-ar','48000','-ac','2',str(target)])
-    params.setdefault('files',{})['audio'] = target
+    from anime_studio import detect_slots, ffmpeg, media_seconds
+    shot = st.db.one('SELECT * FROM shots WHERE id=?', (job['shot_id'],))
+    lines = st.shot_lines(shot) if shot['audio_mode'] != 'file' else []
+    speakers = json.loads(shot.get('voice_speakers') or '[]') if lines else []
+    voiced = [line for line in lines if line.get('audio')]
+    identities = {line.get('character_id') or line['speaker'].casefold() for line in voiced}
+    if len(identities) > 1 and not speakers:
+        raise ValueError('Choose the visible speakers in Animate with voice. Other voices stay in the soundtrack.')
+    if any(not any(line.get('character_id') == speaker for line in voiced) for speaker in speakers):
+        raise ValueError('Every visible speaker needs a selected character voice on this shot.')
+    graph = json.loads(actual['json'])
+    slots = detect_slots(graph, selected)
+    second = slots.get('audio_in_2', [])
+    if len(speakers) == 2 and (len(second) != 1 or len(slots['audio_in']) != 1):
+        raise ValueError('This workflow drives one speaker. Choose a single visible speaker, split the shot, or use a two-speaker recipe with connected AUDIO_IN and AUDIO_IN_2.')
+    if second and len(speakers) != 2:
+        raise ValueError('Assign two visible speakers to this workflow, in the recipe’s mask order.')
+    if len(speakers) == 2:
+        for node in graph.values():
+            if node['class_type'] == 'WanInfiniteTalkToVideo':
+                inputs = node['inputs']
+                if inputs.get('mode') != 'two_speakers' or any(
+                    not isinstance(inputs.get(mask, inputs.get('mode.'+mask)), list) for mask in ('mask_1','mask_2')
+                ):
+                    raise ValueError('Set InfiniteTalk to two speakers and connect both speaker masks.')
+
+    sources = [st.creative.path(pinned['path'])]
+    if speakers:
+        sources = []
+        for index, speaker in enumerate(speakers, 1):
+            stem = folder/f'speaker-{index}.wav'
+            st.render_dialogue_track(shot['id'], lines, stem, speaker=speaker)
+            sources.append(stem)
+        params['speaker_tracks'] = [
+            {'character_id': speaker, 'line_ids': [line['line_id'] for line in voiced if line['character_id'] == speaker]}
+            for speaker in speakers
+        ]
+    for index, source in enumerate(sources):
+        filters = voice_filter(pinned, media_seconds(source), duration)
+        target = folder/f'model-dialogue-{index+1}.wav'
+        ffmpeg(['-i',str(source),'-af',filters,'-ar','48000','-ac','2',str(target)])
+        params.setdefault('files',{})['audio' if index == 0 else 'audio2'] = target
     from voice_video import prepare
     actual, quality_note = prepare(st, job, params, actual, folder)
     note = ' '.join(filter(None, (note, quality_note)))

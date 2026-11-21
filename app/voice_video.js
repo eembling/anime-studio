@@ -3,6 +3,10 @@ function voiceVideo(sid,mode='keyframe'){
  const reference=shot.takes.find(t=>t.id===shot.keyframe_take),existing=mode==='existing';let busy=false,dirty=false;
  const savedCrop=shot.voice_crop?JSON.parse(shot.voice_crop):{x:50,y:100/9,size:55};
  const cropFields=[['x','Horizontal position',0,100],['y','Vertical position',0,100],['size','Crop size',25,90]];
+ const speakers=[...new Map((shot.lines||[]).filter(line=>line.audio&&line.character_id)
+  .map(line=>[line.character_id,line.character_name||line.speaker])).entries()];
+ const selectedSpeakers=JSON.parse(shot.voice_speakers||'[]');
+ const speakerOptions=selected=>speakers.map(([id,name])=>`<option value="${id}" ${id===selected?'selected':''}>${esc(name)}</option>`).join('');
  const assigned=(S.creative?.assignments||[]).some(a=>a.shot_id===sid&&a.stage===(existing||shot.kind==='still'?'lipsync':'animate'));
  const sampling=!existing&&!assigned&&S.workflows?.lipsync?.name==='wan22_s2v_14b_fp8';
  modal(`<div class="dlg-h"><h2>${existing?'Lip-sync existing clip':'Animate with voice'}</h2></div><div class="dlg-b">
@@ -10,6 +14,10 @@ function voiceVideo(sid,mode='keyframe'){
  ${!existing?`<p class="muted">Small faces in wide shots limit readable mouth movement. Choose a close-up keyframe for best control, or review the crop below.</p><label class="f" for="voice-framing">Dialogue framing</label><select id="voice-framing"><option value="source">Keep reference framing</option><option value="closeup" ${shot.voice_framing==='closeup'?'selected':''}>Dialogue close-up</option></select>${reference?`<div style="position:relative;max-width:480px;margin:12px 0"><img src="${esc(reference.url)}" alt="Selected dialogue reference" style="display:block;width:100%"><div id="voice-crop" aria-label="Close-up crop boundary" style="position:absolute;left:22.5%;top:5%;width:55%;height:55%;border:2px solid currentColor;display:none;pointer-events:none;box-sizing:border-box"></div></div><div id="voice-crop-controls" class="g3">
  ${cropFields.map(([key,label,min,max])=>`<label for="voice-crop-${key}">${label}<input id="voice-crop-${key}" type="range" min="${min}" max="${max}" step="0.1" value="${savedCrop[key]}"></label>`).join('')}
  </div>`:''}`:''}
+ ${shot.audio_mode!=='file'&&speakers.length>1?`<div class="g2">
+ <label>Visible speaker 1<select id="voice-speaker-1"><option value="">Choose character</option>${speakerOptions(selectedSpeakers[0])}</select></label>
+ <label>Visible speaker 2<select id="voice-speaker-2"><option value="">One visible speaker</option>${speakerOptions(selectedSpeakers[1])}</select></label></div>
+ <p class="muted">Match the speaker order to the masks in your two-speaker workflow. Other voices stay in the clip as off-screen dialogue.</p>`:''}
  <label class="f" for="voice-performance">Speaking direction</label><textarea id="voice-performance">${esc(shot.voice_direction??'The character speaks naturally with clear mouth articulation, restrained head movement, and consistent facial features.')}</textarea>
  <label class="f" for="voice-quality">Sampling preset</label><select id="voice-quality" ${sampling?'':'disabled'}>${sampling?`<option value="standard">Standard · 20 steps</option><option value="fine" ${shot.voice_quality==='fine'?'selected':''}>Experimental · 30 steps</option><option value="compare">Compare 20 and 30 steps · same seed</option>`:'<option value="standard">Use workflow sampling settings</option>'}</select>
  <p class="muted">Sampling presets apply to the built-in Wan S2V workflow. Versioned recipes and imported workflows retain their own sampler settings. Higher steps take longer and do not guarantee better articulation. FP8 and 16 fps are retained.</p>
@@ -27,14 +35,17 @@ function voiceVideo(sid,mode='keyframe'){
   Object.assign(overlay.style,{left:(x*(1-size/100))+'%',top:(y*(1-size/100))+'%',width:size+'%',height:size+'%'});
  };
  syncCrop();
- const fields=['voice-framing','voice-performance','voice-quality','voice-seed'];
+ const fields=['voice-framing','voice-performance','voice-quality','voice-seed','voice-speaker-1','voice-speaker-2'];
  if(reference&&!existing)fields.push(...cropFields.map(([key])=>'voice-crop-'+key));
  for(const id of fields)if($('#'+id))$('#'+id).oninput=()=>{dirty=true;syncCrop()};
  $('#voice-generate').onclick=async()=>{
   const seed=+$('#voice-seed').value;if(!Number.isSafeInteger(seed)||seed<1||seed>281474976710656){$('#voice-status').textContent='Enter a whole-number seed between 1 and 281474976710656.';return}
   const quality=sampling?$('#voice-quality').value:'standard',qualities=quality==='compare'?['standard','fine']:[quality];busy=true;$('#voice-generate').disabled=true;
   try{
-   const saved=await post('/api/shot/save',{id:sid,lip_sync_mode:mode,voice_framing:framing?.value||shot.voice_framing||'source',...(reference&&!existing&&framing.value==='closeup'?{voice_crop:cropValues()}:{}),voice_direction:$('#voice-performance').value,voice_quality:quality==='compare'?'standard':quality});
+   const speakerFields=speakers.length>1&&shot.audio_mode!=='file';
+   const targets=speakerFields?[+$('#voice-speaker-1').value,+$('#voice-speaker-2').value]:[];
+   if(speakerFields&&!targets[0]){$('#voice-status').textContent='Choose the visible speaking character.';return}
+   const saved=await post('/api/shot/save',{id:sid,lip_sync_mode:mode,...(speakerFields?{voice_speakers:targets.filter(Boolean)}:{}),voice_framing:framing?.value||shot.voice_framing||'source',...(reference&&!existing&&framing.value==='closeup'?{voice_crop:cropValues()}:{}),voice_direction:$('#voice-performance').value,voice_quality:quality==='compare'?'standard':quality});
    if(saved.ok===false){$('#voice-status').textContent=saved.error||'Could not save voice settings.';return}dirty=false;
    let queued=0;for(const preset of qualities){const result=await post('/api/generate',{stage:existing||shot.kind==='still'?'lipsync':'animate',shot_ids:[sid],takes:1,seed,voice_quality:preset,require_voice_animation:true});queued+=result.queued||0;if(result.ok===false||!result.queued){$('#voice-status').textContent=(queued?`${queued} candidate already queued. `:'')+(result.error||result.skipped?.join(' ')||'No candidate queued.');return}}
    busy=false;closeModal();toast(`Queued ${queued} voice animation candidate${queued===1?'':'s'}${quality==='compare'?' using the same seed; compare the resulting takes.':'.'}`);
