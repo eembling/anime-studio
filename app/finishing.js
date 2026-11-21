@@ -114,7 +114,7 @@ async function renderFinishedScene(scene=null){
 }
 let SOUND_FILTER='', SOUND_CATEGORY='';
 function stopLibraryAudio(){
- document.querySelectorAll('#sound-results audio').forEach(audio=>audio.pause());
+ document.querySelectorAll('#sound-results audio, #effect-results audio').forEach(audio=>audio.pause());
 }
 function openSoundLibrary(){
  stopLibraryAudio();
@@ -130,22 +130,67 @@ function renderSoundLibrary(){
  const query=SOUND_FILTER.trim().toLowerCase();
  const rows=S.finishing.library.filter(sound=>(!SOUND_CATEGORY||sound.category===SOUND_CATEGORY)&&
   [sound.name,sound.tags,sound.category].some(value=>value.toLowerCase().includes(query)));
- $('#sound-results').innerHTML=rows.map(sound=>`<article class="sound-item"><h3>${esc(sound.name)}</h3><p>${esc(sound.category)} · ${esc(sound.tags)} · ${sound.seconds.toFixed(2)}s</p>
+ $('#sound-results').innerHTML=soundCards(rows,false);
+}
+function soundCards(rows,forStudio){
+ return rows.map(sound=>`<article class="sound-item"><h3>${esc(sound.name)}</h3><p>${esc(sound.category)} · ${esc(sound.tags)} · ${sound.seconds.toFixed(2)}s</p>
  <audio controls preload="none" src="${esc(sound.url)}"></audio>
  ${sound.generation?`<details><summary>Generation details · seed ${sound.generation.seed}</summary><p>${esc(sound.generation.prompt)}</p></details>`:''}
- <div class="toolbar"><button class="btn" onclick="useLibrarySound('${sound.id}')">Add to episode</button><button class="btn" onclick="editLibrarySound('${sound.id}')">Edit tags</button>
+ <div class="toolbar"><button class="btn" onclick="${forStudio?'copySoundEffect':'useLibrarySound'}('${sound.id}')">${forStudio?'Copy effect':'Add to episode'}</button><button class="btn" onclick="editLibrarySound('${sound.id}')">Edit tags</button>
  ${sound.generation?.kind==='music'&&(S.audio_cues||[]).some(cue=>cue.kind==='music')?`<button class="btn" onclick="replaceMusicCue('${sound.id}')">Replace music cue</button>`:''}
  <button class="btn danger" onclick="deleteLibrarySound('${sound.id}')">Remove from library</button></div></article>`).join('')||'<p>No matching sounds.</p>';
+}
+let copiedEffectId=null, pastingEffect=false;
+function copiedEffect(){
+ return S.finishing?.library?.find(sound=>sound.id===copiedEffectId);
+}
+function copySoundEffect(id){
+ copiedEffectId=id;
+ const sound=copiedEffect();
+ if(sound)toast('Copied '+sound.name+'. Paste it at the Studio playhead.');
+}
+function renderEffectsPage(){
+ const library=(S.finishing?.library||[]).filter(sound=>sound.generation?.kind!=='music');
+ const query=$('#effect-search').value.trim().toLowerCase();
+ if(same('effect-results',[library,query]))return;
+ const rows=library.filter(sound=>[sound.name,sound.category,sound.tags].some(value=>String(value||'').toLowerCase().includes(query)));
+ $('#effect-results').innerHTML=library.length?soundCards(rows,true):'<p>Import your first sound effect to use it on the timeline.</p>';
+}
+function updateEffectPaste(){
+ const sound=copiedEffect();
+ $('#paste-effect').disabled=!sound||pastingEffect||!S.shots.length;
+ $('#effect-selection').textContent=sound?'Copied: '+sound.name:'';
+}
+function handleEffectPaste(event){
+ if(tab!=='studio'||!S||!copiedEffect()||$('#modal').classList.contains('on'))return;
+ if(event.target.closest?.('input:not([type=range]),textarea,select,[contenteditable=true]'))return;
+ event.preventDefault();
+ if(!event.repeat)pasteSoundEffect();
+}
+async function pasteSoundEffect(){
+ const sound=copiedEffect();
+ if(!sound||pastingEffect||!S.shots.length)return;
+ const start=Math.round(EDIT_TIME*editFps())/editFps();
+ if(!shotAt(start))return toast('Move the playhead inside the episode to paste an effect.',true);
+ stopEdit();pastingEffect=true;updateEffectPaste();
+ try{
+  const result=await post('/api/audio/cue/save',{library_id:sound.id,name:sound.name,kind:'sfx',start});
+  if(result.ok!==false)toast(sound.name+' placed at '+editTimecode(start));
+ }finally{pastingEffect=false;updateEffectPaste()}
+}
+function returnToSoundLibrary(){
+ if(tab==='effects'){closeModal();renderEffectsPage()}
+ else openSoundLibrary();
 }
 function editLibrarySound(id){
  stopLibraryAudio();
  const sound=S.finishing.library.find(sound=>sound.id===id)||{};
  modal(`<div class="dlg-h"><h2>${id?'Edit sound':'Import sound'}</h2></div><div class="dlg-b">
- <label class="f" for="sound-file">Audio file${id?' (optional replacement)':''}</label><input id="sound-file" type="file" accept="audio/*">
+ <label class="f" for="sound-file">Audio file${id?' (optional replacement)':''}</label><input id="sound-file" type="file" accept="audio/*" onchange="if(!$('#sound-name').value.trim()&&this.files[0])$('#sound-name').value=this.files[0].name.replace(/\\.[^.]+$/,'')">
  <label class="f" for="sound-name">Name</label><input id="sound-name" value="${esc(sound.name||'')}">
  <label class="f" for="sound-kind">Category</label><input id="sound-kind" value="${esc(sound.category||'Effects')}">
  <label class="f" for="sound-tags">Tags, separated by commas</label><input id="sound-tags" value="${esc(sound.tags||'')}">
- </div><div class="dlg-f"><button class="btn" onclick="openSoundLibrary()">Back</button><button class="btn pri" onclick="saveLibrarySound('${id||''}',this)">Save sound</button></div>`);
+ </div><div class="dlg-f"><button class="btn" onclick="returnToSoundLibrary()">Back</button><button class="btn pri" onclick="saveLibrarySound('${id||''}',this)">Save sound</button></div>`);
 }
 async function saveLibrarySound(id,button){
  button.disabled=true;
@@ -153,13 +198,13 @@ async function saveLibrarySound(id,button){
   const file=$('#sound-file').files[0];
   const result=await finishingPost('library_save',{id:id||null,name:$('#sound-name').value,category:$('#sound-kind').value,
    tags:$('#sound-tags').value,...(file?{file:await readFile(file)}:{})});
-  if(result.ok!==false)openSoundLibrary();
+  if(result.ok!==false)returnToSoundLibrary();
  }finally{button.disabled=false}
 }
 async function deleteLibrarySound(id){
  if(!confirm('Remove this sound from the library? Existing cues retain their audio.'))return;
  const result=await finishingPost('library_delete',{id});
- if(result.ok!==false)renderSoundLibrary();
+ if(result.ok!==false){if(tab==='effects')renderEffectsPage();else renderSoundLibrary()}
 }
 function useLibrarySound(id){
  stopLibraryAudio();
