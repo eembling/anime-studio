@@ -452,6 +452,10 @@ class Studio:
         from shot_previews import ShotPreviews
         self.shot_previews=ShotPreviews(self)
 
+    def job_compatible(self, job, instance, cached_only=False):
+        owner = self.snapshots if job.get('snapshot_json') else self.creative
+        return owner.compatible(job, instance, cached_only=cached_only)
+
     def tools(self, refresh=False):
         if self.tools_cache is None or refresh:
             self.tools_cache = {"ffmpeg": shutil.which("ffmpeg"), "say": shutil.which("say"), "rife": str(find_rife() or "") or None,
@@ -1078,17 +1082,12 @@ class Worker(threading.Thread):
                 continue
             candidates = resumable + db.q(f"SELECT * FROM jobs WHERE status='pending' AND stage IN ({','.join('?' * len(roles))}) AND prompt_id IS NULL ORDER BY priority DESC,id", roles)
             job = None
+            from render_queue import eligible_server
             for candidate in candidates:
-                if candidate.get("prompt_id") and candidate.get("instance_id") != inst["id"]:
-                    continue
-                shot = db.one('SELECT end_next FROM shots WHERE id=?', (candidate['shot_id'],))
-                if not candidate.get('prompt_id') and candidate.get('snapshot_json'):
-                    if not self.st.snapshots.compatible(candidate,inst):continue
-                elif not candidate.get('prompt_id') and candidate.get('creative_json'):
-                    if not self.st.creative.compatible(candidate, inst): continue
-                elif not candidate.get('prompt_id') and readiness is not None and not readiness.get(candidate['stage'], {}).get('ready'):
-                    continue
-                if not candidate.get('snapshot_json') and not candidate.get('creative_json') and not candidate.get('prompt_id') and candidate['stage'] in ('animate', 'continue') and shot and shot['end_next'] and not (readiness or {}).get('animate_flf', {}).get('ready'):
+                if not candidate.get('prompt_id') and not (candidate.get('snapshot_json') or candidate.get('creative_json')):
+                    shot = db.one('SELECT end_next FROM shots WHERE id=?', (candidate['shot_id'],))
+                    candidate['requires_flf'] = bool(candidate['stage'] in ('animate', 'continue') and shot and shot['end_next'])
+                if not eligible_server(candidate, inst, self.st.health[inst['id']], readiness, self.st.job_compatible):
                     continue
                 job = candidate
                 break
@@ -1705,12 +1704,13 @@ class API:
                     "OR id IN (SELECT id FROM jobs WHERE status IN ('error','cancelled') ORDER BY finished DESC,id DESC LIMIT 100) ORDER BY id DESC")
         counts = {r["status"]: r["n"] for r in db.q("SELECT status, COUNT(*) n FROM jobs GROUP BY status")}
         from render_queue import queue_snapshot
-        history = db.q("SELECT stage,draft,instance_id,'done' AS status,started,finished FROM render_timing_history ORDER BY finished DESC LIMIT 1000")
+        history = db.q("SELECT stage,draft,instance_id,'done' AS status,started,finished,workload FROM render_timing_history ORDER BY finished DESC LIMIT 1000")
         readiness = {server['id']: server['stages'] for server in st.production.readiness.get('servers', [])}
         end_next = {shot['id'] for shot in shots if shot['end_next']}
         for job in jobs:
             job['requires_flf'] = job['stage'] in ('animate','continue') and job['shot_id'] in end_next
-        queue = queue_snapshot(jobs, history, insts, st.health, readiness)
+        queue = queue_snapshot(jobs, history, insts, st.health, readiness,
+                               compatibility=lambda job, inst: st.job_compatible(job, inst, cached_only=True))
         production = st.production.snapshot(shots)
         timing = {row['id']: row for row in timeline_layout(shots, int(st.settings()['out_fps']))}
         for shot in shots:

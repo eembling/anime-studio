@@ -1,4 +1,5 @@
 """Render queue grouping and clearly labelled estimates from successful job history."""
+import hashlib
 import math
 import json
 import statistics
@@ -55,17 +56,52 @@ def prompt_graph(entry, prompt_id):
     return None
 
 
+def render_workload(job):
+    if 'workload' in job:
+        return job['workload']
+    if not job.get('snapshot_json'):
+        return None
+    snapshot = json.loads(job['snapshot_json'])
+    params = snapshot.get('params', {})
+    data = [snapshot.get('key'), snapshot.get('workflow'), snapshot.get('controls'),
+            params.get('width'), params.get('height'), params.get('length'),
+            params.get('voice_video', {}).get('steps')]
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
+
 def remember_timings(db):
     # Keep learned timings even when the user clears completed jobs; job IDs may be reused.
     db.x("""CREATE TABLE IF NOT EXISTS render_timing_history(
         job_id INTEGER, stage TEXT, draft INTEGER, instance_id INTEGER, started REAL, finished REAL,
         UNIQUE(job_id,finished))""")
-    db.x("INSERT OR IGNORE INTO render_timing_history(job_id,stage,draft,instance_id,started,finished) "
-         "SELECT id,stage,draft,instance_id,started,finished FROM jobs WHERE status='done' AND finished>started")
+    if 'workload' not in {row['name'] for row in db.q('PRAGMA table_info(render_timing_history)')}:
+        db.x('ALTER TABLE render_timing_history ADD COLUMN workload TEXT')
+    for job in db.q("SELECT j.* FROM jobs j WHERE j.status='done' AND j.finished>j.started AND NOT EXISTS "
+                    "(SELECT 1 FROM render_timing_history h WHERE h.job_id=j.id AND h.finished=j.finished)"):
+        db.x("INSERT OR IGNORE INTO render_timing_history(job_id,stage,draft,instance_id,started,finished,workload) "
+             "VALUES(?,?,?,?,?,?,?)",
+             (job['id'], job['stage'], job['draft'], job['instance_id'], job['started'], job['finished'],
+              render_workload(job)))
     db.x('DELETE FROM render_timing_history WHERE rowid NOT IN (SELECT rowid FROM render_timing_history ORDER BY finished DESC LIMIT 2000)')
 
 
-def queue_snapshot(jobs, history, instances, health=None, readiness=None, now=None):
+def eligible_server(job, instance, health, readiness, compatibility=None):
+    if not instance.get('enabled') or health.get('ok') is False:
+        return False
+    if job.get('prompt_id'):
+        return job.get('instance_id') == instance['id']
+    if job['stage'] not in {role.strip() for role in (instance.get('roles') or '').split(',')}:
+        return False
+    if job.get('snapshot_json') or job.get('creative_json'):
+        return compatibility(job, instance) if compatibility else None
+    if readiness is not None and not readiness.get(job['stage'], {}).get('ready'):
+        return False
+    if job.get('requires_flf') and not (readiness or {}).get('animate_flf', {}).get('ready'):
+        return False
+    return True
+
+
+def queue_snapshot(jobs, history, instances, health=None, readiness=None, now=None, compatibility=None):
     now = time.time() if now is None else now
     health, readiness = health or {}, readiness or {}
     servers = {i['id']: i for i in instances if i.get('enabled')}
@@ -78,12 +114,14 @@ def queue_snapshot(jobs, history, instances, health=None, readiness=None, now=No
         if duration <= 0 or not math.isfinite(duration):
             continue
         stage, draft, sid = job['stage'], int(job.get('draft') or 0), job.get('instance_id')
-        for key in ((stage, draft, sid), (stage, draft, None)) if sid is not None else ((stage, draft, None),):
+        workload = render_workload(job)
+        for server in (sid, None) if sid is not None else (None,):
+            key = (stage, draft, server, workload)
             samples.setdefault(key, []).append((job['finished'], duration))
 
     def typical(job, sid=None):
-        key = (job['stage'], int(job.get('draft') or 0), sid)
-        rows = samples.get(key) or samples.get((key[0], key[1], None)) or []
+        key = (job['stage'], int(job.get('draft') or 0), sid, render_workload(job))
+        rows = samples.get(key) or samples.get((key[0], key[1], None, key[3])) or []
         if not rows:
             return None, 0
         rows = sorted(rows, reverse=True)[:20]
@@ -124,16 +162,12 @@ def queue_snapshot(jobs, history, instances, health=None, readiness=None, now=No
     for rank, job in enumerate(queued, 1):
         job['queue_position'] = rank
         job['estimated_progress'] = 0
-        eligible = []
-        for sid, server in servers.items():
-            if job['stage'] not in server.get('roles', '').split(',') or health.get(sid, {}).get('ok') is False:
-                continue
-            checked = readiness.get(sid)
-            if not job.get('snapshot_json') and checked is not None and (not checked.get(job['stage'], {}).get('ready') or (job.get('requires_flf') and not checked.get('animate_flf', {}).get('ready'))):
-                continue
-            eligible.append(sid)
+        checks = {sid: eligible_server(job, server, health.get(sid, {}), readiness.get(sid), compatibility)
+                  for sid, server in servers.items()}
+        eligible = [sid for sid, ready in checks.items() if ready]
         if not eligible:
-            job['wait_reason'] = 'No enabled, available server supports this stage. Check server readiness.'
+            job['wait_reason'] = ('Waiting for the captured workflow compatibility check.' if None in checks.values()
+                                  else 'No enabled, available server supports this stage. Check server readiness.')
             continue
         sid = min(eligible, key=lambda s: availability[s])
         job['estimated_server_id'] = sid
