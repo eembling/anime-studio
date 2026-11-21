@@ -1899,7 +1899,7 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
 # ======================================================================================
 CSV_FIELDS = ["seq", "scene", "kind", "cast", "keyframe_prompt", "motion_prompt", "camera", "dialogue", "duration",
               "retime", "ref_prev", "end_next", "notes"]
-SHOT_FIELDS = {"scene", "kind", "keyframe_prompt", "motion_prompt", "camera", "dialogue", "duration", "retime", "ref_prev", "end_next", "notes", "voice_quality", "voice_framing", "voice_direction", "lip_sync_mode"}
+SHOT_FIELDS = {"scene", "kind", "keyframe_prompt", "motion_prompt", "camera", "dialogue", "duration", "retime", "ref_prev", "end_next", "notes", "voice_quality", "voice_framing", "voice_crop", "voice_direction", "lip_sync_mode"}
 TRUE = (1, True, "1", "true", "yes", "y", "on")
 
 
