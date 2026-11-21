@@ -23,6 +23,7 @@ import csv
 import glob
 import io
 import json
+from contextlib import contextmanager
 import math
 import mimetypes
 import os
@@ -218,6 +219,7 @@ DEFAULT_SETTINGS = {
     "line_gap": "0.3",
     "tts_model": "1.7B", "tts_language": "Auto",
     "job_timeout": "3600",
+    "video_min_free_vram": "0",
     "music": "",
 }
 DEFAULT_INSTANCES = [("ComfyUI 172.16.2.70", "http://172.16.2.70:8188", ",".join(JOB_STAGES))]
@@ -268,6 +270,32 @@ class ProjectDatabaseAccessError(RuntimeError):
     """macOS/file authorization denied access to the existing project, not a corrupt database."""
 
 
+_IMPORT_CONTEXT = threading.local()
+
+
+def record_import_file(path):
+    manifest = getattr(_IMPORT_CONTEXT, 'manifest', None)
+    if manifest is not None:
+        with manifest.open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps(str(path)) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+
+def reconcile_import(studio, manifest):
+    committed = studio.db.one('SELECT token FROM render_imports WHERE token=?', (manifest.stem,))
+    if not committed:
+        for line in manifest.read_text(encoding='utf-8').splitlines():
+            try:
+                path = Path(json.loads(line)).resolve()
+            except (ValueError, TypeError):
+                continue
+            if studio.data in path.parents:
+                path.unlink(missing_ok=True)
+    manifest.unlink()
+    studio.db.x('DELETE FROM render_imports WHERE token=?', (manifest.stem,))
+
+
 class DB:
     def __init__(self, path):
         try:
@@ -283,6 +311,7 @@ class DB:
                     "Do not delete or replace studio.db. Original SQLite error: " + str(exc)) from exc
             raise
         self.progress_writes = 0
+        self._transaction_active = False
         self.conn.row_factory = sqlite3.Row
         self.lock = threading.RLock()
         with self.lock:
@@ -294,6 +323,18 @@ class DB:
                     if (table, col) == ("shots", "audio_mode"):   # audio from before v2.2 was one file per shot
                         self.conn.execute("UPDATE shots SET audio_mode='file' WHERE audio IS NOT NULL")
             self.conn.commit()
+
+    @contextmanager
+    def transaction(self):
+        with self.lock:
+            if self._transaction_active:
+                raise RuntimeError('Nested database transaction')
+            self._transaction_active = True
+            try:
+                with self.conn:
+                    yield
+            finally:
+                self._transaction_active = False
 
     def q(self, sql, args=()):
         with self.lock:
@@ -307,14 +348,16 @@ class DB:
         """Execute and return lastrowid (for INSERTs)."""
         with self.lock:
             cur = self.conn.execute(sql, args)
-            self.conn.commit()
+            if not self._transaction_active:
+                self.conn.commit()
             return cur.lastrowid
 
     def u(self, sql, args=()):
         """Execute and return the number of changed rows."""
         with self.lock:
             cur = self.conn.execute(sql, args)
-            self.conn.commit()
+            if not self._transaction_active:
+                self.conn.commit()
             return cur.rowcount
 
 
@@ -390,6 +433,10 @@ class Studio:
             (self.data / sub).mkdir(parents=True, exist_ok=True)
         self.db = DB(self.data / "studio.db")
         self.state_session = uuid.uuid4().hex
+        self.db.x("CREATE TABLE IF NOT EXISTS render_imports(token TEXT PRIMARY KEY)")
+        if not export_worker:
+            for manifest in (self.data / "jobs").glob("*/*.render-import"):
+                reconcile_import(self, manifest)
         self.db.x("CREATE TABLE IF NOT EXISTS render_project (id INTEGER PRIMARY KEY CHECK (id=1), namespace TEXT NOT NULL)")
         self.db.x("INSERT OR IGNORE INTO render_project VALUES(1,?)", (uuid.uuid4().hex,))
         self.render_namespace = self.db.one("SELECT namespace FROM render_project WHERE id=1")["namespace"]
@@ -459,6 +506,10 @@ class Studio:
             self.exports=ExportJobs(self)
         from shot_previews import ShotPreviews
         self.shot_previews=ShotPreviews(self)
+
+    def job_compatible(self, job, instance, cached_only=False):
+        owner = self.snapshots if job.get('snapshot_json') else self.creative
+        return owner.compatible(job, instance, cached_only=cached_only)
 
     def tools(self, refresh=False):
         if self.tools_cache is None or refresh:
@@ -633,6 +684,7 @@ class Studio:
                 graph += f"[{i}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay={delay}:all=1,apad=pad_dur={pad}[a{i}];"
             graph += "".join(f"[a{i}]" for i in range(len(lines))) + f"concat=n={len(lines)}:v=0:a=1[out]"
             dest = self.data / "voices" / f"shot{shot_id}_mix_{uuid.uuid4().hex[:6]}.wav"
+            record_import_file(dest)
             ffmpeg(ins + ["-filter_complex", graph, "-map", "[out]", "-ar", "48000", str(dest)])
             secs, dur = media_seconds(dest), float(s["duration"])
             if fit and secs + 0.4 > dur:
@@ -1006,14 +1058,38 @@ def build_workflow(template, key, p):
     return wf
 
 
-def collect_outputs(entry):
-    files, outs = [], entry.get("outputs", {})
-    for k in sorted(outs, key=_nid):
-        for v in outs[k].values():
-            if isinstance(v, list):
-                files += [f for f in v if isinstance(f, dict) and f.get("filename")]
-    real = [f for f in files if f.get("type", "output") == "output"]
-    return real or files
+def collect_outputs(entry, stage, graph=None):
+    """Pick a declared final saver or require one unambiguous output group."""
+    audio = stage in ('voice', 'voice_design')
+    still = stage in ('keyframe', 'sheet')
+    extensions = AUD_EXT if audio else IMG_EXT if still else IMG_EXT | VID_EXT
+    groups = {}
+    for key, outputs in entry.get('outputs', {}).items():
+        files = [file for items in outputs.values() if isinstance(items, list)
+                 for file in items if isinstance(file, dict) and file.get('type', 'output') == 'output'
+                 and Path(file.get('filename') or '').suffix.lower() in extensions]
+        if files:
+            groups[key] = files
+    if graph:
+        tagged = _tagged(graph, 'FINAL_OUTPUT')
+        if not tagged:
+            tagged = _tagged(graph, 'SAVE')
+        if len(tagged) > 1:
+            raise ValueError('Tag exactly one workflow saver FINAL_OUTPUT.')
+        if tagged:
+            groups = {key: files for key, files in groups.items() if key in tagged}
+    if not groups:
+        raise ValueError('Workflow saved no final output of the expected media type.')
+    if len(groups) > 1:
+        raise ValueError('Several nodes saved matching outputs. Tag the intended saver FINAL_OUTPUT and queue a new render.')
+    files = next(iter(groups.values()))
+    if not audio and not still:
+        videos = [file for file in files if Path(file['filename']).suffix.lower() in VID_EXT]
+        if len(videos) > 1:
+            raise ValueError('The final saver returned multiple videos. Configure it to save one video or one frame sequence.')
+        if videos:
+            return videos
+    return files
 
 
 # ======================================================================================
@@ -1150,6 +1226,19 @@ def list_voices():
 # ======================================================================================
 # Job worker: one job at a time per ComfyUI server, matched by role
 # ======================================================================================
+def video_gpu_wait(job, health, minimum_gib, now):
+    if job['stage'] not in ('animate', 'continue', 'lipsync', 'upscale') or job.get('prompt_id') or job.get('submission_client_id') or not minimum_gib:
+        return ''
+    free = [device['vram_free'] for device in health.get('hardware', [])
+            if isinstance(device.get('vram_free'), (int, float))]
+    if not free or now - health.get('t', 0) > 30:
+        return 'Waiting for current free GPU memory telemetry.'
+    available = max(free) / 2**30
+    if available < minimum_gib:
+        return f'Waiting for GPU memory: {available:.1f} GiB free, {minimum_gib:g} GiB configured.'
+    return ''
+
+
 def find_remote_submission(base, client_id):
     """Match the unique client ID recorded in ComfyUI's queue/history metadata."""
     queued = http_json("GET", base + "/queue", timeout=8)
@@ -1194,7 +1283,7 @@ class Worker(threading.Thread):
             for d in j.get("devices", []):
                 nm = re.sub(r"^cuda:\d+\s*", "", d.get("name", "?")).split(" : ")[0]
                 parts.append(f"{nm} - {d.get('vram_free', 0) / 2**30:.1f} of {d.get('vram_total', 0) / 2**30:.1f} GB free")
-            self.st.health[inst["id"]] = {"ok": True, "info": "; ".join(parts), "t": time.time(), "hardware":[{k:d.get(k) for k in ("name","vram_total")} for d in j.get("devices",[])]}
+            self.st.health[inst["id"]] = {"ok": True, "info": "; ".join(parts), "t": time.time(), "hardware":[{k:d.get(k) for k in ("name","vram_total","vram_free")} for d in j.get("devices",[])]}
         except Exception as e:
             self.st.health[inst["id"]] = {"ok": False, "info": str(e)[:200], "t": time.time()}
 
@@ -1206,6 +1295,8 @@ class Worker(threading.Thread):
         db = self.st.db
         if db.one("SELECT id FROM jobs WHERE status='pending' LIMIT 1"):
             self.st.production.inspect()
+        minimum_gib = float(self.st.settings().get("video_min_free_vram") or 0)
+        memory_waits = {}
         busy = {r["instance_id"] for r in db.q("SELECT instance_id FROM jobs WHERE status='running'")}
         for inst in db.q("SELECT * FROM instances WHERE enabled=1"):
             if inst["id"] in busy or not self.st.health.get(inst["id"], {}).get("ok"):
@@ -1218,17 +1309,16 @@ class Worker(threading.Thread):
                 continue
             candidates = resumable + db.q(f"SELECT * FROM jobs WHERE status='pending' AND stage IN ({','.join('?' * len(roles))}) AND prompt_id IS NULL AND submission_client_id IS NULL ORDER BY priority DESC,id", roles)
             job = None
+            from render_queue import eligible_server
             for candidate in candidates:
-                if candidate.get("prompt_id") and candidate.get("instance_id") != inst["id"]:
+                if not (candidate.get('prompt_id') or candidate.get('submission_client_id')) and not (candidate.get('snapshot_json') or candidate.get('creative_json')):
+                    shot = db.one('SELECT end_next FROM shots WHERE id=?', (candidate['shot_id'],))
+                    candidate['requires_flf'] = bool(candidate['stage'] in ('animate', 'continue') and shot and shot['end_next'])
+                if not eligible_server(candidate, inst, self.st.health[inst['id']], readiness, self.st.job_compatible):
                     continue
-                shot = db.one('SELECT end_next FROM shots WHERE id=?', (candidate['shot_id'],))
-                if not (candidate.get('prompt_id') or candidate.get('submission_client_id')) and candidate.get('snapshot_json'):
-                    if not self.st.snapshots.compatible(candidate,inst):continue
-                elif not (candidate.get('prompt_id') or candidate.get('submission_client_id')) and candidate.get('creative_json'):
-                    if not self.st.creative.compatible(candidate, inst): continue
-                elif not (candidate.get('prompt_id') or candidate.get('submission_client_id')) and readiness is not None and not readiness.get(candidate['stage'], {}).get('ready'):
-                    continue
-                if not candidate.get('snapshot_json') and not candidate.get('creative_json') and not (candidate.get('prompt_id') or candidate.get('submission_client_id')) and candidate['stage'] in ('animate', 'continue') and shot and shot['end_next'] and not (readiness or {}).get('animate_flf', {}).get('ready'):
+                wait = video_gpu_wait(candidate, self.st.health[inst['id']], minimum_gib, time.time())
+                if wait:
+                    memory_waits[candidate['id']] = wait
                     continue
                 job = candidate
                 break
@@ -1236,6 +1326,17 @@ class Worker(threading.Thread):
                             "WHERE id=? AND status='pending'", (inst["id"], job.get("started") or time.time(), job["id"])):
                 busy.add(inst["id"])
                 threading.Thread(target=self.execute, args=(job["id"], inst), daemon=True).start()
+
+        for job in db.q("SELECT id,progress FROM jobs WHERE status='pending'"):
+            wait = memory_waits.get(job['id'])
+            if wait:
+                self._progress_wait(job, wait)
+            elif (job.get('progress') or '').startswith(('Waiting for GPU memory:', 'Waiting for current free GPU')):
+                self._progress_wait(job, 'waiting')
+
+    def _progress_wait(self, job, value):
+        if job['progress'] != value:
+            self.st.db.x("UPDATE jobs SET progress=? WHERE id=? AND status='pending'", (value, job['id']))
 
     def _progress(self, job_id, text):
         db = self.st.db
@@ -1383,7 +1484,7 @@ class Worker(threading.Thread):
     def execute(self, job_id, inst):
         st, db = self.st, self.st.db
         base, pid = inst["url"].rstrip("/"), None
-        events = None
+        events, submitted_graph = None, None
         try:
             job = db.one("SELECT * FROM jobs WHERE id=?", (job_id,))
             st.creative.started(job,inst)
@@ -1446,6 +1547,7 @@ class Worker(threading.Thread):
                                for slot, path in p["files"].items()}
                 wf = build_workflow(tpl, key, p)
                 wf = st.snapshots.patch(job,wf) if job.get("snapshot_json") else st.creative.patch_controls(job, wf)
+                submitted_graph = wf
                 # After this write a restart must reconcile, even if it happened just before send.
                 if not db.u("UPDATE jobs SET submission_client_id=? WHERE id=? AND status='running'", (client_id, job_id)):
                     return
@@ -1495,9 +1597,11 @@ class Worker(threading.Thread):
                 db.x("UPDATE jobs SET prompt_id=NULL,submission_client_id=NULL WHERE id=?", (job_id,))
                 msgs = [m for m in entry["status"].get("messages", []) if m and m[0] == "execution_error"]
                 raise RuntimeError("ComfyUI error: " + json.dumps(msgs[-1][1] if msgs else entry["status"])[:2500])
-            files = collect_outputs(entry)
-            if not files:
-                raise RuntimeError("Workflow finished but saved no files.")
+            graph = submitted_graph or prompt_graph(entry.get('prompt'), pid)
+            if graph is None:
+                captured = st.snapshots.workflow(job) or st.creative.workflow(job)
+                graph = json.loads(captured['json']) if captured else None
+            files = collect_outputs(entry, job['stage'], graph)
             self._progress(job_id, f"downloading {len(files)} file(s)")
             out_dir = st.data / "jobs" / str(job_id)
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -1511,10 +1615,19 @@ class Worker(threading.Thread):
             with st.production.lock:
                 if (db.one("SELECT status FROM jobs WHERE id=?", (job_id,)) or {}).get("status") != "running":
                     return
-                if not st.creative.finish_special(job, key, local):
-                    self.finish(job, key, local)
-            db.x("UPDATE jobs SET status='done', finished=?, progress='done' WHERE id=? AND status='running'", (time.time(), job_id))
-            st.creative.completed(db.one('SELECT * FROM jobs WHERE id=?', (job_id,)), 'done')
+                manifest = out_dir / (uuid.uuid4().hex + '.render-import')
+                manifest.touch()
+                _IMPORT_CONTEXT.manifest = manifest
+                try:
+                    with db.transaction():
+                        if not st.creative.finish_special(job, key, local):
+                            self.finish(job, key, local)
+                        db.x("UPDATE jobs SET status='done', finished=?, progress='done' WHERE id=?", (time.time(), job_id))
+                        st.creative.completed(db.one('SELECT * FROM jobs WHERE id=?', (job_id,)), 'done')
+                        db.x('INSERT INTO render_imports VALUES(?)', (manifest.stem,))
+                finally:
+                    _IMPORT_CONTEXT.manifest = None
+                    reconcile_import(st, manifest)
             from render_queue import remember_timings
             remember_timings(db)
             shutil.rmtree(out_dir, ignore_errors=True)
@@ -1559,6 +1672,7 @@ class Worker(threading.Thread):
             folder.mkdir(parents=True, exist_ok=True)
             safe = re.sub(r"[^A-Za-z0-9_-]+", "_", a["name"]).strip("_") or f"cast{a['id']}"
             dest = folder / f"{safe}_designed_{job['id']}_{output_id}.wav"
+            record_import_file(dest)
             ffmpeg(["-i", str(auds[0]), "-ar", "48000", str(dest)])
             has_ref = st.db.one("SELECT id FROM voice_clips WHERE asset_id=? AND is_ref=1", (a["id"],))
             st.db.x("INSERT INTO voice_clips(asset_id,path,name,transcript,seconds,is_ref,created) VALUES(?,?,?,?,?,?,?)",
@@ -1571,6 +1685,7 @@ class Worker(threading.Thread):
                 raise RuntimeError("The voice workflow saved no audio file.")
             (st.data / "voices" / "lines").mkdir(parents=True, exist_ok=True)
             dest = st.data / "voices" / "lines" / f"tts_j{job['id']}_{output_id}.wav"
+            record_import_file(dest)
             ffmpeg(["-i", str(auds[0]), "-ar", "48000", str(dest)])
             shot = st.db.one("SELECT * FROM shots WHERE id=?", (job["shot_id"],))
             if not shot:
@@ -1597,7 +1712,9 @@ class Worker(threading.Thread):
         if stage in ("sheet", "keyframe"):
             if job.get("creative_json") and not imgs: raise ValueError("The recipe saved no image candidate.")
             for i, f in enumerate(imgs or local):
+                ffmpeg(["-xerror", "-i", str(f), "-frames:v", "1", "-f", "null", "-"])
                 dest = folder / f"{stage}_j{job['id']}_{output_id}_{i}{f.suffix.lower()}"
+                record_import_file(dest)
                 shutil.move(str(f), dest)
                 made.append((dest, 0))
         else:
@@ -1610,11 +1727,13 @@ class Worker(threading.Thread):
             if vids:
                 validate_render_cadence(vids[0], fps)
                 dest = dest.with_suffix(vids[0].suffix.lower())
+                record_import_file(dest)
                 shutil.move(str(vids[0]), dest)
             else:
                 if not st.tools()["ffmpeg"]:
                     raise RuntimeError("ffmpeg is needed on this Mac to turn frames into video: brew install ffmpeg")
                 self._progress(job["id"], f"stitching {len(imgs)} frames at {fps} fps")
+                record_import_file(dest)
                 stitch_frames(imgs, fps, dest)
             from clip_audio import embed as embed_clip_audio
             dest = embed_clip_audio(st, job, dest)
@@ -1807,12 +1926,13 @@ class API:
                     "OR id IN (SELECT id FROM jobs WHERE status IN ('error','cancelled') ORDER BY finished DESC,id DESC LIMIT 100) ORDER BY id DESC")
         counts = {r["status"]: r["n"] for r in db.q("SELECT status, COUNT(*) n FROM jobs GROUP BY status")}
         from render_queue import queue_snapshot
-        history = db.q("SELECT stage,draft,instance_id,'done' AS status,started,finished FROM render_timing_history ORDER BY finished DESC LIMIT 1000")
+        history = db.q("SELECT stage,draft,instance_id,'done' AS status,started,finished,workload FROM render_timing_history ORDER BY finished DESC LIMIT 1000")
         readiness = {server['id']: server['stages'] for server in st.production.readiness.get('servers', [])}
         end_next = {shot['id'] for shot in db.q('SELECT id FROM shots WHERE end_next=1')}
         for job in jobs:
             job['requires_flf'] = job['stage'] in ('animate','continue') and job['shot_id'] in end_next
-        queue = queue_snapshot(jobs, history, insts, st.health, readiness)
+        queue = queue_snapshot(jobs, history, insts, st.health, readiness,
+                               compatibility=lambda job, inst: st.job_compatible(job, inst, cached_only=True))
         return {'jobs': jobs, 'job_counts': counts, 'render_queue': queue}
 
     def queue_poll(self):
@@ -1949,6 +2069,11 @@ class API:
     # ---- settings / servers / workflows / tools
     def settings(self, b):
         vals = dict(b.get("settings") or {})
+        if "video_min_free_vram" in vals:
+            headroom = float(vals["video_min_free_vram"])
+            if not math.isfinite(headroom) or headroom < 0:
+                raise ValueError("Minimum free GPU memory must be zero or greater.")
+            vals["video_min_free_vram"] = headroom
         if "tts_language" in vals:
             vals["tts_language"] = norm_choice(vals["tts_language"], TTS_LANGUAGES, "Auto")
         if "tts_model" in vals:

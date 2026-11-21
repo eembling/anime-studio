@@ -60,6 +60,23 @@ class QueueTests(unittest.TestCase):
         q=self.snap([job(3,'running',instance_id=1,started=1950)],history=history)
         self.assertIsNone(q['active'][0]['estimated_progress'])
 
+    def test_captured_workflow_uses_only_confirmed_servers_and_matching_samples(self):
+        import json
+        capture = json.dumps({'key': 'animate', 'params': {'length': 81}})
+        other = json.dumps({'key': 'animate', 'params': {'length': 25}})
+        history = [job(1, 'done', instance_id=1, started=100, finished=200, snapshot_json=capture),
+                   job(2, 'done', instance_id=2, started=100, finished=110, snapshot_json=other)]
+        pending = job(3, snapshot_json=capture)
+        instances = [self.server, dict(self.server, id=2)]
+        result = self.snap([pending], instances=instances, history=history,
+                           compatibility=lambda candidate, server: server['id'] == 1)['queued'][0]
+        self.assertEqual(result['estimated_server_id'], 1)
+        self.assertEqual(result['typical_seconds'], 100)
+        result = self.snap([pending], instances=instances, history=history,
+                           compatibility=lambda candidate, server: None)['queued'][0]
+        self.assertIsNone(result['estimated_server_id'])
+        self.assertIn('compatibility check', result['wait_reason'])
+
     def test_completed_is_100_but_failed_and_cancelled_stay_separate(self):
         q=self.snap([job(1,'done',instance_id=1,started=900,finished=1000),job(2,'error'),job(3,'cancelled')])
         self.assertEqual(q['completed'][0]['estimated_progress'],100)
