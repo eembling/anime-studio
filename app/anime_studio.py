@@ -42,7 +42,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "2.22"
+VERSION = "2.23"
 for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebrew/bin")):
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
@@ -370,8 +370,11 @@ def find_rife():
     hit = shutil.which("rife-ncnn-vulkan")
     if hit:
         return Path(hit)
-    for pat in ("~/Applications/rife-ncnn-vulkan*/rife-ncnn-vulkan", "~/Downloads/rife-ncnn-vulkan*/rife-ncnn-vulkan",
-                "~/Documents/AnimeStudio/tools/rife-ncnn-vulkan*/rife-ncnn-vulkan", "/Applications/rife-ncnn-vulkan*/rife-ncnn-vulkan"):
+    # Startup must not enumerate protected Downloads/Documents folders: a
+    # macOS privacy check can block before the HTTP server starts serving.
+    for pat in ("~/Applications/rife-ncnn-vulkan*/rife-ncnn-vulkan",
+                "~/Library/Application Support/AnimeStudio/tools/rife-ncnn-vulkan*/rife-ncnn-vulkan",
+                "/Applications/rife-ncnn-vulkan*/rife-ncnn-vulkan"):
         for p in glob.glob(os.path.expanduser(pat)):
             if os.access(p, os.X_OK):
                 return Path(p)
@@ -384,6 +387,8 @@ class Studio:
         for sub in ("uploads", "shots", "cast", "jobs", "exports", "voices", "cache"):
             (self.data / sub).mkdir(parents=True, exist_ok=True)
         self.db = DB(self.data / "studio.db")
+        from voice_video import initialize as initialize_voice_video
+        initialize_voice_video(self.db)
         for k, v in DEFAULT_SETTINGS.items():
             self.db.x("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
         if not export_worker:
@@ -752,6 +757,8 @@ def detect_slots(wf, key):
         from clip_audio import audio_inputs
         connected_audio=set(audio_inputs(wf))
         m["audio_in"] = [k for k in _tagged(wf, "AUDIO_IN") if k in connected_audio] or [k for k in keys if k in connected_audio and cls(k)=="LoadAudio"]
+        from voice_video import connected_video
+        m["video_in"] = connected_video(wf)
         m["size"] = _tagged(wf, "SIZE") or [k for k in keys if {"width", "height", "length"} <= set(ins(k))][:1]
     elif key == "upscale":
         m["video_in"] = (_tagged(wf, "VIDEO_IN") or [k for k in keys if cls(k) in VIDEO_LOADERS])[:1]
@@ -776,7 +783,7 @@ def check_workflow(wf, key):
     m, p = detect_slots(wf, key), []
     if key in ("keyframe", "animate", "animate_flf", "lipsync") and not m["prompt"]:
         p.append("No prompt node (title a text-encode node PROMPT).")
-    if key in ("animate", "animate_flf", "lipsync") and not m["start_image"]:
+    if key in ("animate", "animate_flf", "lipsync") and not m["start_image"] and not (key == 'lipsync' and m['video_in']):
         p.append("No start image (title a Load Image node START_IMAGE).")
     if key == "animate_flf" and not m["end_image"]:
         p.append("No end image (title a Load Image node END_IMAGE).")
@@ -1194,16 +1201,26 @@ class Worker(threading.Thread):
             return "animate_flf"
 
         if stage in ("animate", "lipsync"):
-            if not kf:
+            existing = stage == 'lipsync' and shot.get('lip_sync_mode') == 'existing'
+            if not kf and not existing:
                 raise RuntimeError("Shot has no approved keyframe.")
             key = stage
-            p["files"] = {"start": kf}
+            p["files"] = {"start": kf} if kf else {}
             if stage == "animate":
                 key = end_on_next(float(shot["duration"]), key)
             if stage == "lipsync":
                 if not shot["audio"] or not st.abs(shot["audio"]).exists():
                     raise RuntimeError("Lip sync needs dialogue audio on the shot.")
                 p["files"]["audio"] = st.abs(shot["audio"])
+                if existing:
+                    from voice_video import connected_video, lip_workflow
+                    row = lip_workflow(st, shot, job)
+                    if not row or not connected_video(json.loads(row['json'])):
+                        raise ValueError('Lip-syncing an existing clip requires a tested video-conditioned workflow with a connected VIDEO_IN and AUDIO_IN. The built-in Wan S2V starter generates a new clip from a keyframe.')
+                    clip = st.take_path(shot['clip_take'])
+                    if not clip:
+                        raise ValueError('Choose the existing clip to lip-sync first.')
+                    p['files']['video'] = clip
             p["prompt"], p["negative"] = text, S.get("video_negative", "")
             p["width"], p["height"] = size
             p["length"] = st.frames_for(shot["duration"], key, draft)
@@ -1596,7 +1613,7 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
 # ======================================================================================
 CSV_FIELDS = ["seq", "scene", "kind", "cast", "keyframe_prompt", "motion_prompt", "camera", "dialogue", "duration",
               "retime", "ref_prev", "end_next", "notes"]
-SHOT_FIELDS = {"scene", "kind", "keyframe_prompt", "motion_prompt", "camera", "dialogue", "duration", "retime", "ref_prev", "end_next", "notes"}
+SHOT_FIELDS = {"scene", "kind", "keyframe_prompt", "motion_prompt", "camera", "dialogue", "duration", "retime", "ref_prev", "end_next", "notes", "voice_quality", "voice_framing", "voice_direction", "lip_sync_mode"}
 TRUE = (1, True, "1", "true", "yes", "y", "on")
 
 
@@ -1610,8 +1627,11 @@ class API:
     def state(self, _=None):
         st, db = self.st, self.st.db
         takes, asset_takes, active, asset_active = {}, {}, {}, {}
+        voice_video = {j['id']:json.loads(j['snapshot_json']).get('params',{}).get('voice_video') for j in db.q("SELECT id,snapshot_json FROM jobs WHERE snapshot_json IS NOT NULL")}
         for t in db.q("SELECT * FROM takes ORDER BY id"):
             t["url"] = self.media(t["path"])
+            if voice_video.get(t.get('job_id')):
+                t['voice_video'] = voice_video[t['job_id']]
             if t["stage"] == "sheet":
                 asset_takes.setdefault(t["asset_id"], []).append(t)
             else:
@@ -1867,6 +1887,8 @@ class API:
     def shot_save(self, b):
         st = self.st
         vals = {k: b[k] for k in SHOT_FIELDS if k in b}
+        from voice_video import validate as validate_voice_video
+        validate_voice_video(vals)
         if "duration" in vals:
             vals["duration"] = max(0.5, float(vals["duration"] or st.default_duration()))
         elif not b.get("id"):
@@ -2138,12 +2160,19 @@ class API:
     # ---- generation / takes / jobs
     def generate(self, b):
         with self.st.production.lock:
+            from voice_video import validate as validate_voice_video
+            validate_voice_video({k: b[k] for k in ('voice_quality',) if k in b})
             before=self.st.db.one('SELECT COALESCE(MAX(id),0) n FROM jobs')['n']
             try:
                 result=self._generate_request(b)
                 for job in self.st.db.q("SELECT * FROM jobs WHERE id>? AND status='pending'",(before,)):
+                    if b.get('voice_quality'):
+                        self.st.db.x('UPDATE jobs SET voice_quality=? WHERE id=?',(b['voice_quality'],job['id']))
+                        job['voice_quality'] = b['voice_quality']
                     self.st.snapshots.capture(job)
                 audio_jobs=[self.st.snapshots.meta(job) for job in self.st.db.q("SELECT * FROM jobs WHERE id>? AND status='pending'",(before,)) if self.st.snapshots.meta(job).get('clip_audio')]
+                if b.get('require_voice_animation') and (len(audio_jobs) != result.get('queued',0) or any(not meta.get('audio_conditioned') for meta in audio_jobs)):
+                    raise ValueError('Voice-driven animation is unavailable. Configure a ready audio-conditioned workflow before generating this performance.')
                 result['audio_conditioned']=sum(bool(meta.get('audio_conditioned')) for meta in audio_jobs)
                 result['audio_included']=len(audio_jobs)
                 result['audio_notes']=list(dict.fromkeys(meta['audio_note'] for meta in audio_jobs if meta.get('audio_note')))
@@ -2257,14 +2286,16 @@ class API:
             if stage != "keyframe" and s["kind"] == "still" and stage != "lipsync" and not (stage == "upscale" and s["clip_take"]):
                 skipped.append(f"{label}: still shot")
                 continue
-            if stage in ("animate", "lipsync") and not st.take_path(s["keyframe_take"]):
+            if stage in ("animate", "lipsync") and not st.take_path(s["keyframe_take"]) and not (stage == 'lipsync' and s.get('lip_sync_mode') == 'existing'):
                 skipped.append(f"{label}: no approved keyframe")
                 continue
             if stage == 'lipsync':
-                row = st.wf_row('lipsync')
+                from voice_video import lip_workflow
+                row = b.get('_lip_workflow') or lip_workflow(st, s)
                 native_s2v = row and any(n.get('class_type') == 'WanSoundImageToVideo' for n in json.loads(row['json']).values())
-                if native_s2v and float(s['duration']) > st.max_frames('lipsync') / st.wf_fps('lipsync'):
-                    skipped.append(f"{label}: S2V preset supports at most {st.max_frames('lipsync') / st.wf_fps('lipsync'):.2f}s. Split the shot or upload a longer S2V workflow.")
+                capacity = float(row['max_frames']) / float(row['fps']) if row and row['fps'] else 0
+                if native_s2v and float(s['duration']) > capacity:
+                    skipped.append(f"{label}: S2V preset supports at most {capacity:.2f}s. Split the shot or upload a longer S2V workflow.")
                     continue
             if stage == "lipsync" and not s["audio"]:
                 skipped.append(f"{label}: no dialogue audio")
@@ -2503,7 +2534,7 @@ def make_handler(st, api):
                     return self._send(200, INDEX_HTML, "text/html; charset=utf-8")
                 if path == '/shot_voices.js':
                     return self._send(200, (Path(__file__).resolve().parent / 'shot_voices.js').read_text(), 'text/javascript; charset=utf-8')
-                if path in ('/studio_audio.js','/settings.js','/settings.css','/continuations.js','/workspace.js','/workspace.css','/finishing.js','/finishing.css','/shot_playback.js','/mix_processor.js','/audio_mix.json'):
+                if path in ('/voice_video.js','/studio_audio.js','/settings.js','/settings.css','/continuations.js','/workspace.js','/workspace.css','/finishing.js','/finishing.css','/shot_playback.js','/mix_processor.js','/audio_mix.json'):
                     return self._send(200, (Path(__file__).resolve().parent / path[1:]).read_text(), 'application/json' if path.endswith('.json') else 'text/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8')
                 if path == '/creative.css':
                     return self._send(200, (Path(__file__).resolve().parent / 'creative.css').read_text(), 'text/css; charset=utf-8')

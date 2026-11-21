@@ -26,7 +26,7 @@ class JobSnapshots:
             from clip_audio import capture as capture_clip_audio, condition as condition_clip_audio, gpu_s2v
             pinned=capture_clip_audio(st,job,folder,row.get('fps'))
             key,params,actual,conditioned,note=condition_clip_audio(st,job,key,params,row,folder,pinned)
-            switched=actual!=gpu_s2v(row);row=actual
+            switched=actual!=gpu_s2v(row) and not st.creative.meta(job).get('recipe',{}).get('id');row=actual
             for slot,source in list(params.get('files',{}).items()):
                 source=st.creative.path(st.rel(source));dest=folder/(slot.replace('/','_')+source.suffix)
                 shutil.copyfile(source,dest);params['files'][slot]=st.rel(dest)

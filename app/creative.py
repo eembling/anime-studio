@@ -478,6 +478,10 @@ class CreativeStudio:
         # Validate everything before creating any of this request's jobs.
         for shot, recipe, values in prepared:
             request = dict(body, shot_ids=[shot['id']], _creative_batch=bool(body.get('batch')))
+            lip_workflow = None
+            if recipe and stage == 'lipsync':
+                lip_workflow = {'json':json.dumps(self.patched_template(recipe, values)), 'fps':recipe['fps'], 'max_frames':recipe['max_frames']}
+                request['_lip_workflow'] = lip_workflow
             if body.get('lines'):
                 request['lines'] = [t for t in body['lines'] if t['shot_id'] == shot['id']]
                 request['shot_ids'] = []
@@ -489,7 +493,7 @@ class CreativeStudio:
                     job['seed'] = int(number(body['seed'], 1, 2**48)) + len(made)
                     self.st.db.x('UPDATE jobs SET seed=? WHERE id=?', (job['seed'], job['id']))
                 if recipe:
-                    key, p = Worker(self.st).compose(job)
+                    key, p = Worker(self.st).compose(dict(job, _lip_workflow=lip_workflow) if lip_workflow else job)
                     self.freeze(job, recipe, values, key, p, manual=bool(body.get('manual')), batch=body.get('batch'))
                 made.append(job['id'])
         return {'ok': True, 'queued': len(made), 'job_ids': made, 'skipped': skipped}

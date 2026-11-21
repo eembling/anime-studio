@@ -205,9 +205,9 @@ Restart **every** ComfyUI instance assigned lip-sync jobs using your usual launc
 1. Reopen the rebuilt app. In Settings → Workflows select the `wan22_s2v_14b_fp8` lip-sync starter if it is not already selected.
 2. In Settings → ComfyUI servers enable `lipsync` on the intended server.
 3. Run Production → Check readiness. Resolve missing model/node messages before queuing.
-4. Choose a keyframe and generate or upload dialogue audio. Start with a short, front-facing character shot, then click **Lip sync**.
+4. Choose a keyframe and generate or upload dialogue audio. Start with a short, front-facing character shot, then click **Animate with voice**. Review speaking direction and the close-up crop guide before generating.
 
-This is a 20-step, single-chunk preset at 16 fps and at most 77 frames (4.81 seconds). Short shots render at least 73 frames, then trim to the shot duration at assembly. Longer shots are rejected with instructions to split them or provide a custom extended S2V workflow. S2V creates a new talking video from the reference image; it replaces the selected clip rather than modifying an existing animation. A 14B model is demanding on a 12 GB GPU; render one short test before batching.
+The standard preset uses 20 steps at 16 fps, with at most 77 frames (4.81 seconds) per generation. Short shots render at least 73 frames, then trim when saving the take. Long motion shots use Continue shot; native S2V continuations capture up to 73 predecessor frames as motion context. An experimental 30-step option and same-seed comparison are available for the built-in starter. S2V creates a new talking video from the reference image; **Lip-sync existing clip** requires a separately tested video-conditioned workflow. A 14B model is demanding on a 12 GB GPU; render one short test before batching. See [voice animation quality and manual server setup](docs/lip-sync-quality.md).
 
 Source: [Comfy-Org's S2V template](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/video_wan2_2_14B_s2v.json) and [native S2V node implementation](https://github.com/Comfy-Org/ComfyUI/blob/master/comfy_extras/nodes_wan.py). This preset uses the core single-chunk path with frame output for the app's existing stitching/audio assembly. GPU inference still requires acceptance testing on your server.
 

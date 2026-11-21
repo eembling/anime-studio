@@ -161,4 +161,115 @@ class ClipAudioTests(unittest.TestCase):
         graph=self.st.snapshots.patch(job,app.build_workflow(meta['workflow'],key,params))
         self.assertEqual(graph['2']['inputs']['device'],'default')
 
+    def test_sampling_comparison_pins_same_seed_and_different_steps(self):
+        _,first=self.queue(seed=123,voice_quality='standard')
+        _,second=self.queue(seed=123,voice_quality='fine')
+        a=self.st.snapshots.meta(first);b=self.st.snapshots.meta(second)
+        self.assertEqual(first['seed'],second['seed'])
+        self.assertEqual(a['workflow']['30']['inputs']['steps'],20)
+        self.assertEqual(b['workflow']['30']['inputs']['steps'],30)
+        self.assertEqual(a['params']['files'].keys(),b['params']['files'].keys())
+        self.assertIn('clear mouth articulation',a['params']['prompt'])
+        self.api.shot_save(dict(id=self.sid,voice_quality='fine',voice_direction='Smile while speaking'))
+        self.assertEqual(self.st.snapshots.meta(first),a)
+
+    def test_native_continuation_captures_bounded_motion_video(self):
+        root=self.st.db.x("INSERT INTO takes(shot_id,stage,path,fps,frames) VALUES(?,'animate','shots/raw.mp4',16,32)",(self.sid,))
+        self.st.db.x('UPDATE shots SET clip_take=?,duration=7 WHERE id=?',(root,self.sid))
+        self.st.sections.action(dict(action='save',shot_id=self.sid,segment=0,prompt='Keep speaking'))
+        self.st.production.http=lambda *args,**kwargs:{**{node['class_type']:{'input':{}} for presets in app.STARTERS.values() for preset in presets.values() for node in preset['wf'].values()},'LoadVideo':{'input':{}},'GetVideoComponents':{'input':{}}}
+        _,job=self.queue('continue');meta=self.st.snapshots.meta(job)
+        key,params=self.worker.compose(job)
+        info=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-of','json',str(params['files']['video'])]))
+        self.assertEqual(len(info['streams']),1)
+        self.assertLessEqual(int(info['streams'][0]['nb_frames']),73)
+        self.assertEqual(info['streams'][0]['r_frame_rate'],'16/1')
+        params['images']={slot:Path(file).name for slot,file in params['files'].items()}
+        graph=app.build_workflow(meta['workflow'],key,params)
+        component=graph[graph['22']['inputs']['ref_motion'][0]]
+        loader=graph[component['inputs']['video'][0]]
+        self.assertEqual(loader['inputs']['file'],params['images']['video'])
+        self.assertAlmostEqual(meta['clip_audio']['source_offset'],1.9375)
+        captured=params['files']['video'].read_bytes();self.movie.unlink()
+        self.assertEqual(self.worker.compose(job)[1]['files']['video'].read_bytes(),captured)
+
+    def test_existing_clip_request_never_regenerates_from_image(self):
+        self.api.shot_save(dict(id=self.sid,lip_sync_mode='existing'))
+        with self.assertRaisesRegex(ValueError,'tested video-conditioned workflow'):
+            self.api.generate(dict(stage='lipsync',shot_ids=[self.sid]))
+        self.assertEqual(self.st.db.q('SELECT * FROM jobs'),[])
+
+    def test_explicit_voice_animation_rejects_mux_only_fallback(self):
+        self.st.db.x("DELETE FROM workflows WHERE stage='lipsync'")
+        with self.assertRaisesRegex(ValueError,'Voice-driven animation is unavailable'):
+            self.api.generate(dict(stage='animate',shot_ids=[self.sid],require_voice_animation=True))
+        self.assertEqual(self.st.db.q('SELECT * FROM jobs'),[])
+
+    def test_existing_video_workflow_captures_video_and_voice_without_keyframe(self):
+        import copy
+        workflow=copy.deepcopy(app.STARTERS['lipsync']['wan22_s2v_14b_fp8']['wf'])
+        del workflow['10'];del workflow['22']['inputs']['ref_image']
+        workflow['60']={'class_type':'LoadVideo','inputs':{'file':'source.mp4'},'_meta':{'title':'VIDEO_IN'}}
+        workflow['61']={'class_type':'GetVideoComponents','inputs':{'video':['60',0]}}
+        workflow['22']['inputs']['control_video']=['61',0]
+        self.st.db.x("UPDATE workflows SET json=?,name='tested-video-workflow' WHERE stage='lipsync'",(json.dumps(workflow),))
+        root=self.st.db.x("INSERT INTO takes(shot_id,stage,path,fps,frames) VALUES(?,'animate','shots/raw.mp4',16,32)",(self.sid,))
+        self.st.db.x("UPDATE shots SET keyframe_take=NULL,clip_take=?,duration=2,lip_sync_mode='existing' WHERE id=?",(root,self.sid))
+        self.assertEqual(app.check_workflow(workflow,'lipsync'),[])
+        _,job=self.queue('lipsync');meta=self.st.snapshots.meta(job)
+        key,params=self.worker.compose(job)
+        self.assertEqual(params['files']['video'].read_bytes(),self.movie.read_bytes())
+        self.assertNotIn('start',params['files'])
+        params['images']={slot:Path(file).name for slot,file in params['files'].items()}
+        self.assertEqual(app.build_workflow(meta['workflow'],key,params)['60']['inputs']['file'],params['images']['video'])
+
+    def test_existing_clip_can_use_assigned_recipe_without_replacing_animation_starter(self):
+        import copy
+        workflow=copy.deepcopy(app.STARTERS['lipsync']['wan22_s2v_14b_fp8']['wf'])
+        workflow['60']={'class_type':'LoadVideo','inputs':{'file':'source.mp4'},'_meta':{'title':'VIDEO_IN'}}
+        workflow['61']={'class_type':'GetVideoComponents','inputs':{'video':['60',0]}}
+        workflow['22']['inputs']['control_video']=['61',0]
+        recipe=self.st.creative.insert_recipe('Video conditioning','lipsync',dict(workflow=workflow,fps=16,max_frames=77,purpose='generation',requirements='',controls=[]))
+        self.st.creative.recipe_assign(dict(shot_id=self.sid,stage='lipsync',recipe_id=recipe['id'],values={}))
+        root=self.st.db.x("INSERT INTO takes(shot_id,stage,path,fps,frames) VALUES(?,'animate','shots/raw.mp4',16,32)",(self.sid,))
+        self.st.db.x("UPDATE shots SET clip_take=?,duration=2,lip_sync_mode='existing' WHERE id=?",(root,self.sid))
+        _,job=self.queue('lipsync');meta=self.st.snapshots.meta(job)
+        self.assertIn('video',meta['params']['files'])
+        self.assertEqual(self.st.wf_row('lipsync')['name'],'wan22_s2v_14b_fp8')
+        self.assertEqual(self.st.creative.meta(job)['recipe']['id'],recipe['id'])
+        self.st.db.x("DELETE FROM shot_recipes WHERE shot_id=? AND stage='lipsync'",(self.sid,))
+        result=self.api.generate(dict(stage='lipsync',shot_ids=[self.sid],recipe_id=recipe['id'],seed=123))
+        self.assertEqual(result['queued'],1)
+
+    def test_closeup_is_captured_and_does_not_modify_original(self):
+        original=(self.st.data/'shots/key.png').read_bytes()
+        self.api.shot_save(dict(id=self.sid,voice_framing='closeup'))
+        _,job=self.queue();params=self.worker.compose(job)[1]
+        self.assertNotEqual(params['files']['start'].read_bytes(),original)
+        self.assertEqual((self.st.data/'shots/key.png').read_bytes(),original)
+        self.assertIn('dialogue close-up',params['prompt'])
+
+    def test_native_s2v_rejects_incorrect_model_cadence(self):
+        self.st.db.x("UPDATE workflows SET fps=24 WHERE stage='lipsync'")
+        with self.assertRaisesRegex(ValueError,'requires 16 fps'):
+            self.api.generate(dict(stage='animate',shot_ids=[self.sid]))
+        self.assertEqual(self.st.db.q('SELECT * FROM jobs'),[])
+
+    def test_invalid_quality_cannot_enter_project_or_queue(self):
+        with self.assertRaisesRegex(ValueError,'Invalid voice quality'):
+            self.api.shot_save(dict(id=self.sid,voice_quality='fastest'))
+        with self.assertRaisesRegex(ValueError,'Invalid voice quality'):
+            self.api.generate(dict(stage='animate',shot_ids=[self.sid],voice_quality='fastest'))
+
+    def test_custom_sampling_controls_survive_motion_and_direction_changes(self):
+        import copy
+        workflow=copy.deepcopy(app.STARTERS['lipsync']['wan22_s2v_14b_fp8']['wf'])
+        recipe=self.st.creative.insert_recipe('Pinned performance','animate',dict(workflow=workflow,fps=16,max_frames=77,purpose='generation',requirements='',controls=[dict(node='30',field='steps',type='number',default=27,label='Steps',min=1,max=100)]))
+        self.st.creative.recipe_assign(dict(shot_id=self.sid,stage='animate',recipe_id=recipe['id'],values={'30.steps':27}))
+        _,job=self.queue(voice_quality='fine');meta=self.st.snapshots.meta(job)
+        self.assertEqual(meta['controls']['30.steps'],27)
+        key,params=self.worker.compose(job);params['images']={slot:Path(file).name for slot,file in params['files'].items()}
+        graph=self.st.snapshots.patch(job,app.build_workflow(meta['workflow'],key,params))
+        self.assertEqual(graph['30']['inputs']['steps'],27)
+
 if __name__=='__main__':unittest.main()

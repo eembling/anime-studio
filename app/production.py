@@ -91,6 +91,9 @@ class Production:
             if stage in ('animate','continue','lipsync','upscale') and shot['audio']:
                 common['audio'] = self.file_stamp(shot['audio'])
                 common['dialogue_timing'] = [shot.get('dialogue_offset'),shot.get('dialogue_fade')]
+                common['voice_video'] = {key:shot.get(key) for key in ('voice_quality','voice_framing','voice_direction')}
+                if stage == 'lipsync':
+                    common['voice_video']['mode'] = shot.get('lip_sync_mode')
                 if stage in ('animate','continue'):
                     voice_workflow=st.wf_row('lipsync')
                     common['voice_workflow']={key:value for key,value in voice_workflow.items() if key!='updated'} if voice_workflow else None
@@ -288,12 +291,32 @@ class Production:
                 following = 'animation' if tasks else 'lipsync'
             elif phase in ('lipsync', 'upscale'):
                 opts = json.loads(p['options'])
+                if phase == 'lipsync' and opts[phase]:
+                    from voice_video import connected_video, lip_workflow
+                    for shot in shots:
+                        if not shot['audio']:
+                            continue
+                        row = lip_workflow(self.st, shot)
+                        if not row or not connected_video(json.loads(row['json'])):
+                            db.x("UPDATE production_plans SET status='blocked',detail=? WHERE id=?", ('Lip-sync finishing requires a tested video-conditioned workflow with connected VIDEO_IN and AUDIO_IN. Built-in S2V already drives animation with voice. Assign a compatible lip-sync recipe, or cancel this plan and restart without the extra finishing stage.', p['id']))
+                            return
+                    for shot in shots:
+                        db.x("UPDATE shots SET lip_sync_mode='existing' WHERE id=?", (shot['id'],))
                 tasks = [(phase, s['id']) for s in shots if opts[phase] and (s['audio'] if phase == 'lipsync' else s['clip_take'])]
                 following = 'upscale' if phase == 'lipsync' else 'done'
             else:
                 db.x("UPDATE production_plans SET status='done',detail='Scene production complete.' WHERE id=?", (p['id'],)); return
             for stage, sid in tasks:
-                if not self.ready(stage, [sid]):
+                ready = self.ready(stage, [sid])
+                if stage == 'lipsync':
+                    from voice_video import lip_workflow
+                    row = lip_workflow(self.st, next(s for s in shots if s['id']==sid))
+                    try:
+                        self.st.creative.require_ready(dict(stage=stage,workflow=json.loads(row['json']),controls=[],requirements=''),{})
+                        ready = True
+                    except (ValueError, TypeError):
+                        ready = False
+                if not ready:
                     db.x("UPDATE production_plans SET status='blocked',detail=? WHERE id=?", ('No ready server for ' + stage + '. Run readiness checks, fix the listed problems, then resume.', p['id'])); return
             jobs = []
             for stage, sid in tasks:

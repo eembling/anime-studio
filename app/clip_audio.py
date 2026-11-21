@@ -110,6 +110,10 @@ def choose_workflow(st, stage, key, row, allow_switch=True):
         except ValueError as exc:
             reason=str(exc)
     candidate = st.wf_row('lipsync') if allow_switch else None
+    if candidate and stage != 'lipsync':
+        from voice_video import connected_video
+        if connected_video(json.loads(candidate['json'])):
+            candidate = None
     if candidate:
         candidate=gpu_s2v(candidate)
     if candidate and audio_inputs(json.loads(candidate['json'])):
@@ -130,8 +134,14 @@ def condition(st, job, key, params, row, folder, pinned):
     creative = st.creative.meta(job)
     allow_switch = (not creative.get('recipe',{}).get('id') and key!='animate_flf' and
                     creative.get('kind') not in ('repair_video',))
+    if job['stage'] == 'lipsync':
+        shot = st.db.one('SELECT * FROM shots WHERE id=?',(job['shot_id'],))
+        if shot.get('lip_sync_mode') == 'existing':
+            allow_switch = False
     selected,actual,conditioned,note = choose_workflow(st,job['stage'],key,row,allow_switch)
     if not conditioned:
+        if job['stage'] == 'lipsync':
+            raise ValueError('Voice animation needs a ready, connected AUDIO_IN workflow. '+note)
         # A voice-only fallback still needs an executable picture workflow.
         st.creative.require_ready(dict(stage=job['stage'],workflow=json.loads(row['json']),controls=[],requirements=''),{})
         return key,params,row,False,note
@@ -158,6 +168,9 @@ def condition(st, job, key, params, row, folder, pinned):
     target = folder/'model-dialogue.wav'
     ffmpeg(['-i',str(source),'-af',filters,'-ar','48000','-ac','2',str(target)])
     params.setdefault('files',{})['audio'] = target
+    from voice_video import prepare
+    actual, quality_note = prepare(st, job, params, actual, folder)
+    note = ' '.join(filter(None, (note, quality_note)))
     # Validate the effective graph, not just the image-only workflow originally
     # chosen by the Animate button.
     st.creative.require_ready(dict(stage=job['stage'],workflow=json.loads(actual['json']),controls=[],requirements=''),{})
