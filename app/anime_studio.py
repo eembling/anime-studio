@@ -459,6 +459,10 @@ class Studio:
         from shot_previews import ShotPreviews
         self.shot_previews=ShotPreviews(self)
 
+    def job_compatible(self, job, instance, cached_only=False):
+        owner = self.snapshots if job.get('snapshot_json') else self.creative
+        return owner.compatible(job, instance, cached_only=cached_only)
+
     def tools(self, refresh=False):
         if self.tools_cache is None or refresh:
             self.tools_cache = {"ffmpeg": shutil.which("ffmpeg"), "say": shutil.which("say"), "rife": str(find_rife() or "") or None,
@@ -1005,14 +1009,38 @@ def build_workflow(template, key, p):
     return wf
 
 
-def collect_outputs(entry):
-    files, outs = [], entry.get("outputs", {})
-    for k in sorted(outs, key=_nid):
-        for v in outs[k].values():
-            if isinstance(v, list):
-                files += [f for f in v if isinstance(f, dict) and f.get("filename")]
-    real = [f for f in files if f.get("type", "output") == "output"]
-    return real or files
+def collect_outputs(entry, stage, graph=None):
+    """Pick a declared final saver or require one unambiguous output group."""
+    audio = stage in ('voice', 'voice_design')
+    still = stage in ('keyframe', 'sheet')
+    extensions = AUD_EXT if audio else IMG_EXT if still else IMG_EXT | VID_EXT
+    groups = {}
+    for key, outputs in entry.get('outputs', {}).items():
+        files = [file for items in outputs.values() if isinstance(items, list)
+                 for file in items if isinstance(file, dict) and file.get('type', 'output') == 'output'
+                 and Path(file.get('filename') or '').suffix.lower() in extensions]
+        if files:
+            groups[key] = files
+    if graph:
+        tagged = _tagged(graph, 'FINAL_OUTPUT')
+        if not tagged:
+            tagged = _tagged(graph, 'SAVE')
+        if len(tagged) > 1:
+            raise ValueError('Tag exactly one workflow saver FINAL_OUTPUT.')
+        if tagged:
+            groups = {key: files for key, files in groups.items() if key in tagged}
+    if not groups:
+        raise ValueError('Workflow saved no final output of the expected media type.')
+    if len(groups) > 1:
+        raise ValueError('Several nodes saved matching outputs. Tag the intended saver FINAL_OUTPUT and queue a new render.')
+    files = next(iter(groups.values()))
+    if not audio and not still:
+        videos = [file for file in files if Path(file['filename']).suffix.lower() in VID_EXT]
+        if len(videos) > 1:
+            raise ValueError('The final saver returned multiple videos. Configure it to save one video or one frame sequence.')
+        if videos:
+            return videos
+    return files
 
 
 # ======================================================================================
@@ -1232,17 +1260,12 @@ class Worker(threading.Thread):
                 continue
             candidates = resumable + db.q(f"SELECT * FROM jobs WHERE status='pending' AND stage IN ({','.join('?' * len(roles))}) AND prompt_id IS NULL AND submission_client_id IS NULL ORDER BY priority DESC,id", roles)
             job = None
+            from render_queue import eligible_server
             for candidate in candidates:
-                if candidate.get("prompt_id") and candidate.get("instance_id") != inst["id"]:
-                    continue
-                shot = db.one('SELECT end_next FROM shots WHERE id=?', (candidate['shot_id'],))
-                if not (candidate.get('prompt_id') or candidate.get('submission_client_id')) and candidate.get('snapshot_json'):
-                    if not self.st.snapshots.compatible(candidate,inst):continue
-                elif not (candidate.get('prompt_id') or candidate.get('submission_client_id')) and candidate.get('creative_json'):
-                    if not self.st.creative.compatible(candidate, inst): continue
-                elif not (candidate.get('prompt_id') or candidate.get('submission_client_id')) and readiness is not None and not readiness.get(candidate['stage'], {}).get('ready'):
-                    continue
-                if not candidate.get('snapshot_json') and not candidate.get('creative_json') and not (candidate.get('prompt_id') or candidate.get('submission_client_id')) and candidate['stage'] in ('animate', 'continue') and shot and shot['end_next'] and not (readiness or {}).get('animate_flf', {}).get('ready'):
+                if not (candidate.get('prompt_id') or candidate.get('submission_client_id')) and not (candidate.get('snapshot_json') or candidate.get('creative_json')):
+                    shot = db.one('SELECT end_next FROM shots WHERE id=?', (candidate['shot_id'],))
+                    candidate['requires_flf'] = bool(candidate['stage'] in ('animate', 'continue') and shot and shot['end_next'])
+                if not eligible_server(candidate, inst, self.st.health[inst['id']], readiness, self.st.job_compatible):
                     continue
                 wait = video_gpu_wait(candidate, self.st.health[inst['id']], minimum_gib, time.time())
                 if wait:
@@ -1407,7 +1430,7 @@ class Worker(threading.Thread):
     def execute(self, job_id, inst):
         st, db = self.st, self.st.db
         base, pid = inst["url"].rstrip("/"), None
-        events = None
+        events, submitted_graph = None, None
         try:
             job = db.one("SELECT * FROM jobs WHERE id=?", (job_id,))
             st.creative.started(job,inst)
@@ -1470,6 +1493,7 @@ class Worker(threading.Thread):
                                for slot, path in p["files"].items()}
                 wf = build_workflow(tpl, key, p)
                 wf = st.snapshots.patch(job,wf) if job.get("snapshot_json") else st.creative.patch_controls(job, wf)
+                submitted_graph = wf
                 # After this write a restart must reconcile, even if it happened just before send.
                 if not db.u("UPDATE jobs SET submission_client_id=? WHERE id=? AND status='running'", (client_id, job_id)):
                     return
@@ -1519,9 +1543,11 @@ class Worker(threading.Thread):
                 db.x("UPDATE jobs SET prompt_id=NULL,submission_client_id=NULL WHERE id=?", (job_id,))
                 msgs = [m for m in entry["status"].get("messages", []) if m and m[0] == "execution_error"]
                 raise RuntimeError("ComfyUI error: " + json.dumps(msgs[-1][1] if msgs else entry["status"])[:2500])
-            files = collect_outputs(entry)
-            if not files:
-                raise RuntimeError("Workflow finished but saved no files.")
+            graph = submitted_graph or prompt_graph(entry.get('prompt'), pid)
+            if graph is None:
+                captured = st.snapshots.workflow(job) or st.creative.workflow(job)
+                graph = json.loads(captured['json']) if captured else None
+            files = collect_outputs(entry, job['stage'], graph)
             self._progress(job_id, f"downloading {len(files)} file(s)")
             out_dir = st.data / "jobs" / str(job_id)
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -1621,6 +1647,7 @@ class Worker(threading.Thread):
         if stage in ("sheet", "keyframe"):
             if job.get("creative_json") and not imgs: raise ValueError("The recipe saved no image candidate.")
             for i, f in enumerate(imgs or local):
+                ffmpeg(["-xerror", "-i", str(f), "-frames:v", "1", "-f", "null", "-"])
                 dest = folder / f"{stage}_j{job['id']}_{output_id}_{i}{f.suffix.lower()}"
                 shutil.move(str(f), dest)
                 made.append((dest, 0))
@@ -1903,12 +1930,13 @@ class API:
                     "OR id IN (SELECT id FROM jobs WHERE status IN ('error','cancelled') ORDER BY finished DESC,id DESC LIMIT 100) ORDER BY id DESC")
         counts = {r["status"]: r["n"] for r in db.q("SELECT status, COUNT(*) n FROM jobs GROUP BY status")}
         from render_queue import queue_snapshot
-        history = db.q("SELECT stage,draft,instance_id,'done' AS status,started,finished FROM render_timing_history ORDER BY finished DESC LIMIT 1000")
+        history = db.q("SELECT stage,draft,instance_id,'done' AS status,started,finished,workload FROM render_timing_history ORDER BY finished DESC LIMIT 1000")
         readiness = {server['id']: server['stages'] for server in st.production.readiness.get('servers', [])}
         end_next = {shot['id'] for shot in shots if shot['end_next']}
         for job in jobs:
             job['requires_flf'] = job['stage'] in ('animate','continue') and job['shot_id'] in end_next
-        queue = queue_snapshot(jobs, history, insts, st.health, readiness)
+        queue = queue_snapshot(jobs, history, insts, st.health, readiness,
+                               compatibility=lambda job, inst: st.job_compatible(job, inst, cached_only=True))
         production = st.production.snapshot(shots)
         timing = {row['id']: row for row in timeline_layout(shots, int(st.settings()['out_fps']))}
         for shot in shots:

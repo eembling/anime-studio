@@ -389,18 +389,21 @@ class CreativeStudio:
     def meta(self, job):
         return json.loads(job.get('creative_json') or '{}')
 
-    def compatible(self, job, inst):
+    def compatible(self, job, inst, cached_only=False):
         meta = self.meta(job)
         if not meta:
             return False
-        return not self.inspect_recipe(meta['recipe'], meta.get('values') or {}, inst)['problems']
+        inspected = self.inspect_recipe(meta['recipe'], meta.get('values') or {}, inst, cached_only=cached_only)
+        return None if inspected is None else not inspected['problems']
 
-    def inspect_recipe(self, recipe, values, inst, refresh=False):
+    def inspect_recipe(self, recipe, values, inst, refresh=False, cached_only=False):
         template = self.patched_template(recipe, values)
         key = digest([inst['url'], template])
         cached = self.readiness.get(key)
         if cached and not refresh and time.time()-cached['checked'] < 60:
             return cached
+        if cached_only:
+            return None
         problems = []
         try:
             info = self.st.production.http('GET', inst['url'].rstrip('/')+'/object_info', timeout=8)
