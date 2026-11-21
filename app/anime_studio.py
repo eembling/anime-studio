@@ -370,8 +370,11 @@ def find_rife():
     hit = shutil.which("rife-ncnn-vulkan")
     if hit:
         return Path(hit)
-    for pat in ("~/Applications/rife-ncnn-vulkan*/rife-ncnn-vulkan", "~/Downloads/rife-ncnn-vulkan*/rife-ncnn-vulkan",
-                "~/Documents/AnimeStudio/tools/rife-ncnn-vulkan*/rife-ncnn-vulkan", "/Applications/rife-ncnn-vulkan*/rife-ncnn-vulkan"):
+    # Startup must not enumerate protected Downloads/Documents folders: a
+    # macOS privacy check can block before the HTTP server starts serving.
+    for pat in ("~/Applications/rife-ncnn-vulkan*/rife-ncnn-vulkan",
+                "~/Library/Application Support/AnimeStudio/tools/rife-ncnn-vulkan*/rife-ncnn-vulkan",
+                "/Applications/rife-ncnn-vulkan*/rife-ncnn-vulkan"):
         for p in glob.glob(os.path.expanduser(pat)):
             if os.access(p, os.X_OK):
                 return Path(p)
