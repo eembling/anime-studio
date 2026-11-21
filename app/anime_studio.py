@@ -2508,6 +2508,13 @@ ROUTES = {
 }
 
 
+def range_offset(value, size):
+    digits = value.lstrip("0")
+    if len(digits) > len(str(size)):
+        return size
+    return int(digits or "0")
+
+
 def make_handler(st, api):
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -2592,13 +2599,15 @@ def make_handler(st, api):
                 return self._send(404, {"error": "not found"})
             size = p.stat().st_size
             start, end, code = 0, size - 1, 200
-            m = re.match(r"bytes=(\d*)-(\d*)", self.headers.get("Range") or "")
+            m = re.fullmatch(r"bytes=([0-9]*)-([0-9]*)", self.headers.get("Range") or "")
             if m and (m.group(1) or m.group(2)):
                 if m.group(1):
-                    start = int(m.group(1))
-                    end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+                    start = range_offset(m.group(1), size)
+                    end = min(range_offset(m.group(2), size), size - 1) if m.group(2) else size - 1
                 else:
-                    start = max(0, size - int(m.group(2)))
+                    start = max(0, size - range_offset(m.group(2), size))
+                if start >= size or end < start:
+                    return self._send(416, b"", extra={"Content-Range": f"bytes */{size}"})
                 code = 206
             self.send_response(code)
             self.send_header("Content-Type", mimetypes.guess_type(p.name)[0] or "application/octet-stream")
