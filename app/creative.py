@@ -389,18 +389,21 @@ class CreativeStudio:
     def meta(self, job):
         return json.loads(job.get('creative_json') or '{}')
 
-    def compatible(self, job, inst):
+    def compatible(self, job, inst, cached_only=False):
         meta = self.meta(job)
         if not meta:
             return False
-        return not self.inspect_recipe(meta['recipe'], meta.get('values') or {}, inst)['problems']
+        inspected = self.inspect_recipe(meta['recipe'], meta.get('values') or {}, inst, cached_only=cached_only)
+        return None if inspected is None else not inspected['problems']
 
-    def inspect_recipe(self, recipe, values, inst, refresh=False):
+    def inspect_recipe(self, recipe, values, inst, refresh=False, cached_only=False):
         template = self.patched_template(recipe, values)
         key = digest([inst['url'], template])
         cached = self.readiness.get(key)
         if cached and not refresh and time.time()-cached['checked'] < 60:
             return cached
+        if cached_only:
+            return None
         problems = []
         try:
             info = self.st.production.http('GET', inst['url'].rstrip('/')+'/object_info', timeout=8)
@@ -493,7 +496,12 @@ class CreativeStudio:
                     job['seed'] = int(number(body['seed'], 1, 2**48)) + len(made)
                     self.st.db.x('UPDATE jobs SET seed=? WHERE id=?', (job['seed'], job['id']))
                 if recipe:
-                    key, p = Worker(self.st).compose(dict(job, _lip_workflow=lip_workflow) if lip_workflow else job)
+                    compose_job = dict(job)
+                    if lip_workflow:
+                        compose_job['_lip_workflow'] = lip_workflow
+                    if stage == 'keyframe':
+                        compose_job['_keyframe_template'] = recipe['workflow']
+                    key, p = Worker(self.st).compose(compose_job)
                     self.freeze(job, recipe, values, key, p, manual=bool(body.get('manual')), batch=body.get('batch'))
                 made.append(job['id'])
         return {'ok': True, 'queued': len(made), 'job_ids': made, 'skipped': skipped}
@@ -504,6 +512,14 @@ class CreativeStudio:
         if not any(not c['problems'] for c in checks):
             problems = '; '.join(p for c in checks for p in c['problems']) or 'No enabled server accepts '+recipe['stage']+' jobs.'
             raise ValueError('Recipe is not ready. '+problems+' '+recipe.get('requirements', ''))
+
+    def keyframe_conditioning(self, shot_id, recipe, params):
+        direction = self.direction(shot_id)
+        if recipe['stage'] == 'keyframe' and recipe.get('purpose') == 'generation':
+            for slot in ('pose', 'depth', 'layout'):
+                if direction.get('conditioning') and direction.get(slot):
+                    self.require_slot(recipe, slot.upper())
+                    params['files']['creative_'+slot.upper()] = direction[slot]
 
     def freeze(self, job, recipe, values, key, params, **extras):
         p = copy.deepcopy(params)
@@ -523,12 +539,7 @@ class CreativeStudio:
             requested = extras['span']['end']-extras['span']['start'] if extras.get('span') else float(shot['duration'])
             seconds = min(requested, (int(recipe['max_frames'])-1)/float(recipe['fps']))
             p['length'] = min(int(recipe['max_frames']), max(1, 4*math.ceil(seconds*float(recipe['fps'])/4)+1))
-        direction = self.direction(job['shot_id'])
-        if recipe['stage'] == 'keyframe' and recipe.get('purpose') == 'generation':
-            for slot in ('pose', 'depth', 'layout'):
-                if direction.get('conditioning') and direction.get(slot):
-                    self.require_slot(recipe, slot.upper())
-                    p['files']['creative_'+slot.upper()] = direction[slot]
+        self.keyframe_conditioning(job['shot_id'], recipe, p)
         if recipe['stage'] == 'voice' and extras.get('kind') == 'phrase':
             p['prompt'] = self.spoken(job.get('voice_character_id'), p.get('prompt', ''))
         run_id = uuid.uuid4().hex
@@ -730,13 +741,14 @@ class CreativeStudio:
         return {'ok': True, 'queued': 1, 'job_ids': [jid]}
 
     def finish_special(self, job, key, local):
-        from anime_studio import ffmpeg, media_seconds, stitch_frames, VID_EXT, AUD_EXT, IMG_EXT
+        from anime_studio import ffmpeg, media_seconds, stitch_frames, VID_EXT, AUD_EXT, IMG_EXT, record_import_file
         meta = self.meta(job)
         if meta.get('kind') == 'phrase':
             audio = next((p for p in local if p.suffix.lower() in AUD_EXT), None)
             if not audio:
                 raise ValueError('The phrase workflow produced no audio.')
             dest = self.st.data/'voices'/'lines'/('phrase-'+uuid.uuid4().hex+'.wav'); dest.parent.mkdir(exist_ok=True)
+            record_import_file(dest)
             ffmpeg(['-i', str(audio), '-ar', '48000', '-ac', '2', str(dest)])
             payload = {'path': self.st.rel(dest), 'seconds': media_seconds(dest), 'base_audio': meta['base_audio'],
                        'identity': meta['line_identity'], 'input_signature':(self.st.db.one('SELECT signature FROM production_inputs WHERE job_id=?',(job['id'],)) or {}).get('signature'), 'range': meta['range'], 'phrase': meta['phrase'], 'job_id': job['id']}
@@ -750,6 +762,7 @@ class CreativeStudio:
             frames = [p for p in local if p.suffix.lower() in IMG_EXT]
             if not frames: raise ValueError('The interval recipe produced no video or frames.')
             video = self.st.data/'cache'/('repair-generated-'+uuid.uuid4().hex+'.mp4')
+            record_import_file(video)
             stitch_frames(frames, meta['recipe']['fps'], video)
         length = span['end']-span['start']
         if media_seconds(video)+1/span['fps'] < length:
@@ -764,6 +777,7 @@ class CreativeStudio:
         graph.append(''.join(parts)+f'concat=n={len(parts)}:v=1:a=0[v]')
         folder = self.st.data/'shots'/f"{job['shot_id']:04d}"; folder.mkdir(exist_ok=True)
         dest = folder/('repaired-'+uuid.uuid4().hex+'.mp4')
+        record_import_file(dest)
         ffmpeg(['-i', str(source), '-i', str(video), '-filter_complex', ';'.join(graph), '-map', '[v]', '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-t', str(span['total']), str(dest)])
         signature = self.st.db.one('SELECT signature FROM production_inputs WHERE job_id=?', (job['id'],))['signature']
         self.st.db.x('INSERT INTO takes(shot_id,stage,path,fps,seed,job_id,created,frames,segment,input_signature) VALUES(?,?,?,?,?,?,?,?,?,?)',

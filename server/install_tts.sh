@@ -11,6 +11,7 @@
 # Safe to run again: it skips what is already installed and only fetches missing models.
 # Everything runs locally; no cloud service or API key is used.
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 COMFY="${COMFY:-$HOME/ComfyUI}"
 if   [ -x "$COMFY/venv/bin/python" ];  then PY="$COMFY/venv/bin/python"
@@ -24,34 +25,17 @@ SNAP="$HOME/comfyui-packages-before-qwen-tts-$(date +%Y%m%d-%H%M%S).txt"
 "$PY" -m pip freeze > "$SNAP"
 echo "Saved current package list to $SNAP"
 
-# 2. Node pack + requirements (this upgrades transformers to 4.57 or newer)
-cd "$COMFY/custom_nodes"
-if [ -d ComfyUI-Qwen-TTS ]; then
-  (cd ComfyUI-Qwen-TTS && git pull --ff-only)
-else
-  git clone https://github.com/flybirdxx/ComfyUI-Qwen-TTS
-fi
-"$PY" -m pip install -r ComfyUI-Qwen-TTS/requirements.txt
+# 2. Check out the pinned node pack and use its declared requirements.
+"$PY" "$SCRIPT_DIR/recipe_assets.py" node "$COMFY" tts
+"$PY" -m pip install -r "$COMFY/custom_nodes/ComfyUI-Qwen-TTS/requirements.txt"
 
 # The 'sox' Python package uses the sox program when it is present (optional, removes a warning)
 if ! command -v sox >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
   echo "Optional: sudo apt-get install -y sox"
 fi
 
-# 3. Models: shared tokenizer, the voice-cloning ("Base") models, 1.7B (better) and 0.6B (faster, smaller GPUs),
-#    and VoiceDesign (makes a new voice from a written description; 1.7B only)
-mkdir -p "$COMFY/models/qwen-tts"
-QWEN_ROOT="$COMFY/models/qwen-tts" "$PY" - <<'EOF'
-import os
-from huggingface_hub import snapshot_download
-root = os.environ["QWEN_ROOT"]
-for repo in ("Qwen/Qwen3-TTS-Tokenizer-12Hz", "Qwen/Qwen3-TTS-12Hz-1.7B-Base", "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-             "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"):
-    target = os.path.join(root, repo.split("/")[-1])
-    print(f"Downloading {repo} -> {target}")
-    snapshot_download(repo_id=repo, local_dir=target)
-print("Models ready.")
-EOF
+# 3. Download and verify the pinned model revisions.
+"$PY" "$SCRIPT_DIR/recipe_assets.py" fetch "$COMFY" tts
 
 ls -la "$COMFY/models/qwen-tts"
 echo

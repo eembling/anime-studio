@@ -30,18 +30,30 @@ def match_words(text, recognized):
 class Alignment:
     def __init__(self,studio):
         self.st=studio;self.root=config_directory()/'Alignment'
-        self.setup_state={'status':'idle'};self.lock=threading.Lock();self.processes=set()
+        self.setup_state={'status':'idle'};self.lock=threading.Lock();self.processes=set();self.jobs={}
         studio.db.x('CREATE TABLE IF NOT EXISTS alignment_jobs(id TEXT PRIMARY KEY,shot_id INTEGER,line_id TEXT,token TEXT,status TEXT,json TEXT,error TEXT,created REAL)')
         studio.db.x("UPDATE alignment_jobs SET status='error',error='Alignment was interrupted. Run alignment again.' WHERE status='running'")
-    def ready(self):return (self.root/'ready.json').is_file() and (self.root/'venv/bin/python').is_file()
+    def interpreter(self):
+        layout = 'Scripts/python.exe' if sys.platform == 'win32' else 'bin/python'
+        return self.root / 'venv' / layout
+
+    def ready(self):
+        return (self.root/'ready.json').is_file() and self.interpreter().is_file()
     def state(self):return {'ready':self.ready(),'setup':self.setup_state,'jobs':[dict(r,result=json.loads(r.pop('json') or '{}')) for r in self.st.db.q('SELECT * FROM alignment_jobs ORDER BY created DESC LIMIT 30')]}
     def action(self,body):
         if body['action']=='setup':
-            if sys.platform == 'win32':raise ValueError('Automatic local speech alignment setup is currently supported on macOS. Edit performance timing manually on Windows.')
             with self.lock:
                 if self.setup_state['status']=='running':return {'ok':True}
                 self.setup_state={'status':'running','message':'Installing local speech engine and downloading the base model…'}
                 threading.Thread(target=self.install,daemon=True).start()
+            return {'ok':True}
+        if body['action']=='cancel':
+            ident = body['id']
+            with self.lock:
+                self.st.db.x("UPDATE alignment_jobs SET status='cancelled',error='Alignment cancelled.' WHERE id=? AND status='running'", (ident,))
+                process = self.jobs.get(ident)
+                if process and process.poll() is None:
+                    terminate_process(process)
             return {'ok':True}
         if body['action']!='start':raise ValueError('Unknown alignment action.')
         if not self.ready():raise ValueError('Set up local speech alignment in Settings → Tools & storage first.')
@@ -55,9 +67,28 @@ class Alignment:
         self.st.db.x("INSERT INTO alignment_jobs VALUES(?,?,?,?,'running','{}',NULL,?)",(ident,shot['id'],line['line_id'],body['token'],time.time()))
         threading.Thread(target=self.run,args=(ident,path,line['text']),daemon=True).start()
         return {'ok':True,'id':ident}
-    def process(self,args,timeout,input=None,log=None):
-        p=subprocess.Popen(args,stdin=subprocess.PIPE,stdout=log or subprocess.PIPE,stderr=subprocess.STDOUT if log else subprocess.PIPE,text=True,start_new_session=True)
-        with self.lock:self.processes.add(p)
+    def process(self,args,timeout,input=None,log=None,job=None):
+        with self.lock:
+            if job and not self.st.db.one("SELECT id FROM alignment_jobs WHERE id=? AND status='running'", (job,)):
+                raise RuntimeError('Alignment cancelled.')
+            options = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {'start_new_session': True}
+            if sys.platform == 'win32' and getattr(sys, 'frozen', False):
+                # The embedded launcher changes Windows' DLL search directory.
+                # External Python must load its own runtime and native wheels.
+                import ctypes
+                loader = ctypes.windll.kernel32
+                loader.SetDllDirectoryW(None)
+                try:
+                    p = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=log or subprocess.PIPE,
+                                         stderr=subprocess.STDOUT if log else subprocess.PIPE, text=True, **options)
+                finally:
+                    loader.SetDllDirectoryW(sys._MEIPASS)
+            else:
+                p = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=log or subprocess.PIPE,
+                                     stderr=subprocess.STDOUT if log else subprocess.PIPE, text=True, **options)
+            self.processes.add(p)
+            if job:
+                self.jobs[job] = p
         try:
             out,err=p.communicate(input,timeout=timeout)
             if p.returncode:raise subprocess.CalledProcessError(p.returncode,args,out,err)
@@ -67,7 +98,9 @@ class Alignment:
                 terminate_process(p)
                 try:p.wait(2)
                 except subprocess.TimeoutExpired:terminate_process(p,force=True);p.wait()
-            with self.lock:self.processes.discard(p)
+            with self.lock:
+                self.processes.discard(p)
+                self.jobs.pop(job, None)
     def shutdown(self):
         with self.lock:processes=list(self.processes)
         for p in processes:
@@ -80,15 +113,40 @@ class Alignment:
             if not script.exists():script=Path(__file__).parents[1]/'mac/install_alignment.sh'
             self.root.mkdir(parents=True,exist_ok=True)
             with (self.root/'setup.log').open('w') as log:
-                self.process(['bash',str(script),str(self.root),shutil.which('python3.12') or ('/opt/homebrew/bin/python3.12' if Path('/opt/homebrew/bin/python3.12').exists() else sys.executable)],timeout=1200,log=log)
+                if sys.platform == 'win32':
+                    self.install_windows(log)
+                else:
+                    self.process(['bash',str(script),str(self.root),shutil.which('python3.12') or ('/opt/homebrew/bin/python3.12' if Path('/opt/homebrew/bin/python3.12').exists() else sys.executable)],timeout=1200,log=log)
             (self.root/'ready.json').write_text(json.dumps({'model':'base','created':time.time()}), encoding='utf-8')
             self.setup_state={'status':'done','message':'Local speech alignment is ready.'}
         except Exception as e:self.setup_state={'status':'error','message':'Setup failed. See '+str(self.root/'setup.log')+'. '+str(e)}
+    def install_windows(self, log):
+        launcher = shutil.which('py')
+        if not getattr(sys, 'frozen', False) and sys.version_info[:2] == (3,12) and sys.maxsize > 2**32:
+            command = [sys.executable]
+        elif launcher:
+            command = [launcher, '-3.12']
+        else:
+            raise RuntimeError('Install Python 3.12 x64 and the Python launcher for Windows from python.org, then retry.')
+        try:
+            self.process(command + ['-c', 'import struct;assert struct.calcsize("P")==8'],
+                         timeout=20, log=log)
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError('Python 3.12 x64 is required for optional speech alignment.') from exc
+        self.process(command + ['-m', 'venv', str(self.root/'venv')], timeout=120, log=log)
+        python = str(self.interpreter())
+        self.process([python, '-m', 'pip', 'install', 'faster-whisper==1.2.1', 'av>=14,<16'],
+                     timeout=600, log=log)
+        self.process([python, '-c',
+                      'import sys; from faster_whisper import WhisperModel; '
+                      'WhisperModel("base", device="cpu", compute_type="int8", download_root=sys.argv[1])',
+                      str(self.root/'models')], timeout=600, log=log)
+
     def run(self,ident,path,text):
         try:
-            result=self.process([str(self.root/'venv/bin/python'),str(Path(__file__).parent/'alignment_worker.py'),str(path),'base',str(self.root/'models')],timeout=600)
+            result=self.process([str(self.interpreter()),str(Path(__file__).parent/'alignment_worker.py'),str(path),'base',str(self.root/'models')],timeout=600,job=ident)
             data=json.loads(result.stdout);aligned=match_words(text,data['words']);aligned['language']=data.get('language')
-            self.st.db.x("UPDATE alignment_jobs SET status='done',json=? WHERE id=?",(json.dumps(aligned),ident))
+            self.st.db.x("UPDATE alignment_jobs SET status='done',json=? WHERE id=? AND status='running'",(json.dumps(aligned),ident))
         except Exception as e:
             detail=(getattr(e,'stderr','') or str(e))[-2000:]
-            self.st.db.x("UPDATE alignment_jobs SET status='error',error=? WHERE id=?",('Speech alignment failed: '+detail,ident))
+            self.st.db.x("UPDATE alignment_jobs SET status='error',error=? WHERE id=? AND status='running'",('Speech alignment failed: '+detail,ident))

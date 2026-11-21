@@ -56,6 +56,8 @@ class Production:
             if shot['ref_prev']:
                 prev = st.neighbor(shot, -1)
                 common['previous'] = prev and prev['keyframe_take']
+            if shot.get('keyframe_reference_order'):
+                common['reference_order'] = shot['keyframe_reference_order']
         elif stage == 'voice':
             assets = [st.line_character(l) for l in st.shot_lines(shot)]
             common.update(dialogue=shot['dialogue'], characters=[a['id'] if a else None for a in assets],
@@ -92,6 +94,8 @@ class Production:
                 common['audio'] = self.file_stamp(shot['audio'])
                 common['dialogue_timing'] = [shot.get('dialogue_offset'),shot.get('dialogue_fade')]
                 common['voice_video'] = {key:shot.get(key) for key in ('voice_quality','voice_framing','voice_direction')}
+                if shot.get('voice_framing') == 'closeup' and shot.get('voice_crop'):
+                    common['voice_video']['crop'] = shot['voice_crop']
                 if stage == 'lipsync':
                     common['voice_video']['mode'] = shot.get('lip_sync_mode')
                 if stage in ('animate','continue'):
