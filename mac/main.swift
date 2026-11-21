@@ -2,6 +2,7 @@
 // Built automatically on first launch by the app's launcher (needs Xcode Command Line Tools).
 import Cocoa
 import WebKit
+import CryptoKit
 
 func databaseAccessDenied(_ message: String) -> Bool {
     let text = message.lowercased()
@@ -66,12 +67,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         if url.startAccessingSecurityScopedResource() { grantedFolder = url }
     }
 
+    var projectIdentifier: String {
+        let path = URL(fileURLWithPath: dataDir).resolvingSymlinksInPath().standardizedFileURL.path
+        return SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    var keepRendering: Bool {
+        FileManager.default.fileExists(atPath: URL(fileURLWithPath: dataDir).appendingPathComponent(".keep-rendering").path)
+    }
+
+    func pingController(_ completion: @escaping ([String: Any]?) -> Void) {
+        let url = URL(string: "http://127.0.0.1:\(port)/api/ping")!
+        URLSession.shared.dataTask(with: URLRequest(url: url, timeoutInterval: 2)) { data, response, _ in
+            let valid = (response as? HTTPURLResponse)?.statusCode == 200
+            let value = valid ? data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } : nil
+            DispatchQueue.main.async { completion(value) }
+        }.resume()
+    }
+
+    func isCurrentController(_ ping: [String: Any]?) -> Bool {
+        ping?["app"] as? String == "anime-studio" && ping?["project"] as? String == projectIdentifier
+    }
+
     func startServer() {
         startupGeneration += 1
         let generation = startupGeneration
         startupFailed = false
         serverReady = false
         webView.loadHTMLString("<body style='font:15px -apple-system;padding:40px'>Starting Anime Studio…</body>", baseURL: nil)
+        pingController { ping in
+            guard generation == self.startupGeneration, !self.quitting else { return }
+            if self.isCurrentController(ping) {
+                self.server = nil
+                self.serverReady = true
+                self.webView.load(URLRequest(url: URL(string: "http://127.0.0.1:\(self.port)/")!))
+            } else if ping != nil {
+                self.startupFailure("The selected port already serves a different project.", accessDenied: false)
+            } else {
+                self.launchController(generation: generation)
+            }
+        }
+    }
+
+    func launchController(generation: Int) {
         guard let py = env["AS_PYTHON"], let script = env["AS_SCRIPT"] else {
             startupFailure("The Python launcher configuration is missing. Open Anime Studio.app rather than the native executable.", accessDenied: false)
             return
@@ -82,8 +120,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         p.arguments = [script, "--host", "127.0.0.1", "--port", port, "--data", dataDir]
         do {
             try FileManager.default.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
-            try Data().write(to: logURL)
+            if !FileManager.default.fileExists(atPath: logURL.path) { try Data().write(to: logURL) }
             let handle = try FileHandle(forWritingTo: logURL)
+            try handle.seekToEnd()
             p.standardOutput = handle
             p.standardError = handle
             p.terminationHandler = { [weak self] process in
@@ -111,7 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
             DispatchQueue.main.async {
                 guard generation == self.startupGeneration, !self.startupFailed, !self.quitting else { return }
                 let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-                if (response as? HTTPURLResponse)?.statusCode == 200, json?["app"] as? String == "anime-studio", self.server?.isRunning == true {
+                if (response as? HTTPURLResponse)?.statusCode == 200, self.isCurrentController(json), self.server?.isRunning == true {
                     self.serverReady = true
                     self.webView.load(URLRequest(url: URL(string: "http://127.0.0.1:\(self.port)/")!))
                 } else if tries < 120 {
@@ -166,6 +205,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
                 alert.beginSheetModal(for: self.window)
                 return
             }
+            if self.keepRendering || (self.server == nil && self.serverReady) {
+                let alert = NSAlert()
+                alert.messageText = "Close this project before switching folders"
+                alert.informativeText = "Turn off Keep rendering when Anime Studio closes in Settings, then quit and reopen."
+                alert.beginSheetModal(for: self.window)
+                return
+            }
             // A folder switch may also be requested while the current server is healthy.
             self.startupGeneration += 1
             if self.server?.isRunning == true {
@@ -189,9 +235,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard serverReady, !keepRendering, server == nil else { return .terminateNow }
+        pingController { ping in
+            guard self.isCurrentController(ping) else {
+                sender.reply(toApplicationShouldTerminate: true)
+                return
+            }
+            var request = URLRequest(url: URL(string: "http://127.0.0.1:\(self.port)/api/quit")!, timeoutInterval: 3)
+            request.httpMethod = "POST"
+            request.httpBody = Data("{}".utf8)
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            URLSession.shared.dataTask(with: request) { _, _, _ in
+                DispatchQueue.main.async { sender.reply(toApplicationShouldTerminate: true) }
+            }.resume()
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         quitting = true
-        server?.terminate()
+        if !keepRendering { server?.terminate() }
         grantedFolder?.stopAccessingSecurityScopedResource()
     }
 

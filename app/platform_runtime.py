@@ -39,3 +39,23 @@ def terminate_process(process, force=False):
     else:
         try:os.killpg(process.pid,signal.SIGKILL if force else signal.SIGTERM)
         except ProcessLookupError:pass
+
+
+@contextlib.contextmanager
+def project_controller(path):
+    """Hold one nonblocking lock for the lifetime of a project controller."""
+    with path.open('a+b') as handle:
+        handle.seek(0)
+        if sys.platform == 'win32':
+            import msvcrt
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise RuntimeError('This project already has a render controller.') from exc
+        else:
+            import fcntl
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError('This project already has a render controller.') from exc
+        yield

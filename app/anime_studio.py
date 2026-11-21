@@ -1727,7 +1727,7 @@ class API:
         except (OSError,ValueError):build={'version':VERSION,'commit':'development','branch':'local source'}
         return {"project_id":hashlib.sha256(str(st.data).encode()).hexdigest()[:24],"build":build,"alignment":st.alignment.state(),"settings": S, "tts_languages": TTS_LANGUAGES, "voice_sample": VOICE_SAMPLE, "shots": shots, "assets": assets, "instances": insts, "workflows": wfs, "starters": starters,
                 "jobs": jobs, "job_counts": counts, "assembly": A, "tools": st.tools(), "music_url": self.media(S.get("music")),
-                "version": VERSION, "platform": sys.platform, "production": production, "render_queue": queue,
+                "version": VERSION, "platform": sys.platform, "background_rendering": (st.data/".keep-rendering").is_file(), "production": production, "render_queue": queue,
                 "audio_cues": [dict(c, url=self.media(c['path'])) for c in cues],
                 "audio_exports": [dict(e, url=self.media(e['output'])) for e in st.soundtrack.export_states(S, cues)],
                 "export_jobs": st.exports.rows() if hasattr(st,'exports') else [], "finishing": st.finishing.state(), "editor": st.editor.state(), "creative": st.creative.state(), "voice_recovery_count": len(voice_recovery_rows)}
@@ -1809,6 +1809,14 @@ class API:
         elif sys.platform == "win32":
             os.startfile(str(p))
         return {"ok": True}
+
+    def background_rendering(self, body):
+        marker = self.st.data / '.keep-rendering'
+        if body.get('enabled'):
+            marker.touch()
+        else:
+            marker.unlink(missing_ok=True)
+        return {'ok':True}
 
     def quit(self, _):
         self.st.alignment.shutdown()
@@ -2499,7 +2507,7 @@ ROUTES = {
     '/api/script/revision': 'script_revision', '/api/regenerate': 'regenerate',
     "/api/settings": "settings", "/api/instance/save": "instance_save", "/api/instance/delete": "instance_delete",
     "/api/instance/check": "instance_check", "/api/workflow": "workflow", "/api/workflow/meta": "workflow_meta",
-    "/api/voices": "voices", "/api/reveal": "reveal", "/api/quit": "quit", "/api/script/draft": "script_draft",
+    "/api/voices": "voices", "/api/reveal": "reveal", "/api/quit": "quit", "/api/background/rendering": "background_rendering", "/api/script/draft": "script_draft",
     "/api/asset/save": "asset_save", "/api/asset/delete": "asset_delete", "/api/asset/use_sheet": "asset_use_sheet",
     "/api/shot/save": "shot_save", "/api/shot/delete": "shot_delete", "/api/shot/move": "shot_move",
     "/api/csv/import": "csv_import", "/api/voice": "voice", "/api/clips/upload": "clips_upload", "/api/clip/update": "clip_update",
@@ -2547,7 +2555,9 @@ def make_handler(st, api):
                 if path == '/production.js':
                     return self._send(200, (Path(__file__).resolve().parent / 'production.js').read_text(encoding='utf-8'), 'text/javascript; charset=utf-8')
                 if path == "/api/ping":
-                    return self._send(200, {"ok": True, "app": "anime-studio", "version": VERSION})
+                    return self._send(200, {"ok": True, "app": "anime-studio", "version": VERSION,
+                                            "project": hashlib.sha256(str(st.data).encode()).hexdigest(),
+                                            "background_rendering": (st.data/".keep-rendering").is_file()})
                 if path == "/api/state":
                     return self._send(200, api.state())
                 if path == "/api/csv/export":
@@ -2637,24 +2647,36 @@ def main():
                 (d / f"{key}__{name}_api.json").write_text(json.dumps(s["wf"], indent=2, ensure_ascii=False), encoding='utf-8')
         print("Wrote starter workflows to", d)
         return
-    st = Studio(args.data)
-    import signal
-    def stop_local(signum,frame):
-        st.alignment.shutdown()
-        st.exports.shutdown()
-        st.shot_previews.shutdown()
-        raise SystemExit(0)
-    signal.signal(signal.SIGTERM,stop_local)
-    signal.signal(signal.SIGINT,stop_local)
-    st.worker = Worker(st)
-    st.worker.start()
-    try:
-        srv = ThreadingHTTPServer((args.host, args.port), make_handler(st, API(st)))
-    except OSError as e:
-        print(f"Port {args.port} busy ({e}) - is Anime Studio already running?")
-        sys.exit(3)
-    print(f"Anime Studio {VERSION} -> http://{args.host}:{args.port}   data: {st.data}   tools: {st.tools()}", flush=True)
-    srv.serve_forever()
+    from platform_runtime import project_controller
+    project = Path(args.data).expanduser().resolve()
+    project.mkdir(parents=True, exist_ok=True)
+    with project_controller(project / '.controller.lock'):
+        # Bind before touching project state so a failed launch cannot reset
+        # another running controller's jobs.
+        try:
+            srv = ThreadingHTTPServer((args.host, args.port), BaseHTTPRequestHandler)
+        except OSError as error:
+            print(f"Port {args.port} busy ({error}).", flush=True)
+            sys.exit(3)
+        with srv:
+            st = Studio(project)
+            import signal
+
+            def stop_local(signum, frame):
+                st.alignment.shutdown()
+                st.exports.shutdown()
+                st.shot_previews.shutdown()
+                raise SystemExit(0)
+
+            signal.signal(signal.SIGTERM, stop_local)
+            signal.signal(signal.SIGINT, stop_local)
+            if hasattr(signal, 'SIGHUP'):
+                signal.signal(signal.SIGHUP, signal.SIG_IGN)
+            srv.RequestHandlerClass = make_handler(st, API(st))
+            st.worker = Worker(st)
+            st.worker.start()
+            print(f"Anime Studio {VERSION} -> http://{args.host}:{args.port}   data: {st.data}", flush=True)
+            srv.serve_forever()
 
 
 if __name__ == "__main__":
