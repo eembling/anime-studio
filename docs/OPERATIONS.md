@@ -316,3 +316,9 @@ In ComfyUI, install the checkpoint and encoder listed in the [Stable Audio Open 
 In Studio, move the playhead into a shot and choose Generate sound effect. Enter a prompt and choose Effects or Ambience. On completion, audition the candidate in the Sound library and use Add to episode to place it. The cue follows the original shot at the captured offset. The library keeps each candidate separate, including its seed and prompt.
 
 For a custom workflow, tag its text node PROMPT and its optional negative encoder NEGATIVE. Use a seconds_total field or tag a node with a seconds or duration field DURATION. The final saver must export one audio file. A Load Image node titled PICTURE_IN receives the selected shot keyframe if your recipe uses one.
+
+### ComfyUI music cues
+
+Download the checkpoint listed in the [ACE-Step 1.5 Turbo ComfyUI template](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/audio_ace_step_1_5_checkpoint.json). Test a short instrumental cue on the server. In Settings, select the ACE-Step starter under Music cues, enable the Music cues task on that server, and check readiness.
+
+In Studio, move the playhead to the start point and select Generate music cue. Enter the arrangement and instrumentation in the prompt. Tempo is available when the selected workflow exposes a BPM input. Audition candidates in the Sound library. Use Add to episode for a fresh cue or Replace music cue to preserve the timing and mixer placement of an existing cue while changing its source. The chosen cue feeds the same music bus used by the preview, final mix and stems.

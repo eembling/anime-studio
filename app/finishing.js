@@ -134,6 +134,7 @@ function renderSoundLibrary(){
  <audio controls preload="none" src="${esc(sound.url)}"></audio>
  ${sound.generation?`<details><summary>Generation details · seed ${sound.generation.seed}</summary><p>${esc(sound.generation.prompt)}</p></details>`:''}
  <div class="toolbar"><button class="btn" onclick="useLibrarySound('${sound.id}')">Add to episode</button><button class="btn" onclick="editLibrarySound('${sound.id}')">Edit tags</button>
+ ${sound.generation?.kind==='music'&&(S.audio_cues||[]).some(cue=>cue.kind==='music')?`<button class="btn" onclick="replaceMusicCue('${sound.id}')">Replace music cue</button>`:''}
  <button class="btn danger" onclick="deleteLibrarySound('${sound.id}')">Remove from library</button></div></article>`).join('')||'<p>No matching sounds.</p>';
 }
 function editLibrarySound(id){
@@ -180,27 +181,38 @@ function renderExportJobs(){
   ${Object.entries(job.result?.files||{}).map(([name,url])=>`<a class="btn sm" href="${esc(url)}" download>${esc(name)}</a>`).join('')}
  </div>`).join('');
 }
-function editGeneratedSound(){
- if(!S.workflows.sound_effect)return toast('Import a Sound effects and ambience workflow in Settings first.',true);
+function replaceMusicCue(soundId){
+ const sound=S.finishing.library.find(item=>item.id===soundId);
+ const cues=(S.audio_cues||[]).filter(cue=>cue.kind==='music');
+ if(!sound||!cues.length)return;
+ modal(`<div class="dlg-h"><h2>Replace music cue</h2></div><div class="dlg-b">
+ <label for="replace-music">Cue</label><select id="replace-music">${cues.map(cue=>`<option value="${cue.id}">${esc(cue.name)} · ${audioTime(cue.start)}</option>`).join('')}</select></div>
+ <div class="dlg-f"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn pri" id="replace-music-confirm">Review replacement</button></div>`);
+ $('#replace-music-confirm').onclick=()=>editAudioCue(+$('#replace-music').value,sound);
+}
+function editGeneratedSound(stage='sound_effect'){
+ const music=stage==='music_cue',workflow=S.workflows[stage];
+ if(!workflow)return toast('Configure the '+(music?'music cue':'sound effects')+' workflow in Settings first.',true);
  const current=shotAt(EDIT_TIME);
  if(!current)return toast('Move the playhead to the shot you want to score.',true);
  const offset=Math.max(0,Math.round((EDIT_TIME-current.start)*editFps())/editFps());
- const slots=S.workflows.sound_effect.slots;
- modal(`<div class="dlg-h"><h2>Generate sound effect</h2></div><form id="generated-sound-form"><div class="dlg-b">
+ const slots=workflow.slots;
+ modal(`<div class="dlg-h"><h2>${music?'Generate music cue':'Generate sound effect'}</h2></div><form id="generated-sound-form"><div class="dlg-b">
  <p>Shot ${pad(current.shot.seq)} · starts ${audioTime(offset)} after the shot begins</p>
  <label class="f" for="gs-name">Cue name</label><input id="gs-name" required maxlength="160">
- <label class="f" for="gs-kind">Track</label><select id="gs-kind"><option value="sfx">Effects</option><option value="ambience">Ambience</option></select>
+ ${music?'':`<label class="f" for="gs-kind">Track</label><select id="gs-kind"><option value="sfx">Effects</option><option value="ambience">Ambience</option></select>`}
+ ${music&&slots.tempo?.length?'<label class="f" for="gs-tempo">Tempo (BPM, optional)</label><input id="gs-tempo" type="number" min="30" max="300" step="1">':''}
  <label class="f" for="gs-prompt">Sound description</label><textarea id="gs-prompt" required maxlength="6000"></textarea>
  ${slots.negative.length?'<label class="f" for="gs-negative">Avoid</label><textarea id="gs-negative" maxlength="6000"></textarea>':''}
- <div class="g2"><label>Duration (seconds)<input id="gs-duration" type="number" required min="0.1" max="120" value="2" step="0.1"></label>
+ <div class="g2"><label>Duration (seconds)<input id="gs-duration" type="number" required min="${music?1:0.1}" max="${music?240:120}" value="${music?20:2}" step="0.1"></label>
  <label>Seed (optional)<input id="gs-seed" type="number" min="0" max="281474976710656" step="1"></label></div>
  </div><div class="dlg-f"><button type="button" class="btn" onclick="closeModal()">Cancel</button><button class="btn pri" id="gs-queue">Queue candidate</button></div></form>`);
  $('#generated-sound-form').onsubmit=async event=>{
   event.preventDefault();
   const button=$('#gs-queue'),seed=$('#gs-seed').value;button.disabled=true;
   try{
-   const result=await post('/api/generate',{stage:'sound_effect',shot_ids:[current.shot.id],
-    kind:$('#gs-kind').value,name:$('#gs-name').value,prompt:$('#gs-prompt').value,
+   const result=await post('/api/generate',{stage,shot_ids:[current.shot.id],
+    kind:music?'music':$('#gs-kind').value,tempo:$('#gs-tempo')?.value,name:$('#gs-name').value,prompt:$('#gs-prompt').value,
     negative:$('#gs-negative')?.value,duration:+$('#gs-duration').value,anchor_offset:offset,
     ...(seed?{seed:+seed}:{})});
    if(result.queued){closeModal();toast('Queued sound candidate. Audition it in the Sound library when it finishes.');}
