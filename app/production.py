@@ -56,6 +56,8 @@ class Production:
             if shot['ref_prev']:
                 prev = st.neighbor(shot, -1)
                 common['previous'] = prev and prev['keyframe_take']
+            if shot.get('keyframe_reference_order'):
+                common['reference_order'] = shot['keyframe_reference_order']
         elif stage == 'voice':
             assets = [st.line_character(l) for l in st.shot_lines(shot)]
             common.update(dialogue=shot['dialogue'], characters=[a['id'] if a else None for a in assets],
