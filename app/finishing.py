@@ -67,7 +67,7 @@ class Finishing:
             duration, streams = probe(target)
             if not duration or 'audio' not in streams:
                 raise ValueError('The sound recipe returned unreadable audio.')
-            category = {'sfx':'Generated effects','ambience':'Generated ambience'}[spec['kind']]
+            category = {'sfx':'Generated effects','ambience':'Generated ambience','music':'Generated music'}[spec['kind']]
             st.db.x('INSERT INTO sound_library VALUES(?,?,?,?,?,?,?)',
                     (ident, spec['name'], category, 'ComfyUI', st.rel(target), duration, time.time()))
             st.db.x('INSERT INTO generated_sounds VALUES(?,?,?,?)',
