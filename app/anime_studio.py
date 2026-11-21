@@ -710,28 +710,33 @@ class Studio:
         if not any(l["audio"] for l in lines):
             self.db.x("UPDATE shots SET audio=NULL WHERE id=?", (shot_id,))
         else:
-            if not self.tools()["ffmpeg"]:
-                raise RuntimeError("ffmpeg is needed to join dialogue lines: brew install ffmpeg")
-            gap = float(self.settings().get("line_gap") or 0.3)
-            ins, graph = [], ""
-            for i, l in enumerate(lines):
-                if l["audio"]:
-                    ins += ["-i", str(self.abs(l["audio"]))]
-                else:
-                    ins += ["-f", "lavfi", "-t", f"{max(1.0, len(l['text'].split()) / 2.6):.2f}", "-i", "anullsrc=r=48000:cl=stereo"]
-                timing = self.creative.timing(shot_id, l)
-                pad = timing.get('pause_after', gap) if i < len(lines) - 1 else 0
-                delay = timing.get('lead_in', 0)*1000
-                graph += f"[{i}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay={delay}:all=1,apad=pad_dur={pad}[a{i}];"
-            graph += "".join(f"[a{i}]" for i in range(len(lines))) + f"concat=n={len(lines)}:v=0:a=1[out]"
             dest = self.data / "voices" / f"shot{shot_id}_mix_{uuid.uuid4().hex[:6]}.wav"
             record_import_file(dest)
-            ffmpeg(ins + ["-filter_complex", graph, "-map", "[out]", "-ar", "48000", str(dest)])
+            self.render_dialogue_track(shot_id, lines, dest)
             secs, dur = media_seconds(dest), float(s["duration"])
             if fit and secs + 0.4 > dur:
                 dur = round(secs + 0.4, 1)
             self.db.x("UPDATE shots SET audio=?, duration=? WHERE id=?", (self.rel(dest), dur, shot_id))
         # Prior mixes remain available to history and archived episodes.
+
+    def render_dialogue_track(self, shot_id, lines, dest, speaker=None):
+        """Keep dialogue intervals identical when producing a speaker stem."""
+        if not self.tools()["ffmpeg"]:
+            raise RuntimeError("ffmpeg is needed to join dialogue lines: brew install ffmpeg")
+        gap = float(self.settings().get("line_gap") or 0.3)
+        ins, graph = [], ""
+        for i, l in enumerate(lines):
+            if l["audio"]:
+                ins += ["-i", str(self.abs(l["audio"]))]
+            else:
+                ins += ["-f", "lavfi", "-t", f"{max(1.0, len(l['text'].split()) / 2.6):.2f}", "-i", "anullsrc=r=48000:cl=stereo"]
+            timing = self.creative.timing(shot_id, l)
+            pad = timing.get('pause_after', gap) if i < len(lines) - 1 else 0
+            delay = timing.get('lead_in', 0)*1000
+            mute = ',volume=0' if speaker is not None and l['character_id'] != speaker else ''
+            graph += f"[{i}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay={delay}:all=1,apad=pad_dur={pad}{mute}[a{i}];"
+        graph += "".join(f"[a{i}]" for i in range(len(lines))) + f"concat=n={len(lines)}:v=0:a=1[out]"
+        ffmpeg(ins + ["-filter_complex", graph, "-map", "[out]", "-ar", "48000", str(dest)])
 
     def say_line(self, text, voice=""):
         if not self.tools()["say"]:
@@ -942,8 +947,10 @@ def detect_slots(wf, key):
         if key == "animate_flf":
             m["end_image"] = (_tagged(wf, "END_IMAGE") or [k for k in loads if k not in m["start_image"]])[:1]
         from clip_audio import audio_inputs
-        connected_audio=set(audio_inputs(wf))
-        m["audio_in"] = [k for k in _tagged(wf, "AUDIO_IN") if k in connected_audio] or [k for k in keys if k in connected_audio and cls(k)=="LoadAudio"]
+        connected_audio = set(audio_inputs(wf))
+        m["audio_in_2"] = [k for k in _tagged(wf, "AUDIO_IN_2") if k in connected_audio]
+        m["audio_in"] = [k for k in _tagged(wf, "AUDIO_IN") if k in connected_audio] or [
+            k for k in keys if k in connected_audio and cls(k) == "LoadAudio" and k not in m["audio_in_2"]]
         from voice_video import connected_video
         m["video_in"] = connected_video(wf)
         m["size"] = _tagged(wf, "SIZE") or [k for k in keys if {"width", "height", "length"} <= set(ins(k))][:1]
@@ -1086,6 +1093,10 @@ def build_workflow(template, key, p):
             wf[k]["inputs"]["audio"] = imgs["audio"]
         elif key in ("voice","lipsync"):
             raise ValueError("This workflow requires an audio input.")
+    for k in m.get("audio_in_2", []):
+        if not imgs.get("audio2"):
+            raise ValueError("This two-speaker workflow requires two assigned dialogue tracks.")
+        wf[k]["inputs"]["audio"] = imgs["audio2"]
     for k in m.get("ref_text", []):
         _set_text(wf[k], p.get("ref_text", ""))
     if key in ("voice", "voice_design"):   # fill well-known TTS inputs wherever a node has them
@@ -2010,7 +2021,7 @@ def assemble(st, use_music, music_volume, preview=False, scene=None, use_timed=T
 # ======================================================================================
 CSV_FIELDS = ["seq", "scene", "kind", "cast", "keyframe_prompt", "motion_prompt", "camera", "dialogue", "duration",
               "retime", "ref_prev", "end_next", "notes"]
-SHOT_FIELDS = {"scene", "kind", "keyframe_prompt", "motion_prompt", "camera", "dialogue", "duration", "retime", "ref_prev", "end_next", "notes", "voice_quality", "voice_framing", "voice_crop", "voice_direction", "lip_sync_mode"}
+SHOT_FIELDS = {"scene", "kind", "keyframe_prompt", "motion_prompt", "camera", "dialogue", "duration", "retime", "ref_prev", "end_next", "notes", "voice_quality", "voice_framing", "voice_crop", "voice_speakers", "voice_direction", "lip_sync_mode"}
 TRUE = (1, True, "1", "true", "yes", "y", "on")
 
 

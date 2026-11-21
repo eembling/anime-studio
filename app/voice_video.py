@@ -7,7 +7,7 @@ DIRECTION = 'The character speaks naturally with clear mouth articulation, restr
 
 def initialize(db):
     for field, default in [('voice_quality', 'standard'), ('voice_framing', 'source'),
-                           ('voice_direction', DIRECTION), ('lip_sync_mode', 'keyframe'), ('voice_crop', None)]:
+                           ('voice_direction', DIRECTION), ('lip_sync_mode', 'keyframe'), ('voice_crop', None), ('voice_speakers', None)]:
         if field not in {r['name'] for r in db.q('PRAGMA table_info(shots)')}:
             definition = 'TEXT' if default is None else 'TEXT DEFAULT '+json.dumps(default)
             db.x('ALTER TABLE shots ADD COLUMN '+field+' '+definition)
@@ -34,6 +34,15 @@ def validate(values):
             if not all(map(math.isfinite, (x, y, size))) or not (0 <= x <= 100 and 0 <= y <= 100 and 25 <= size <= 90):
                 raise ValueError('Dialogue crop position or size is outside the supported range.')
             values['voice_crop'] = json.dumps(dict(x=x, y=y, size=size))
+
+
+    if 'voice_speakers' in values:
+        speakers = values['voice_speakers']
+        if not isinstance(speakers, list) or len(speakers) > 2 or any(type(speaker) is not int or speaker < 1 for speaker in speakers):
+            raise ValueError('Select up to two visible speaking characters.')
+        if len(set(speakers)) != len(speakers):
+            raise ValueError('Choose a different character for each speaker input.')
+        values['voice_speakers'] = json.dumps(speakers) if speakers else None
 
 
 def lip_workflow(st, shot, job=None):

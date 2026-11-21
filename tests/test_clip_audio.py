@@ -285,4 +285,56 @@ class ClipAudioTests(unittest.TestCase):
         graph=self.st.snapshots.patch(job,app.build_workflow(meta['workflow'],key,params))
         self.assertEqual(graph['30']['inputs']['steps'],27)
 
+    def test_visible_speaker_tracks_preserve_turns_and_offscreen_mix(self):
+        import copy
+        ids = [self.st.db.x("INSERT INTO assets(name,kind) VALUES(?,'character')", (name,))
+               for name in ('Aiko', 'Kenji', 'Narrator')]
+        audio = self.st.data/'voices/short.wav'
+        app.ffmpeg(['-f','lavfi','-i','sine=frequency=440:duration=0.5',str(audio)])
+        self.api.shot_save({'id':self.sid,'dialogue':'AIKO: First.\nKENJI: Second.\nNARRATOR: Off screen.','asset_ids':ids})
+        self.st.db.x("UPDATE shots SET audio_mode='lines' WHERE id=?", (self.sid,))
+        shot = self.st.db.one('SELECT * FROM shots WHERE id=?',(self.sid,))
+        lines = self.st.shot_lines(shot)
+        for index, line in enumerate(lines):
+            line.update(character_id=ids[index],line_id=f'line-{index}',audio=self.st.rel(audio))
+        self.st.save_lines(self.sid,lines)
+        self.st.rebuild_audio(self.sid)
+        with self.assertRaisesRegex(ValueError,'Choose the visible speakers'):
+            self.queue()
+        self.api.shot_save({'id':self.sid,'voice_speakers':ids[:2]})
+        with self.assertRaisesRegex(ValueError,'drives one speaker'):
+            self.queue()
+
+        graph = copy.deepcopy(app.STARTERS['lipsync']['wan22_s2v_14b_fp8']['wf'])
+        graph['11']['_meta']['title']='AUDIO_IN'
+        graph['110']=copy.deepcopy(graph['11'])
+        graph['110']['_meta']['title']='AUDIO_IN_2'
+        graph['22']['class_type']='CustomMaskedTwoSpeaker'
+        graph['22']['_meta']['title']='AUDIO_CONDITIONING'
+        graph['22']['inputs']['audio_2']=['110',0]
+        self.st.db.x("UPDATE workflows SET json=?,name='masked-speakers' WHERE stage='lipsync'",(json.dumps(graph),))
+        original_http=self.st.production.http
+        self.st.production.http=lambda *a,**kw: dict(original_http(*a,**kw),CustomMaskedTwoSpeaker={'input':{}})
+
+        _,job=self.queue()
+        meta=self.st.snapshots.meta(job)
+        params=meta['params']
+        left,right=(self.st.abs(params['files'][key]) for key in ('audio','audio2'))
+        full=self.st.abs(meta['clip_audio']['path'])
+        self.assertEqual(params['speaker_tracks'],[
+            {'character_id':ids[0],'line_ids':['line-0']},{'character_id':ids[1],'line_ids':['line-1']}])
+        for time, expected in [(.1,(True,False)),(.9,(False,True)),(1.7,(False,False))]:
+            self.assertEqual(tuple(self.rms(path,time)>.02 for path in (left,right)),expected)
+            self.assertGreater(self.rms(full,time),.02)
+        params['images']={key:path for key,path in params['files'].items()}
+        submitted=app.build_workflow(meta['workflow'],meta['key'],params)
+        self.assertEqual(submitted['11']['inputs']['audio'],params['images']['audio'])
+        self.assertEqual(submitted['110']['inputs']['audio'],params['images']['audio2'])
+        candidate = self.st.data/'jobs'/'speaker-candidate.mp4'
+        shutil.copy2(self.movie,candidate)
+        self.worker.finish(job,meta['key'],[candidate])
+        take = self.st.db.one('SELECT path FROM takes WHERE job_id=?',(job['id'],))
+        self.assertGreater(self.rms(self.st.abs(take['path']),1.7),.02)
+
+
 if __name__=='__main__':unittest.main()
