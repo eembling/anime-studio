@@ -21,7 +21,7 @@ class StorageManager:
                     except (ValueError,TypeError):pass
                 if len(value)<4096 and value.startswith(('uploads/','shots/','cast/','voices/','history/','exports/','cache/','storage-trash/')):
                     path=(root/value).resolve()
-                    if root in path.parents:refs.add(str(path.relative_to(root)))
+                    if root in path.parents:refs.add(path.relative_to(root).as_posix())
         for table in self.st.db.q("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
             name=table['name']
             if not name.replace('_','').isalnum():continue
