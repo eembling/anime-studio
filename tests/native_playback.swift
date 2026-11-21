@@ -116,13 +116,46 @@ final class Check: NSObject, WKNavigationDelegate {
       DispatchQueue.main.asyncAfter(deadline:.now()+0.2){
        self.web.evaluateJavaScript("!EDIT_PLAYING && STUDIO_AUDIO_SOURCES.size===0 && studioPeak()<0.0001"){value,error in
         guard (value as? Bool)==true else {print("FAIL Studio pause",String(describing:value),String(describing:error));exit(1)}
-        print("Native Studio pause stopped audio sources");exit(0)
+        print("Native Studio pause stopped audio sources");self.soundEffects()
        }
       }
      }
     }
    }
   }
+ }
+
+ func soundEffects(){
+  web.callAsyncJavaScript("""
+   document.querySelector('[data-t="effects"]').click();
+   document.querySelector('#t-effects button').click();
+   const input=document.querySelector('#sound-file'),transfer=new DataTransfer();
+   const blob=await (await fetch(S.shots[0].audio_url)).blob();
+   transfer.items.add(new File([blob],'Fixture bell.wav',{type:'audio/wav'}));
+   input.files=transfer.files;input.dispatchEvent(new Event('change'));
+   await saveLibrarySound('',document.querySelector('#dlg .btn.pri'));
+   const card=document.querySelector('#effect-results .sound-item');
+   if(card?.querySelector('h3').textContent!=='Fixture bell')throw Error('Imported sound missing');
+   card.querySelector('button').click();
+   document.querySelector('[data-t="studio"]').click();
+   for(const start of [0.625,1.875]){
+    seekEdit(start);
+    if(start===0.625)document.querySelector('#paste-effect').click();
+    else document.dispatchEvent(new Event('paste',{cancelable:true}));
+    for(let i=0;i<100&&!S.audio_cues.some(c=>c.kind==='sfx'&&c.start===start);i++)
+     await new Promise(resolve=>setTimeout(resolve,50));
+   }
+   const cues=S.audio_cues.filter(c=>c.kind==='sfx'&&c.name==='Fixture bell');
+   if(cues.length!==2||cues[0].path!==cues[1].path||
+      !cues.every(c=>document.querySelector('#edit-track [data-cue="'+c.id+'"]')))
+    throw Error('Repeated effect placement missing from timeline');
+   return true;
+   """,arguments:[:],in:nil,in:.page){result in
+    switch result{
+    case .success:print("Sound library import, copy and repeated Studio Effects placement passed");exit(0)
+    case .failure(let error):print("FAIL sound effects",error);exit(1)
+    }
+   }
  }
 
 }

@@ -348,6 +348,7 @@ button:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var
   <button data-t="production"><span class="en">Production</span><span class="jp">制作</span></button>
   <button data-t="queue"><span class="en">Render queue</span><span class="jp">進行</span><span class="n" id="n-queue"></span></button>
   <div class="nav-group">Finish</div>
+  <button data-t="effects"><span class="en">Sound Effects</span><span class="jp">効果音</span></button>
   <button data-t="studio"><span class="en">Studio</span><span class="jp">編集</span></button>
   <button data-t="assemble"><span class="en">Assemble</span><span class="jp">撮影</span></button>
   <div class="nav-group">Workspace</div>
@@ -406,12 +407,19 @@ button:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var
  <div id="shotlist"></div>
 </section>
 
+<section class="tab" id="t-effects">
+ <div class="toolbar"><button class="btn pri" onclick="editLibrarySound()">Import sound effect</button>
+ <label for="effect-search">Search sounds</label><input type="search" id="effect-search" placeholder="Name, category or tag" oninput="renderEffectsPage()">
+ <button class="btn" onclick="go('studio')">Open Studio</button></div>
+ <div id="effect-results"></div>
+</section>
+
 <section class="tab" id="t-studio">
  <h2>Episode timeline</h2><p>Drag shots to reorder. Trim or split at the playhead; source media stays intact. Preview selected video, dialogue and timed audio together before exporting.</p>
  <div class="theater" id="edit-monitor"><p>Seek the timeline to preview a shot.</p></div>
  <div class="toolbar"><button class="btn pri" id="edit-play" onclick="playEdit()">Play episode</button><button class="btn" onclick="frameEdit(-1)">Previous frame</button><button class="btn" onclick="frameEdit(1)">Next frame</button><button class="btn" onclick="editTimelineShot()">Trim current shot</button><button class="btn" onclick="splitEdit()">Split at playhead</button><button class="btn" onclick="editAudioCue()">Add audio cue</button><button class="btn" onclick="openAudioMixer()">Audio mixer</button><button class="btn" onclick="openSoundLibrary()">Sound library</button><button class="btn" onclick="renderCurrentShot()">Export current shot with sound</button><button class="btn" onclick="renderFinishedScene()">Render scene preview</button><span id="edit-state"></span></div>
  <input id="edit-playhead" aria-label="Episode playhead in seconds" type="range" min="0" max="1" value="0" step="0.0625" oninput="seekEdit(this.value)">
- <div id="edit-track" style="display:flex;overflow-x:auto;gap:4px;padding:10px 0"></div><div id="edit-cues" class="toolbar"></div><div class="toolbar"><button class="btn" onclick="openSoundLibrary()">Sound library</button><button class="btn" onclick="editGeneratedSound()">Generate sound effect</button><button class="btn" onclick="editGeneratedSound('music_cue')">Generate music cue</button></div>
+ <div id="edit-track" style="display:flex;overflow-x:auto;gap:4px;padding:10px 0"></div><div class="toolbar"><button class="btn" onclick="go('effects')">Browse sound effects</button><button id="paste-effect" class="btn" disabled onclick="pasteSoundEffect()">Paste effect at playhead</button><span id="effect-selection" class="muted"></span></div><div class="toolbar"><button class="btn" onclick="editGeneratedSound()">Generate sound effect</button><button class="btn" onclick="editGeneratedSound('music_cue')">Generate music cue</button></div><div id="edit-cues" class="toolbar"></div>
  <div class="toolbar"><label for="timeline-zoom">Timeline zoom</label><input id="timeline-zoom" type="range" min="12" max="100" value="30" style="width:160px" oninput="TIMELINE_ZOOM=+this.value;delete SIG['editor-timeline'];renderStudio()"><button class="btn" onclick="loadTimelineWaves()">Show dialogue waveforms</button><button class="btn" onclick="previewCut()">Preview cut boundary</button></div><button class="btn sm" onclick="drawWaveform()">Show current dialogue waveform</button><canvas id="edit-waveform" width="1000" height="90" style="width:100%;height:90px" role="img" aria-label="Dialogue waveform appears after selecting a shot with audio"></canvas>
  <div class="sec"><div><h2>Series and episodes</h2><p>Episodes have their own script, shots, style settings and cues. Cast, reference voices and server workflows are shared across the series. Finish or cancel renders before switching.</p><div class="toolbar"><button class="btn" onclick="editorPost('library',{action:'save'})">Save current episode</button><button class="btn" onclick="episodeAction('new')">New episode</button><button class="btn" onclick="episodeAction('duplicate')">Duplicate episode</button></div></div><div id="episode-list" class="card"></div></div>
  <div class="sec"><div><h2>History and recovery</h2><p>Editorial changes create checkpoints. Restoring saves the current state first. Generated files stay available for recovery; history uses extra disk space.</p><div class="toolbar"><button class="btn" onclick="undoEdit()">Undo last edit</button><button class="btn" onclick="checkpointEdit()">Create checkpoint</button><button class="btn" onclick="backupProject()">Back up portable project</button><button class="btn" onclick="importProject()">Import project archive</button></div><div id="project-download"></div></div><div id="edit-history" class="card" style="max-height:480px;overflow-y:auto"></div></div>
@@ -472,7 +480,7 @@ button:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var
 const $=s=>document.querySelector(s);
 let S=null,sel=new Set(),tab='shots',VOICES=null,FILTER='all',VIEW={},prevApproved={};
 const STAGES=['sheet','keyframe','animate','continue','lipsync','upscale','voice','voice_design','sound_effect','music_cue'];
-const TITLES={studio:['Studio','Edit the episode, manage history and deliver finished work.'],production:['Production','Preview pacing, check servers, and prepare one scene at a time.'],script:['Script','Write or paste the episode, then turn it into shots.'],cast:['Cast','Characters and locations with their reference sheets.'],voices:['Voices','Generate every line in its character’s voice, choose the best take, and play scenes back.'],shots:['Shots','Keyframe, animate and finish each shot.'],queue:['Render queue','Everything sent to ComfyUI, newest first.'],assemble:['Assemble','Put the episode together and export it for Resolve.'],settings:['Settings','Servers, workflows and project defaults.']};
+const TITLES={effects:['Sound Effects','Import and audition sounds. Copy an effect to place it on the Studio timeline.'],studio:['Studio','Edit the episode, manage history and deliver finished work.'],production:['Production','Preview pacing, check servers, and prepare one scene at a time.'],script:['Script','Write or paste the episode, then turn it into shots.'],cast:['Cast','Characters and locations with their reference sheets.'],voices:['Voices','Generate every line in its character’s voice, choose the best take, and play scenes back.'],shots:['Shots','Keyframe, animate and finish each shot.'],queue:['Render queue','Everything sent to ComfyUI, newest first.'],assemble:['Assemble','Put the episode together and export it for Resolve.'],settings:['Settings','Servers, workflows and project defaults.']};
 const jsq=s=>esc(JSON.stringify((s??'').toString()));   // JS string literal, safe inside an onclick="…" attribute
 const esc=s=>(s??'').toString().replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function post(u,b){try{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.ok===false&&j.error)toast(j.error,1);await load(true);return j}catch(e){toast('Can’t reach the Anime Studio server. Reopen the app.',1);return {ok:false}}}
@@ -495,6 +503,7 @@ function preserveMainScroll(update){
 function go(t){const main=$('main');TAB_SCROLL[tab]={top:main.scrollTop,left:main.scrollLeft};
  if(t!=='shots'&&typeof SHOT_PLAYERS!=='undefined')for(const player of SHOT_PLAYERS)player.suspend();
  const leavingQueue=tab==='queue'&&t!=='queue';
+ if(tab==='effects'&&t!==tab)stopLibraryAudio();
  tab=t;document.querySelectorAll('#nav button').forEach(x=>{x.classList.toggle('on',x.dataset.t===t);if(x.dataset.t===t)x.setAttribute('aria-current','page');else x.removeAttribute('aria-current')});document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x.id==='t-'+t));render(true);
  const position=TAB_SCROLL[t]||{top:0,left:0};++SCROLL_PAINT;main.scrollTop=position.top;main.scrollLeft=position.left;
  if(leavingQueue||t==='queue')load(true);
@@ -538,6 +547,10 @@ function modal(h,options={}){MODAL_OPENER=document.activeElement;MODAL_OPTIONS=o
 function closeModal(){if(!$('#modal').classList.contains('on'))return true;if(MODAL_OPTIONS.beforeClose&&!MODAL_OPTIONS.beforeClose())return false;$('#modal').classList.remove('on');MODAL_OPTIONS.onClose?.();MODAL_OPTIONS={};if(MODAL_OPENER?.isConnected)MODAL_OPENER.focus({preventScroll:true});return true}
 document.addEventListener('click',e=>{for(const menu of document.querySelectorAll('.action-menu[open]'))if(!menu.contains(e.target)||e.target.closest('button'))menu.open=false});
 $('#modal').onclick=e=>{if(e.target.id==='modal')closeModal()};
+document.addEventListener('paste',event=>handleEffectPaste(event));
+document.addEventListener('keydown',event=>{
+ if((event.metaKey||event.ctrlKey)&&!event.shiftKey&&!event.altKey&&event.key.toLowerCase()==='v')handleEffectPaste(event);
+});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){for(const menu of document.querySelectorAll('.action-menu[open]'))menu.open=false;closeModal();$('#lightbox').style.display='none'}if(e.key==='Tab'&&$('#modal').classList.contains('on')){const items=[...$('#dlg').querySelectorAll('button:not(:disabled),input:not(:disabled):not([type=hidden]),textarea:not(:disabled),select:not(:disabled),a[href],[tabindex="0"]')].filter(el=>el.getClientRects().length);const first=items[0],last=items[items.length-1];if(e.shiftKey&&(document.activeElement===first||!$('#dlg').contains(document.activeElement))){e.preventDefault();last?.focus()}else if(!e.shiftKey&&(document.activeElement===last||!$('#dlg').contains(document.activeElement))){e.preventDefault();first?.focus()}}});
 const wfOK=k=>S.workflows[k]&&!(S.workflows[k].problems||[]).length;
 function needs(s){if(!s.keyframe_take)return 'kf';if(s.kind==='still')return 'done';if(!s.clip_take)return 'clip';return 'done'}
@@ -559,7 +572,7 @@ function renderContent(force){if(!S)return;if(force)for(const k in SIG)delete SI
  $('#servers').innerHTML=S.instances.map(i=>`<div class="srv" title="${esc(i.health?i.health.info:'Checking')}"><span class="dot ${i.health?(i.health.ok?'ok':'bad'):''}"></span>${esc(i.name)}</div>`).join('')+(S.tools.ffmpeg?'':'<div class="srv err"><span class="dot bad"></span>ffmpeg missing</div>');
  $('#stats').innerHTML=tab==='shots'||tab==='assemble'?`<div class="stat"><b>${fmtT(total)}</b><span>runtime</span></div><div class="stat"><b>${S.shots.length}</b><span>shots</span></div><div class="stat"><b class="ok-t">${cn.done}</b><span>ready</span></div>`:'';
  if(tab==='script'&&(force||document.activeElement!==$('#script')))$('#script').value=S.settings.script||'';
- if(tab!=='studio'&&typeof stopEdit==='function')stopEdit();if(tab==='studio')renderStudio();if(tab==='production')renderProduction();renderDesigned();if(tab==='cast')renderCast();if(tab==='voices'&&(force||!document.activeElement.closest('#t-voices input')))renderVoices();if(tab==='shots')renderShots();if(tab==='queue')renderQueue();if(tab==='assemble')renderAssemble();
+ if(tab!=='studio'&&typeof stopEdit==='function')stopEdit();if(tab==='studio'){renderStudio();updateEffectPaste()}if(tab==='effects')renderEffectsPage();if(tab==='production')renderProduction();renderDesigned();if(tab==='cast')renderCast();if(tab==='voices'&&(force||!document.activeElement.closest('#t-voices input')))renderVoices();if(tab==='shots')renderShots();if(tab==='queue')renderQueue();if(tab==='assemble')renderAssemble();
  if(tab==='settings'&&(force||!document.activeElement.closest('#t-settings input,#t-settings textarea,#t-settings select')))renderSettings();if(typeof renderCreative==='function')renderCreative()}
 
 /* ---------- script ---------- */
