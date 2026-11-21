@@ -21,4 +21,4 @@ if __name__=='__main__':
                 if path.name in ('ffmpeg.exe','ffprobe.exe') or path.suffix.lower() in ('.txt','.md'):
                     if name.endswith('/'):continue
                     (ROOT/path.name).write_bytes(z.read(name))
-    (ROOT/'FFMPEG-SOURCE.txt').write_text('FFmpeg GPL distribution: '+URL+'\nBuild source and dependency recipes: https://github.com/FFmpeg-Builds/FFmpeg-Builds\nFFmpeg corresponding revision: https://github.com/FFmpeg/FFmpeg/tree/ae9f4540cb\nLicense: https://www.gnu.org/licenses/gpl-3.0.txt\n')
+    (ROOT/'FFMPEG-SOURCE.txt').write_text('FFmpeg GPL distribution: '+URL+'\nBuild source and dependency recipes: https://github.com/FFmpeg-Builds/FFmpeg-Builds\nFFmpeg corresponding revision: https://github.com/FFmpeg/FFmpeg/tree/ae9f4540cb\nLicense: https://www.gnu.org/licenses/gpl-3.0.txt\n', encoding='utf-8')

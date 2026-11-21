@@ -43,8 +43,8 @@ def main():
                     if (config/'window-ready.json').exists():break
                     time.sleep(.5)
                 else:raise RuntimeError('Windows desktop WebView did not load')
-                assert json.loads((config/'window-ready.json').read_text())['version']==version()
-                (config/'smoke-complete').write_text('verified')
+                assert json.loads((config/'window-ready.json').read_text(encoding='utf-8'))['version']==version()
+                (config/'smoke-complete').write_text('verified', encoding='utf-8')
                 process.wait(timeout=15);assert process.returncode==0
                 tools=Path(args.path).parent/'_internal/tools'
                 subprocess.run([str(tools/'ffmpeg.exe'),'-v','error','-f','lavfi','-i','sine=duration=0.2',str(root/'tone.wav')],check=True)
@@ -55,7 +55,7 @@ def main():
                 listing=subprocess.check_output(['ps','-axo','pid,ppid,command'],text=True)
                 assert str(Path(args.path)/'Contents/MacOS/AnimeStudioWindow') in listing
             assert (data/'studio.db').exists()
-            (data/'keep-project.txt').write_text('preserve user project on uninstall')
+            (data/'keep-project.txt').write_text('preserve user project on uninstall', encoding='utf-8')
             print('Packaged '+args.platform+' startup, resources and version verified.')
         finally:
             try:opener.open(urllib.request.Request(f'http://127.0.0.1:{port}/api/quit',data=b'{}',headers={'Content-Type':'application/json'}),timeout=2).close()

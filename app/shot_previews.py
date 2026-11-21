@@ -47,7 +47,7 @@ class ShotPreviews:
             if self.closed:
                 raise ValueError('The app is closing.')
             if output.is_file() and metadata.is_file():
-                return dict(ok=True, status='ready', url='/media/'+st.rel(output), **json.loads(metadata.read_text()))
+                return dict(ok=True, status='ready', url='/media/'+st.rel(output), **json.loads(metadata.read_text(encoding='utf-8')))
             existing = self.jobs.get(token)
             if existing and existing['status'] == 'ready':
                 del self.jobs[token]
@@ -137,7 +137,7 @@ class ShotPreviews:
                                    (solo and not spec['mixer'][name]['solo']) or
                                    spec['mixer'][name]['volume']==0 for name in active))
                 metadata = output.with_suffix('.json.tmp')
-                metadata.write_text(json.dumps(details))
+                metadata.write_text(json.dumps(details), encoding='utf-8')
                 metadata.replace(output.with_suffix('.json'))
             with self.lock:
                 self.jobs[token] = dict(status='ready', url='/media/'+st.rel(output), **details)

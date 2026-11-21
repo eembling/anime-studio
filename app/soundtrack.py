@@ -266,7 +266,7 @@ class Soundtrack:
             filters.append(''.join(labels) + f'amix=inputs={len(labels)}:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95:level=0:latency=1[mix]')
             self.ffmpeg(inputs + ['-filter_complex', ';'.join(filters), '-map', '0:v:0', '-map', '[mix]', '-c:v', 'copy',
                                    '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-t', f'{duration:.6f}', str(output)])
-        output.with_suffix('.audio.json').write_text(json.dumps({'master': self.st.rel(master), 'duration': duration, 'cues': snapshot}, indent=2))
+        output.with_suffix('.audio.json').write_text(json.dumps({'master': self.st.rel(master), 'duration': duration, 'cues': snapshot}, indent=2), encoding='utf-8')
         return duration
 
     def remix(self, body):

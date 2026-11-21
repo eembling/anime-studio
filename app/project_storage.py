@@ -14,7 +14,7 @@ from platform_runtime import storage_lock, config_directory
 def atomic_text(path, text):
     temporary = path.with_name(path.name + '.tmp-' + uuid.uuid4().hex)
     try:
-        temporary.write_text(text)
+        temporary.write_text(text, encoding='utf-8')
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -44,7 +44,7 @@ def migrate_project(source, config):
     signature = fingerprint(source)
     if destination.exists():
         marker = destination / '.migration.json'
-        saved = json.loads(marker.read_text()) if marker.is_file() else {}
+        saved = json.loads(marker.read_text(encoding='utf-8')) if marker.is_file() else {}
         if saved.get('source') == str(source) and saved.get('fingerprint') == signature and (destination/'studio.db').is_file():
             return destination
         raise ValueError('An existing migrated project differs from the legacy source. Both copies were preserved: ' + str(destination))
@@ -66,7 +66,7 @@ def migrate_project(source, config):
             original.close()
         if fingerprint(source) != signature:
             raise ValueError('The project changed during migration. Close the other Anime Studio instance and retry. The original was preserved.')
-        (staging/'.migration.json').write_text(json.dumps({'source':str(source),'fingerprint':signature},indent=2))
+        (staging/'.migration.json').write_text(json.dumps({'source':str(source),'fingerprint':signature},indent=2), encoding='utf-8')
         os.replace(staging, destination)
         return destination
     finally:
@@ -85,7 +85,7 @@ def resolve_storage(config, app_dir=None, override=None, home=None):
     with storage_lock(config/'storage.lock'):
         remembered = config/'data-folder'
         if remembered.is_file():
-            saved_path = remembered.read_text().strip()
+            saved_path = remembered.read_text(encoding='utf-8').strip()
             if not saved_path:
                 raise ValueError('The saved project location is empty. No project was replaced.')
             source = Path(saved_path).expanduser().resolve()

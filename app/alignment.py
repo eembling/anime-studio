@@ -81,7 +81,7 @@ class Alignment:
             self.root.mkdir(parents=True,exist_ok=True)
             with (self.root/'setup.log').open('w') as log:
                 self.process(['bash',str(script),str(self.root),shutil.which('python3.12') or ('/opt/homebrew/bin/python3.12' if Path('/opt/homebrew/bin/python3.12').exists() else sys.executable)],timeout=1200,log=log)
-            (self.root/'ready.json').write_text(json.dumps({'model':'base','created':time.time()}))
+            (self.root/'ready.json').write_text(json.dumps({'model':'base','created':time.time()}), encoding='utf-8')
             self.setup_state={'status':'done','message':'Local speech alignment is ready.'}
         except Exception as e:self.setup_state={'status':'error','message':'Setup failed. See '+str(self.root/'setup.log')+'. '+str(e)}
     def run(self,ident,path,text):

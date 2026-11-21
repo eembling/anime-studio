@@ -3,6 +3,8 @@ on:
   push:
     branches: ['codex/github-release-*']
   workflow_dispatch:
+env:
+  PYTHONUTF8: '1'
 permissions:
   contents: read
 concurrency:

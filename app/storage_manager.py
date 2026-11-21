@@ -62,7 +62,7 @@ class StorageManager:
         for p in root.glob('*/manifest.json'):
             try:
                 if p.parent.is_symlink():continue
-                data=json.loads(p.read_text());result.append({'id':p.parent.name,'created':data['created'],'files':len(data['files']),'bytes':sum(f['bytes'] for f in data['files'])})
+                data=json.loads(p.read_text(encoding='utf-8'));result.append({'id':p.parent.name,'created':data['created'],'files':len(data['files']),'bytes':sum(f['bytes'] for f in data['files'])})
             except (ValueError,KeyError):continue
         return sorted(result,key=lambda b:b['created'],reverse=True)
     def safe(self,path):
@@ -84,7 +84,7 @@ class StorageManager:
             try:
                 for f in files:
                     target=root/f['path'];target.parent.mkdir(parents=True,exist_ok=True);self.safe(f['path']).rename(target);moved.append(f)
-                (root/'manifest.json').write_text(json.dumps({'created':time.time(),'files':files}))
+                (root/'manifest.json').write_text(json.dumps({'created':time.time(),'files':files}), encoding='utf-8')
             except Exception:
                 for f in reversed(moved):(root/f['path']).rename(self.safe(f['path']))
                 shutil.rmtree(root,ignore_errors=True);raise
@@ -97,7 +97,7 @@ class StorageManager:
         if root.parent!=(self.st.data/'storage-trash').resolve():raise ValueError('Invalid cleanup batch.')
         manifest=root/'manifest.json'
         if not manifest.is_file():raise ValueError('Cleanup batch no longer exists.')
-        data=json.loads(manifest.read_text());files=data['files']
+        data=json.loads(manifest.read_text(encoding='utf-8'));files=data['files']
         if any(Path(f['path']).parts[0] not in ('cache','uploads','shots','voices','cast') for f in files):raise ValueError('Invalid cleanup manifest.')
         actual=sorted(self.files('storage-trash/'+ident) or [],key=lambda f:f['path'])
         expected={'storage-trash/'+ident+'/'+f['path'] for f in files}|{'storage-trash/'+ident+'/manifest.json'}

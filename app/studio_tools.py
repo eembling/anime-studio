@@ -1,3 +1,4 @@
+from contextlib import closing
 """Editorial history, episode library, scene maintenance, continuity and delivery."""
 import hashlib
 import json
@@ -75,9 +76,9 @@ class StudioTools:
         snapshot = json.dumps(self.snapshot())
         self.st.db.x('INSERT INTO edit_history VALUES(?,?,?,?)',
                      (ident, str(label)[:160], time.time(), snapshot))
-        (self.st.data/'history'/(ident+'.json')).write_text(snapshot)
+        (self.st.data/'history'/(ident+'.json')).write_text(snapshot, encoding='utf-8')
         if str(label).startswith('Automatic daily'):
-            with self.st.db.lock, sqlite3.connect(self.st.data/'history'/('automatic-'+time.strftime('%Y-%m-%d')+'.sqlite')) as copied:
+            with self.st.db.lock, closing(sqlite3.connect(self.st.data/'history'/('automatic-'+time.strftime('%Y-%m-%d')+'.sqlite'))) as copied:
                 self.st.db.conn.backup(copied)
         return ident
 
@@ -350,7 +351,7 @@ class StudioTools:
         target = root / ('project-' + ident + '.zip')
         temporary = root / ('db-' + ident + '.sqlite')
         with self.st.db.lock:
-            with sqlite3.connect(temporary) as conn:
+            with closing(sqlite3.connect(temporary)) as conn:
                 self.st.db.conn.backup(conn)
         try:
             with zipfile.ZipFile(target, 'w', compression=zipfile.ZIP_DEFLATED) as z:
@@ -381,7 +382,7 @@ class StudioTools:
                     if staging not in dest.parents or (info.external_attr >> 16) & 0o170000 == 0o120000:
                         raise ValueError('Unsafe archive entry')
                 z.extractall(staging)
-            with sqlite3.connect(staging/'studio.db') as conn:
+            with closing(sqlite3.connect(staging/'studio.db')) as conn:
                 conn.row_factory = sqlite3.Row
                 if conn.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise ValueError('Archive database is damaged')
@@ -460,7 +461,7 @@ class StudioTools:
             self.st.db.x("INSERT OR REPLACE INTO settings VALUES('subtitle_rows',?)", (json.dumps(rows),))
         if body.get('export'):
             folder=self.st.data/'exports'/'delivery';folder.mkdir(parents=True,exist_ok=True)
-            file=folder/('subtitles-'+uuid.uuid4().hex[:8]+'.srt');file.write_text('\n'.join(output))
+            file=folder/('subtitles-'+uuid.uuid4().hex[:8]+'.srt');file.write_text('\n'.join(output), encoding='utf-8')
             return {'ok':True,'url':'/media/'+self.st.rel(file)}
         return {'ok':True,'rows':rows}
 
@@ -486,7 +487,7 @@ class StudioTools:
         from export_runtime import run
         analysis=run(['ffmpeg','-hide_banner','-i',str(self.safe_path(output['output'])),'-af','loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json','-f','null','-'])
         if analysis.returncode: raise ValueError('Loudness analysis failed: '+analysis.stderr[-1200:])
-        (folder/'loudness.txt').write_text(analysis.stderr)
+        (folder/'loudness.txt').write_text(analysis.stderr, encoding='utf-8')
         return {'ok':True,'recipe_source':recipe_source,'files':{f.name:'/media/'+self.st.rel(f) for f in folder.iterdir() if f.suffix in ('.wav','.txt')}}
 
     def state(self):

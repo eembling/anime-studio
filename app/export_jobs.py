@@ -1,3 +1,4 @@
+from contextlib import closing
 """Persistent local exports rendered from isolated SQLite and media snapshots."""
 import json
 import shutil
@@ -45,11 +46,11 @@ class ExportJobs:
                          (ident,json.dumps(spec),time.time(),time.time()))
             # SQLite backup is short. File copies and media encoding happen after
             # the request releases the production lock.
-            with self.st.db.lock, sqlite3.connect(folder/'studio.db') as connection:
+            with self.st.db.lock, closing(sqlite3.connect(folder/'studio.db')) as connection:
                 self.st.db.conn.backup(connection)
-            with sqlite3.connect(folder/'studio.db') as connection:
+            with closing(sqlite3.connect(folder/'studio.db')) as connection:
                 paths=self.media(connection,spec)
-            (folder/'media.json').write_text(json.dumps([self.st.production.file_stamp(path) for path in paths]))
+            (folder/'media.json').write_text(json.dumps([self.st.production.file_stamp(path) for path in paths]), encoding='utf-8')
             self.launch(ident,spec)
             return {'ok':True,'job_id':ident,'cached':False}
 
@@ -131,11 +132,11 @@ class ExportJobs:
             self.status(ident,'preparing')
             manifest_file=folder/'media.json'
             if not manifest_file.exists():
-                with sqlite3.connect(folder/'studio.db') as connection:
+                with closing(sqlite3.connect(folder/'studio.db')) as connection:
                     paths=self.media(connection,spec)
                 manifest=[self.st.production.file_stamp(path) for path in paths]
-                manifest_file.write_text(json.dumps(manifest))
-            else:manifest=json.loads(manifest_file.read_text())
+                manifest_file.write_text(json.dumps(manifest), encoding='utf-8')
+            else:manifest=json.loads(manifest_file.read_text(encoding='utf-8'))
             snapshot.mkdir(exist_ok=True)
             for stamp in manifest:
                 if event.is_set():raise ExportCancelled('Export cancelled.')

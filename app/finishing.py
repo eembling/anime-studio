@@ -288,7 +288,7 @@ class Finishing:
                     'alimiter=limit=0.95:level=0:latency=1[out]',
                     '-map','0:v:0','-map','[out]','-c:v','copy','-c:a','aac','-b:a','192k',
                     '-ar','48000','-ac','2','-t',str(duration),str(output)])
-        output.with_suffix('.audio.json').write_text(json.dumps({'cues': tracks,'mixer':mixer},indent=2))
+        output.with_suffix('.audio.json').write_text(json.dumps({'cues': tracks,'mixer':mixer},indent=2), encoding='utf-8')
         return duration
 
     def join_picture(self, shots, segments, joined, fps):
@@ -327,6 +327,6 @@ class Finishing:
                            '-r',str(fps),'-t',str(duration),str(target)])
             files.append(target)
         listing=joined.parent/'picture-concat.txt'
-        listing.write_text(''.join(f"file '{file.relative_to(joined.parent).as_posix()}'\n" for file in files))
+        listing.write_text(''.join(f"file '{file.relative_to(joined.parent).as_posix()}'\n" for file in files), encoding='utf-8')
         ffmpeg(['-f','concat','-safe','0','-i',str(listing),'-map','0:v:0','-an','-c','copy',str(joined)])
         listing.unlink()

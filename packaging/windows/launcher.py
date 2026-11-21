@@ -55,7 +55,7 @@ def main():
                 if os.environ.get('ANIME_STUDIO_SMOKE')=='1':
                     title=window.evaluate_js('document.title')
                     if not title:raise RuntimeError('Desktop UI failed to load')
-                    (config/'window-ready.json').write_text(json.dumps({'title':title,'version':ping['version']}))
+                    (config/'window-ready.json').write_text(json.dumps({'title':title,'version':ping['version']}), encoding='utf-8')
                     def finish_smoke():
                         for _ in range(180):
                             if (config/'smoke-complete').exists():break
