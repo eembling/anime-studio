@@ -906,14 +906,38 @@ def build_workflow(template, key, p):
     return wf
 
 
-def collect_outputs(entry):
-    files, outs = [], entry.get("outputs", {})
-    for k in sorted(outs, key=_nid):
-        for v in outs[k].values():
-            if isinstance(v, list):
-                files += [f for f in v if isinstance(f, dict) and f.get("filename")]
-    real = [f for f in files if f.get("type", "output") == "output"]
-    return real or files
+def collect_outputs(entry, stage, graph=None):
+    """Pick a declared final saver or require one unambiguous output group."""
+    audio = stage in ('voice', 'voice_design')
+    still = stage in ('keyframe', 'sheet')
+    extensions = AUD_EXT if audio else IMG_EXT if still else IMG_EXT | VID_EXT
+    groups = {}
+    for key, outputs in entry.get('outputs', {}).items():
+        files = [file for items in outputs.values() if isinstance(items, list)
+                 for file in items if isinstance(file, dict) and file.get('type', 'output') == 'output'
+                 and Path(file.get('filename') or '').suffix.lower() in extensions]
+        if files:
+            groups[key] = files
+    if graph:
+        tagged = _tagged(graph, 'FINAL_OUTPUT')
+        if not tagged:
+            tagged = _tagged(graph, 'SAVE')
+        if len(tagged) > 1:
+            raise ValueError('Tag exactly one workflow saver FINAL_OUTPUT.')
+        if tagged:
+            groups = {key: files for key, files in groups.items() if key in tagged}
+    if not groups:
+        raise ValueError('Workflow saved no final output of the expected media type.')
+    if len(groups) > 1:
+        raise ValueError('Several nodes saved matching outputs. Tag the intended saver FINAL_OUTPUT and queue a new render.')
+    files = next(iter(groups.values()))
+    if not audio and not still:
+        videos = [file for file in files if Path(file['filename']).suffix.lower() in VID_EXT]
+        if len(videos) > 1:
+            raise ValueError('The final saver returned multiple videos. Configure it to save one video or one frame sequence.')
+        if videos:
+            return videos
+    return files
 
 
 # ======================================================================================
@@ -1238,7 +1262,7 @@ class Worker(threading.Thread):
     def execute(self, job_id, inst):
         st, db = self.st, self.st.db
         base, pid = inst["url"].rstrip("/"), None
-        events = None
+        events, submitted_graph = None, None
         try:
             job = db.one("SELECT * FROM jobs WHERE id=?", (job_id,))
             st.creative.started(job,inst)
@@ -1284,6 +1308,7 @@ class Worker(threading.Thread):
                                for slot, path in p["files"].items()}
                 wf = build_workflow(tpl, key, p)
                 wf = st.snapshots.patch(job,wf) if job.get("snapshot_json") else st.creative.patch_controls(job, wf)
+                submitted_graph = wf
                 try:
                     res = http_json("POST", base + "/prompt", {"prompt": wf, "client_id": f"anime-studio-{job_id}"}, 60)
                 except RuntimeError as e:
@@ -1324,9 +1349,11 @@ class Worker(threading.Thread):
                 db.x("UPDATE jobs SET prompt_id=NULL WHERE id=?", (job_id,))
                 msgs = [m for m in entry["status"].get("messages", []) if m and m[0] == "execution_error"]
                 raise RuntimeError("ComfyUI error: " + json.dumps(msgs[-1][1] if msgs else entry["status"])[:2500])
-            files = collect_outputs(entry)
-            if not files:
-                raise RuntimeError("Workflow finished but saved no files.")
+            graph = submitted_graph or prompt_graph(entry.get('prompt'), pid)
+            if graph is None:
+                captured = st.snapshots.workflow(job) or st.creative.workflow(job)
+                graph = json.loads(captured['json']) if captured else None
+            files = collect_outputs(entry, job['stage'], graph)
             self._progress(job_id, f"downloading {len(files)} file(s)")
             out_dir = st.data / "jobs" / str(job_id)
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -1424,6 +1451,7 @@ class Worker(threading.Thread):
         if stage in ("sheet", "keyframe"):
             if job.get("creative_json") and not imgs: raise ValueError("The recipe saved no image candidate.")
             for i, f in enumerate(imgs or local):
+                ffmpeg(["-i", str(f), "-frames:v", "1", "-f", "null", "-"])
                 dest = folder / f"{stage}_j{job['id']}_{output_id}_{i}{f.suffix.lower()}"
                 shutil.move(str(f), dest)
                 made.append((dest, 0))
@@ -1435,6 +1463,7 @@ class Worker(threading.Thread):
                 fps = (st.snapshots.workflow(job) or st.creative.workflow(job) or {}).get("fps") or st.wf_fps(key)
             dest = folder / f"{stage}_j{job['id']}_{output_id}.mp4"
             if vids:
+                ffmpeg(["-i", str(vids[0]), "-map", "0:v:0", "-f", "null", "-"])
                 dest = dest.with_suffix(vids[0].suffix.lower())
                 shutil.move(str(vids[0]), dest)
             else:
