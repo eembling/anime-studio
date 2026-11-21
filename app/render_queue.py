@@ -88,7 +88,7 @@ def remember_timings(db):
 def eligible_server(job, instance, health, readiness, compatibility=None):
     if not instance.get('enabled') or health.get('ok') is False:
         return False
-    if job.get('prompt_id'):
+    if job.get('prompt_id') or job.get('submission_client_id'):
         return job.get('instance_id') == instance['id']
     if job['stage'] not in {role.strip() for role in (instance.get('roles') or '').split(',')}:
         return False
