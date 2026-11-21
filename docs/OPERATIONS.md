@@ -309,3 +309,12 @@ Use Settings → Tools & storage → Set up local alignment. The environment, do
 Validate with a short clean recorded line, inspect the recognized words and listen before saving suggestions. Model recognition quality varies with language, names, background music and delivery. Low-confidence or mismatched words require correction/import rather than silent acceptance.
 
 The Settings storage manager is a project-scoped inventory. Moving candidates into its trash does not free disk space. Permanent deletion is a separate reviewed action and blocks referenced media/history/exports. Restore trash before restoring a checkpoint that newly references moved media.
+
+
+### ComfyUI sound effects and ambience
+
+In ComfyUI, install the checkpoint and encoder listed in the [Stable Audio Open template](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/audio_stable_audio_example.json). Test the template with one short effect. In Anime Studio, select the Stable Audio Open starter under Settings → Workflows → Sound effects and ambience. Assign that task to a server and check readiness.
+
+In Studio, move the playhead into a shot and choose Generate sound effect. Enter a prompt and choose Effects or Ambience. On completion, audition the candidate in the Sound library and use Add to episode to place it. The cue follows the original shot at the captured offset. The library keeps each candidate separate, including its seed and prompt.
+
+For a custom workflow, tag its text node PROMPT and its optional negative encoder NEGATIVE. Use a seconds_total field or tag a node with a seconds or duration field DURATION. The final saver must export one audio file. A Load Image node titled PICTURE_IN receives the selected shot keyframe if your recipe uses one.

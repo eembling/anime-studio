@@ -131,7 +131,9 @@ function renderSoundLibrary(){
  const rows=S.finishing.library.filter(sound=>(!SOUND_CATEGORY||sound.category===SOUND_CATEGORY)&&
   [sound.name,sound.tags,sound.category].some(value=>value.toLowerCase().includes(query)));
  $('#sound-results').innerHTML=rows.map(sound=>`<article class="sound-item"><h3>${esc(sound.name)}</h3><p>${esc(sound.category)} · ${esc(sound.tags)} · ${sound.seconds.toFixed(2)}s</p>
- <audio controls preload="none" src="${esc(sound.url)}"></audio><div class="toolbar"><button class="btn" onclick="useLibrarySound('${sound.id}')">Add to episode</button><button class="btn" onclick="editLibrarySound('${sound.id}')">Edit tags</button>
+ <audio controls preload="none" src="${esc(sound.url)}"></audio>
+ ${sound.generation?`<details><summary>Generation details · seed ${sound.generation.seed}</summary><p>${esc(sound.generation.prompt)}</p></details>`:''}
+ <div class="toolbar"><button class="btn" onclick="useLibrarySound('${sound.id}')">Add to episode</button><button class="btn" onclick="editLibrarySound('${sound.id}')">Edit tags</button>
  <button class="btn danger" onclick="deleteLibrarySound('${sound.id}')">Remove from library</button></div></article>`).join('')||'<p>No matching sounds.</p>';
 }
 function editLibrarySound(id){
@@ -177,4 +179,31 @@ function renderExportJobs(){
   ${job.result?.url?`<a class="btn sm" href="${esc(job.result.url)}" download>Download</a>`:''}
   ${Object.entries(job.result?.files||{}).map(([name,url])=>`<a class="btn sm" href="${esc(url)}" download>${esc(name)}</a>`).join('')}
  </div>`).join('');
+}
+function editGeneratedSound(){
+ if(!S.workflows.sound_effect)return toast('Import a Sound effects and ambience workflow in Settings first.',true);
+ const current=shotAt(EDIT_TIME);
+ if(!current)return toast('Move the playhead to the shot you want to score.',true);
+ const offset=Math.max(0,Math.round((EDIT_TIME-current.start)*editFps())/editFps());
+ const slots=S.workflows.sound_effect.slots;
+ modal(`<div class="dlg-h"><h2>Generate sound effect</h2></div><form id="generated-sound-form"><div class="dlg-b">
+ <p>Shot ${pad(current.shot.seq)} · starts ${audioTime(offset)} after the shot begins</p>
+ <label class="f" for="gs-name">Cue name</label><input id="gs-name" required maxlength="160">
+ <label class="f" for="gs-kind">Track</label><select id="gs-kind"><option value="sfx">Effects</option><option value="ambience">Ambience</option></select>
+ <label class="f" for="gs-prompt">Sound description</label><textarea id="gs-prompt" required maxlength="6000"></textarea>
+ ${slots.negative.length?'<label class="f" for="gs-negative">Avoid</label><textarea id="gs-negative" maxlength="6000"></textarea>':''}
+ <div class="g2"><label>Duration (seconds)<input id="gs-duration" type="number" required min="0.1" max="120" value="2" step="0.1"></label>
+ <label>Seed (optional)<input id="gs-seed" type="number" min="0" max="281474976710656" step="1"></label></div>
+ </div><div class="dlg-f"><button type="button" class="btn" onclick="closeModal()">Cancel</button><button class="btn pri" id="gs-queue">Queue candidate</button></div></form>`);
+ $('#generated-sound-form').onsubmit=async event=>{
+  event.preventDefault();
+  const button=$('#gs-queue'),seed=$('#gs-seed').value;button.disabled=true;
+  try{
+   const result=await post('/api/generate',{stage:'sound_effect',shot_ids:[current.shot.id],
+    kind:$('#gs-kind').value,name:$('#gs-name').value,prompt:$('#gs-prompt').value,
+    negative:$('#gs-negative')?.value,duration:+$('#gs-duration').value,anchor_offset:offset,
+    ...(seed?{seed:+seed}:{})});
+   if(result.queued){closeModal();toast('Queued sound candidate. Audition it in the Sound library when it finishes.');}
+  }finally{button.disabled=false}
+ };
 }

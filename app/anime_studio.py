@@ -49,8 +49,8 @@ for _p in ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.homebre
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
 
-JOB_STAGES = ("sheet", "keyframe", "animate", "continue", "lipsync", "upscale", "voice", "voice_design")
-WF_KEYS = ("keyframe", "animate", "animate_flf", "lipsync", "upscale", "voice", "voice_design")
+JOB_STAGES = ("sheet", "keyframe", "animate", "continue", "lipsync", "upscale", "voice", "voice_design", "sound_effect")
+WF_KEYS = ("keyframe", "animate", "animate_flf", "lipsync", "upscale", "voice", "voice_design", "sound_effect")
 ASSET_STAGES = ("sheet", "voice_design")   # jobs that belong to a cast member, not a shot
 _ASSET_SQL = "('sheet','voice_design')"
 TAKE_FIELD = {"keyframe": "keyframe_take", "animate": "clip_take", "lipsync": "clip_take", "upscale": "final_take"}
@@ -104,6 +104,19 @@ def _wan14b(flf=False):
 
 
 STARTERS = {
+    "sound_effect": {"stable_audio_open": {"fps": 0, "max_frames": 0, "wf": {
+        "1": _n("CheckpointLoaderSimple", {"ckpt_name": "stable-audio-open-1.0.safetensors"}),
+        "2": _n("CLIPLoader", {"clip_name": "t5-base.safetensors", "type": "stable_audio", "device": "default"}),
+        "3": _n("CLIPTextEncode", {"clip": ["2", 0], "text": ""}, "PROMPT"),
+        "4": _n("CLIPTextEncode", {"clip": ["2", 0], "text": ""}, "NEGATIVE"),
+        "5": _n("EmptyLatentAudio", {"seconds": 2.0, "batch_size": 1}, "DURATION"),
+        "6": _n("KSampler", {"model": ["1", 0], "positive": ["3", 0], "negative": ["4", 0], "latent_image": ["5", 0],
+                              "seed": 1, "steps": 50, "cfg": 4.98, "sampler_name": "dpmpp_3m_sde_gpu",
+                              "scheduler": "exponential", "denoise": 1.0}),
+        "7": _n("VAEDecodeAudio", {"samples": ["6", 0], "vae": ["1", 2]}),
+        "8": _n("SaveAudio", {"audio": ["7", 0], "filename_prefix": "anime/effect"}, "SAVE"),
+    }}},
+
     "keyframe": {"qwen_edit_2509": {"fps": 0, "max_frames": 0, "wf": {
         "1": _n("UNETLoader", {"unet_name": "qwen_image_edit_2509_fp8_e4m3fn.safetensors", "weight_dtype": "default"}),
         "2": _n("CLIPLoader", {"clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "type": "qwen_image", "device": "default"}),
@@ -830,7 +843,7 @@ def comfy_download(url, destination, progress=None):
 # ======================================================================================
 TEXT_ENCODERS = {"CLIPTextEncode", "TextEncodeQwenImageEditPlus", "TextEncodeQwenImageEdit", "TextEncodeQwenImage21"}
 SAVE_NODES = {"SaveImage", "SaveVideo", "VHS_VideoCombine", "SaveWEBM", "SaveAnimatedWEBP", "SaveAnimatedPNG",
-              "SaveAudio", "SaveAudioMP3", "SaveAudioOpus"}
+              "SaveAudio", "SaveAudioMP3", "SaveAudioOpus", "SaveAudioAdvanced"}
 VIDEO_LOADERS = {"LoadVideo": "file", "VHS_LoadVideo": "video"}
 MODEL_CONSUMERS = {"KSampler", "KSamplerAdvanced", "SamplerCustom", "BasicGuider", "CFGGuider", "DualCFGGuider"}
 
@@ -919,6 +932,12 @@ def detect_slots(wf, key):
         m["size"] = _tagged(wf, "SIZE") or [k for k in keys if {"width", "height", "length"} <= set(ins(k))][:1]
     elif key == "upscale":
         m["video_in"] = (_tagged(wf, "VIDEO_IN") or [k for k in keys if cls(k) in VIDEO_LOADERS])[:1]
+    elif key == "sound_effect":
+        m["audio_duration"] = [[k, field] for k in keys for field in ("seconds_total", "seconds", "duration")
+                               if isinstance(ins(k).get(field), (int, float))
+                               and (field == "seconds_total" or k in _tagged(wf, "DURATION"))]
+        m["picture_in"] = [k for k in _tagged(wf, "PICTURE_IN") if cls(k) == "LoadImage"][:1]
+        m["save"] = [k for k in m["save"] if cls(k).startswith("SaveAudio")]
     elif key == "voice_design":
         if not m["prompt"]:
             m["prompt"] = [k for k in keys if isinstance(ins(k).get("text"), str)][:1]
@@ -962,6 +981,11 @@ def check_workflow(wf, key):
         p.append("No reference voice input (Load Audio node, title AUDIO_IN).")
     if key == "upscale" and not m["video_in"]:
         p.append("No video input (Load Video node, title VIDEO_IN).")
+    if key == "sound_effect":
+        if not m["prompt"]:
+            p.append("Tag the sound description encoder PROMPT.")
+        if not m["audio_duration"]:
+            p.append("The sound workflow needs a writable seconds_total or a DURATION node.")
     if not m["save"]:
         p.append("No save node (Save Image / Save Video).")
     return p
@@ -1024,6 +1048,15 @@ def build_workflow(template, key, p):
             else:
                 _remove_node(wf, k)
         inject_loras(wf, p.get("loras", []))
+    if key == "sound_effect":
+        for k, field in m["audio_duration"]:
+            original = wf[k]["inputs"][field]
+            value = p["audio_seconds"]
+            wf[k]["inputs"][field] = max(1, round(value)) if isinstance(original, int) else float(value)
+        for k in m["picture_in"]:
+            if not imgs.get("picture"):
+                raise ValueError("The sound workflow needs an approved keyframe for PICTURE_IN.")
+            wf[k]["inputs"]["image"] = imgs["picture"]
     for slot, field_name in (("start_image", "start"), ("end_image", "end")):
         for k in m[slot]:
             wf[k]["inputs"]["image"] = imgs[field_name]
@@ -1071,7 +1104,7 @@ def build_workflow(template, key, p):
 
 def collect_outputs(entry, stage, graph=None):
     """Pick a declared final saver or require one unambiguous output group."""
-    audio = stage in ('voice', 'voice_design')
+    audio = stage in ('voice', 'voice_design', 'sound_effect')
     still = stage in ('keyframe', 'sheet')
     extensions = AUD_EXT if audio else IMG_EXT if still else IMG_EXT | VID_EXT
     groups = {}
@@ -1366,6 +1399,22 @@ class Worker(threading.Thread):
             return st.creative.composed(job)
         stage = job["stage"]
         p = {"seed": job["seed"], "prefix": f"anime/j{job['id']:06d}_{stage}", "files": {}}
+        if stage == "sound_effect":
+            spec = json.loads(job['note'])
+            row = st.wf_row(stage)
+            if not row:
+                raise ValueError("Import a sound effects workflow in Settings first.")
+            if row['name']=='stable_audio_open' and spec['duration'] > 47.6:
+                raise ValueError("Stable Audio Open supports effects up to 47.6 seconds.")
+            slots = detect_slots(json.loads(row['json']), stage)
+            p.update(prompt=spec['prompt'], negative=spec['negative'], audio_seconds=spec['duration'])
+            if slots['picture_in']:
+                shot = st.db.one("SELECT keyframe_take FROM shots WHERE id=?", (job['shot_id'],))
+                selected = st.take_path(shot['keyframe_take']) if shot else None
+                if not selected:
+                    raise ValueError("Choose a shot keyframe for this sound recipe.")
+                p['files']['picture'] = selected
+            return stage, p
         if stage == "sheet":
             a = st.db.one("SELECT * FROM assets WHERE id=?", (job["asset_id"],))
             if not a or not a["image"] or not st.abs(a["image"]).exists():
@@ -1685,6 +1734,9 @@ class Worker(threading.Thread):
             return   # deleted while rendering
         imgs = [f for f in local if f.suffix.lower() in IMG_EXT]
         vids = [f for f in local if f.suffix.lower() in VID_EXT]
+        if stage == "sound_effect":
+            st.finishing.save_generated_sound(job, [path for path in local if path.suffix.lower() in AUD_EXT])
+            return
         if stage == "voice_design":
             auds = [f for f in local if f.suffix.lower() in AUD_EXT]
             if not auds:
@@ -2622,6 +2674,27 @@ class API:
         st, stage = self.st, b["stage"]
         takes = max(1, min(8, int(b.get("takes", 1))))
         made, skipped = 0, []
+        if stage == "sound_effect":
+            if len(b.get('shot_ids', [])) != 1:
+                raise ValueError("Choose one shot for this sound cue.")
+            sid = int(b['shot_ids'][0])
+            if not st.db.one("SELECT id FROM shots WHERE id=?", (sid,)):
+                raise ValueError("The cue's anchor shot was removed.")
+            prompt = str(b.get('prompt') or '').strip()[:6000]
+            kind = b.get('kind', 'sfx')
+            if not prompt or kind not in ('sfx', 'ambience'):
+                raise ValueError("Enter a sound prompt and choose Effects or Ambience.")
+            duration, offset = float(b.get('duration', 2)), float(b.get('anchor_offset', 0))
+            if not (math.isfinite(duration) and 0.1 <= duration <= 120 and math.isfinite(offset) and 0 <= offset <= 7200):
+                raise ValueError("Review the sound duration and cue offset.")
+            seed = int(b['seed']) if b.get('seed') is not None else random.randint(1, 2**48)
+            if not 0 <= seed <= 2**48:
+                raise ValueError("Seed must be between 0 and 281474976710656.")
+            spec = dict(prompt=prompt, negative=str(b.get('negative') or '')[:6000], duration=duration,
+                        name=str(b.get('name') or prompt[:80]).strip()[:160], kind=kind, anchor_offset=offset)
+            jid = st.db.x("INSERT INTO jobs(shot_id,stage,status,seed,created,progress,note) VALUES(?,?,'pending',?,?,'waiting',?)",
+                          (sid, stage, seed, time.time(), json.dumps(spec)))
+            return {"ok": True, "queued": 1, "skipped": [], "job_ids": [jid]}
         if stage == "sheet":
             for aid in b["asset_ids"]:
                 for _ in range(takes):
