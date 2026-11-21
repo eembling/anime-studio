@@ -27,7 +27,7 @@ The [creative tools guide](docs/CREATIVE-TOOLS.md) covers the Reference library,
 | `app/ui.html` | The interface (single page, no external dependencies). |
 | `mac/` | macOS bundle parts: launcher, Swift/WebKit window, `Info.plist`, icon. |
 | `build_app.sh` | Builds `Anime Studio.app` from the files above. |
-| `server/download_models.sh` | Model downloads for the ComfyUI server (`wget -c` into `~/ComfyUI/models`). |
+| `server/download_models.sh` | Pinned and checksum-verified model downloads for the ComfyUI server. |
 | `server/install_tts.sh` | Installs local text-to-speech (Qwen3-TTS) into ComfyUI for the Voices tab. |
 | `workflows/` | The built-in ComfyUI workflows in API format, for reference or to open in ComfyUI. |
 | `examples/shotlist_template.csv` | Shot-list spreadsheet format. |
@@ -37,10 +37,10 @@ The [creative tools guide](docs/CREATIVE-TOOLS.md) covers the Reference library,
 
 ### ComfyUI server: models only
 1. Start ComfyUI so other machines can reach it, e.g. `python main.py --listen 0.0.0.0 --port 8188`.
-2. Copy `server/download_models.sh` to the server and run it. It downloads about 45 GB into `~/ComfyUI/models` and skips files that are already there.
+2. Copy the Anime Studio `server` directory to the server and run `bash server/download_models.sh`. It downloads about 45 GB into `~/ComfyUI/models` and skips files that are already there.
 3. Press **R** in the ComfyUI page, or restart ComfyUI.
 
-**Voices (optional, local TTS).** The Voices tab needs one custom node pack on the server. Copy `server/install_tts.sh` to the server, run `bash install_tts.sh`, then restart ComfyUI. The script:
+**Voices (optional, local TTS).** The Voices tab needs one custom node pack on the server. Run `bash server/install_tts.sh` from the same Anime Studio checkout, then restart ComfyUI. The script:
 - saves your current Python package list, so you can roll back
 - installs [ComfyUI-Qwen-TTS](https://github.com/flybirdxx/ComfyUI-Qwen-TTS) and its requirements; this upgrades `transformers` to 4.57 or newer in ComfyUI's Python
 - downloads the Qwen3-TTS voice-cloning models (1.7B and 0.6B) into `models/qwen-tts`
@@ -184,14 +184,13 @@ git pull --ff-only
 
 If Git reports local changes, preserve them and resolve the update normally. Do not reset the checkout. If ComfyUI runs with another environment, use that environment's Python for the requirements update.
 
-Get Anime Studio's helper from the feature branch containing this change (until it merges):
+From your Anime Studio checkout on the server, run:
 
 ```bash
-curl -fL --retry 3 https://raw.githubusercontent.com/eembling/anime-studio/codex/native-lipsync/server/install_lipsync.sh -o /tmp/anime-install-lipsync.sh
-COMFY="$HOME/ComfyUI" bash /tmp/anime-install-lipsync.sh
+COMFY="$HOME/ComfyUI" bash server/install_lipsync.sh
 ```
 
-The helper only downloads/resumes model files. It does not update ComfyUI, Python packages, custom nodes or services. Set `COMFY` differently if your checkout is elsewhere. It downloads:
+The helper verifies existing files and downloads missing or mismatched pinned model files. It downloads:
 
 - `models/diffusion_models/wan2.2_s2v_14B_fp8_scaled.safetensors`
 - `models/audio_encoders/wav2vec2_large_english_fp16.safetensors`

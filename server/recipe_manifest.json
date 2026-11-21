@@ -1,0 +1,376 @@
+{
+  "comfyui": {
+    "version": "0.45.0",
+    "commit": "989d93d0d968e704c589ce0146bb18c77f6b50cc"
+  },
+  "tts_node": {
+    "url": "https://github.com/flybirdxx/ComfyUI-Qwen-TTS.git",
+    "commit": "f8f029fab458f7ef09142edd23a6c678856b4850"
+  },
+  "assets": [
+    {
+      "group": "picture",
+      "path": "diffusion_models/qwen_image_edit_2509_fp8_e4m3fn.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI/resolve/f68ace85e60b4a02a323e394253731947657b7d2/split_files/diffusion_models/qwen_image_edit_2509_fp8_e4m3fn.safetensors",
+      "bytes": 20430698424,
+      "sha256": "318568f61951ab9da21100c7b896e3c1da67f0d2efad6421545e022cfaa2b2b4"
+    },
+    {
+      "group": "picture",
+      "path": "text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/1f12b17be14c89b026c51a91d67c32f84bb047bc/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "bytes": 9384670680,
+      "sha256": "cb5636d852a0ea6a9075ab1bef496c0db7aef13c02350571e388aea959c5c0b4"
+    },
+    {
+      "group": "picture",
+      "path": "vae/qwen_image_vae.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/1f12b17be14c89b026c51a91d67c32f84bb047bc/split_files/vae/qwen_image_vae.safetensors",
+      "bytes": 253806246,
+      "sha256": "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f"
+    },
+    {
+      "group": "picture",
+      "path": "loras/Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors",
+      "url": "https://huggingface.co/lightx2v/Qwen-Image-Lightning/resolve/d468c534b360e0754c6bf9e38ed49e1e09cd2e2a/Qwen-Image-Edit-2509/Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors",
+      "bytes": 849608296,
+      "sha256": "2a32ce938ec71db2b49a817b4844ae86995569518dea56ee0ddc209cbe8e1377"
+    },
+    {
+      "group": "picture",
+      "path": "diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/5df3a4a3ed0628002308022198249dbbbd045d09/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+      "bytes": 14294742832,
+      "sha256": "6122e79d55e0f235698d11d657f3b196c5273c830da00b2b013c5a048d5e6a42"
+    },
+    {
+      "group": "picture",
+      "path": "diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/5df3a4a3ed0628002308022198249dbbbd045d09/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+      "bytes": 14294742832,
+      "sha256": "5471a457b6ac404202a5fbe6c11595a3d5641fc766b00f38763f72303fffc21e"
+    },
+    {
+      "group": "shared",
+      "path": "text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/5df3a4a3ed0628002308022198249dbbbd045d09/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "bytes": 6735906897,
+      "sha256": "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68"
+    },
+    {
+      "group": "shared",
+      "path": "vae/wan_2.1_vae.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/5df3a4a3ed0628002308022198249dbbbd045d09/split_files/vae/wan_2.1_vae.safetensors",
+      "bytes": 253815318,
+      "sha256": "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b"
+    },
+    {
+      "group": "picture",
+      "path": "loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/5df3a4a3ed0628002308022198249dbbbd045d09/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
+      "bytes": 1226977424,
+      "sha256": "d176c808d6fc461999b68e321efcb7501b20b8c3797523ed0df14f7d1deff11e"
+    },
+    {
+      "group": "picture",
+      "path": "loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/5df3a4a3ed0628002308022198249dbbbd045d09/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors",
+      "bytes": 1226977424,
+      "sha256": "024f21de095bc8fad9809ded3e9e49a2e170dcf27075da8145ba7d60d8aab7f9"
+    },
+    {
+      "group": "picture",
+      "path": "upscale_models/RealESRGAN_x4plus_anime_6B.pth",
+      "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
+      "bytes": 17938799,
+      "sha256": "f872d837d3c90ed2e05227bed711af5671a6fd1c9f7d7e91c911a61f155e99da"
+    },
+    {
+      "group": "lipsync",
+      "path": "diffusion_models/wan2.2_s2v_14B_fp8_scaled.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/5df3a4a3ed0628002308022198249dbbbd045d09/split_files/diffusion_models/wan2.2_s2v_14B_fp8_scaled.safetensors",
+      "bytes": 16394832474,
+      "sha256": "140e75af5534ac3d91e710d9df756f7032addd64b341ba2c1c70e3e6da9aa216"
+    },
+    {
+      "group": "lipsync",
+      "path": "audio_encoders/wav2vec2_large_english_fp16.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/5df3a4a3ed0628002308022198249dbbbd045d09/split_files/audio_encoders/wav2vec2_large_english_fp16.safetensors",
+      "bytes": 630997322,
+      "sha256": "f0017a43ea57ef6b3d4866be607844bbd8cada6d30966f7d70044ed0d63d3f9e"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-Tokenizer-12Hz/config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz/resolve/7dd38ad4e9bad454aae9cd937d0cd577604fe229/config.json",
+      "bytes": 2336,
+      "git_blob": "06cc8dc4c5ec8a1929086b71b98c313020d9268b"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-Tokenizer-12Hz/configuration.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz/resolve/7dd38ad4e9bad454aae9cd937d0cd577604fe229/configuration.json",
+      "bytes": 76,
+      "git_blob": "ab58e2eaf53cd14a1a2a7527d9261ceea93a24cd"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-Tokenizer-12Hz/model.safetensors",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz/resolve/7dd38ad4e9bad454aae9cd937d0cd577604fe229/model.safetensors",
+      "bytes": 682293092,
+      "sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-Tokenizer-12Hz/preprocessor_config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz/resolve/7dd38ad4e9bad454aae9cd937d0cd577604fe229/preprocessor_config.json",
+      "bytes": 234,
+      "git_blob": "ba40914f4f49ab98a8ca545d4892ef7291a39592"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-Base/config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base/resolve/fd4b254389122332181a7c3db7f27e918eec64e3/config.json",
+      "bytes": 4494,
+      "git_blob": "81b57e8e790c07e8fa7f82d8bdfd7574d485c396"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-Base/generation_config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base/resolve/fd4b254389122332181a7c3db7f27e918eec64e3/generation_config.json",
+      "bytes": 245,
+      "git_blob": "1872b16d4535564abf2db5d6debe6cddd82b7f2e"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-Base/merges.txt",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base/resolve/fd4b254389122332181a7c3db7f27e918eec64e3/merges.txt",
+      "bytes": 1671839,
+      "git_blob": "20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-Base/model.safetensors",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base/resolve/fd4b254389122332181a7c3db7f27e918eec64e3/model.safetensors",
+      "bytes": 3857413744,
+      "sha256": "38fc7fc51c5e776e840414b6fd443962e9411b9654888fd7913e4da643cb857c"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-Base/preprocessor_config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base/resolve/fd4b254389122332181a7c3db7f27e918eec64e3/preprocessor_config.json",
+      "bytes": 127,
+      "git_blob": "0525dd953bb9241912f7147666f0d535165d5d4f"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-Base/speech_tokenizer/config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base/resolve/fd4b254389122332181a7c3db7f27e918eec64e3/speech_tokenizer/config.json",
+      "bytes": 2336,
+      "git_blob": "06cc8dc4c5ec8a1929086b71b98c313020d9268b"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-Base/speech_tokenizer/configuration.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base/resolve/fd4b254389122332181a7c3db7f27e918eec64e3/speech_tokenizer/configuration.json",
+      "bytes": 76,
+      "git_blob": "ab58e2eaf53cd14a1a2a7527d9261ceea93a24cd"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-Base/speech_tokenizer/model.safetensors",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base/resolve/fd4b254389122332181a7c3db7f27e918eec64e3/speech_tokenizer/model.safetensors",
+      "bytes": 682293092,
+      "sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-Base/speech_tokenizer/preprocessor_config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base/resolve/fd4b254389122332181a7c3db7f27e918eec64e3/speech_tokenizer/preprocessor_config.json",
+      "bytes": 234,
+      "git_blob": "ba40914f4f49ab98a8ca545d4892ef7291a39592"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-Base/tokenizer_config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base/resolve/fd4b254389122332181a7c3db7f27e918eec64e3/tokenizer_config.json",
+      "bytes": 7344,
+      "git_blob": "6ff9fd60cc623bb54bbd603cbd418c97a11528d7"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-Base/vocab.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base/resolve/fd4b254389122332181a7c3db7f27e918eec64e3/vocab.json",
+      "bytes": 2776833,
+      "git_blob": "4783fe10ac3adce15ac8f358ef5462739852c569"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-0.6B-Base/config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/5d83992436eae1d760afd27aff78a71d676296fc/config.json",
+      "bytes": 4494,
+      "git_blob": "4e923f500f5c3eeb78d44072e7049b28817c2e04"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-0.6B-Base/generation_config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/5d83992436eae1d760afd27aff78a71d676296fc/generation_config.json",
+      "bytes": 245,
+      "git_blob": "1872b16d4535564abf2db5d6debe6cddd82b7f2e"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-0.6B-Base/merges.txt",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/5d83992436eae1d760afd27aff78a71d676296fc/merges.txt",
+      "bytes": 1671839,
+      "git_blob": "20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-0.6B-Base/model.safetensors",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/5d83992436eae1d760afd27aff78a71d676296fc/model.safetensors",
+      "bytes": 1829344272,
+      "sha256": "180b3b10eb1c9f1b4db7806d5475bae3071c0243c299d49926bab1da3b6946f6"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-0.6B-Base/preprocessor_config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/5d83992436eae1d760afd27aff78a71d676296fc/preprocessor_config.json",
+      "bytes": 127,
+      "git_blob": "0525dd953bb9241912f7147666f0d535165d5d4f"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-0.6B-Base/speech_tokenizer/config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/5d83992436eae1d760afd27aff78a71d676296fc/speech_tokenizer/config.json",
+      "bytes": 2336,
+      "git_blob": "06cc8dc4c5ec8a1929086b71b98c313020d9268b"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-0.6B-Base/speech_tokenizer/configuration.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/5d83992436eae1d760afd27aff78a71d676296fc/speech_tokenizer/configuration.json",
+      "bytes": 76,
+      "git_blob": "ab58e2eaf53cd14a1a2a7527d9261ceea93a24cd"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-0.6B-Base/speech_tokenizer/model.safetensors",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/5d83992436eae1d760afd27aff78a71d676296fc/speech_tokenizer/model.safetensors",
+      "bytes": 682293092,
+      "sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-0.6B-Base/speech_tokenizer/preprocessor_config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/5d83992436eae1d760afd27aff78a71d676296fc/speech_tokenizer/preprocessor_config.json",
+      "bytes": 234,
+      "git_blob": "ba40914f4f49ab98a8ca545d4892ef7291a39592"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-0.6B-Base/tokenizer_config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/5d83992436eae1d760afd27aff78a71d676296fc/tokenizer_config.json",
+      "bytes": 7344,
+      "git_blob": "6ff9fd60cc623bb54bbd603cbd418c97a11528d7"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-0.6B-Base/vocab.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/5d83992436eae1d760afd27aff78a71d676296fc/vocab.json",
+      "bytes": 2776833,
+      "git_blob": "4783fe10ac3adce15ac8f358ef5462739852c569"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-VoiceDesign/config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign/resolve/5ecdb67327fd37bb2e042aab12ff7391903235d3/config.json",
+      "bytes": 4421,
+      "git_blob": "2c2c027c574a85c0d5a5d48e3cfed1a8a051ff9d"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-VoiceDesign/generation_config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign/resolve/5ecdb67327fd37bb2e042aab12ff7391903235d3/generation_config.json",
+      "bytes": 245,
+      "git_blob": "1872b16d4535564abf2db5d6debe6cddd82b7f2e"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-VoiceDesign/merges.txt",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign/resolve/5ecdb67327fd37bb2e042aab12ff7391903235d3/merges.txt",
+      "bytes": 1671839,
+      "git_blob": "20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-VoiceDesign/model.safetensors",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign/resolve/5ecdb67327fd37bb2e042aab12ff7391903235d3/model.safetensors",
+      "bytes": 3833402552,
+      "sha256": "391e8db219f292c515297cdceeb43e4eae67cdde35fa57e79a6a8a532fca0522"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-VoiceDesign/preprocessor_config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign/resolve/5ecdb67327fd37bb2e042aab12ff7391903235d3/preprocessor_config.json",
+      "bytes": 127,
+      "git_blob": "0525dd953bb9241912f7147666f0d535165d5d4f"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-VoiceDesign/speech_tokenizer/config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign/resolve/5ecdb67327fd37bb2e042aab12ff7391903235d3/speech_tokenizer/config.json",
+      "bytes": 2336,
+      "git_blob": "06cc8dc4c5ec8a1929086b71b98c313020d9268b"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-VoiceDesign/speech_tokenizer/configuration.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign/resolve/5ecdb67327fd37bb2e042aab12ff7391903235d3/speech_tokenizer/configuration.json",
+      "bytes": 76,
+      "git_blob": "ab58e2eaf53cd14a1a2a7527d9261ceea93a24cd"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-VoiceDesign/speech_tokenizer/model.safetensors",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign/resolve/5ecdb67327fd37bb2e042aab12ff7391903235d3/speech_tokenizer/model.safetensors",
+      "bytes": 682293092,
+      "sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-VoiceDesign/speech_tokenizer/preprocessor_config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign/resolve/5ecdb67327fd37bb2e042aab12ff7391903235d3/speech_tokenizer/preprocessor_config.json",
+      "bytes": 234,
+      "git_blob": "ba40914f4f49ab98a8ca545d4892ef7291a39592"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-VoiceDesign/tokenizer_config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign/resolve/5ecdb67327fd37bb2e042aab12ff7391903235d3/tokenizer_config.json",
+      "bytes": 7344,
+      "git_blob": "6ff9fd60cc623bb54bbd603cbd418c97a11528d7"
+    },
+    {
+      "group": "tts",
+      "path": "qwen-tts/Qwen3-TTS-12Hz-1.7B-VoiceDesign/vocab.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign/resolve/5ecdb67327fd37bb2e042aab12ff7391903235d3/vocab.json",
+      "bytes": 2776833,
+      "git_blob": "4783fe10ac3adce15ac8f358ef5462739852c569"
+    },
+    {
+      "group": "ti2v",
+      "path": "diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/5df3a4a3ed0628002308022198249dbbbd045d09/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
+      "bytes": 9999658848,
+      "sha256": "456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e"
+    },
+    {
+      "group": "ti2v",
+      "path": "vae/wan2.2_vae.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/5df3a4a3ed0628002308022198249dbbbd045d09/split_files/vae/wan2.2_vae.safetensors",
+      "bytes": 1409400960,
+      "sha256": "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156"
+    }
+  ]
+}
