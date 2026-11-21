@@ -206,7 +206,7 @@ class StudioTools:
                         # Preserve the script, scene membership, shot order and shot kind.
                         db.conn.execute("UPDATE shots SET keyframe_take=NULL, asset_ids='[]', keyframe_prompt='', motion_prompt='', camera='', notes='', duration=?, retime='hold', ref_prev=0, end_next=0, audio=NULL, audio_mode='lines', line_audio='[]', trim_in=0 WHERE id=?", (self.st.default_duration(), sid))
                         from voice_video import DIRECTION
-                        db.conn.execute("UPDATE shots SET voice_quality='standard',voice_framing='source',voice_direction=?,lip_sync_mode='keyframe' WHERE id=?", (DIRECTION, sid))
+                        db.conn.execute("UPDATE shots SET voice_quality='standard',voice_framing='source',voice_crop=NULL,voice_direction=?,lip_sync_mode='keyframe' WHERE id=?", (DIRECTION, sid))
                         for table in ('shot_direction', 'shot_recipes', 'line_performances', 'performance_takes', 'continuity_reviews', 'creative_runs', 'shot_sections'):
                             db.conn.execute('DELETE FROM '+table+' WHERE shot_id=?', (sid,))
                         db.conn.execute('DELETE FROM voice_takes WHERE shot_id=?', (sid,))

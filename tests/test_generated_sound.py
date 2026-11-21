@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'app'))
-from anime_studio import API, Studio, Worker, build_workflow, ffmpeg
+from anime_studio import API, Studio, Worker, build_workflow, collect_outputs, ffmpeg
 
 
 class GeneratedSoundTests(unittest.TestCase):
@@ -27,6 +27,8 @@ class GeneratedSoundTests(unittest.TestCase):
             self.assertEqual(graph['3']['inputs']['text'],'A short bell impact')
             self.assertEqual(graph['5']['inputs']['seconds'],1.25)
             self.assertEqual(graph['6']['inputs']['seed'],12)
+            saved = {'filename':'candidate.wav','type':'output'}
+            self.assertEqual(collect_outputs({'outputs':{'8':{'audio':[saved]}}}, 'sound_effect', graph), [saved])
             output = studio.data/'mock.wav'
             ffmpeg(['-f','lavfi','-i','sine=duration=1.25',str(output)])
             Worker(studio).finish(job,'sound_effect',[output])

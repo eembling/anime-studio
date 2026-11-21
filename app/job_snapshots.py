@@ -66,6 +66,7 @@ class JobSnapshots:
         if not old or not old.get('snapshot_json'):raise ValueError('This older render has no captured inputs. Generate a new take from its shot instead.')
         if old['status'] not in ('done','error','cancelled'):raise ValueError('Wait for this render to finish before repeating it.')
         row=dict(old);row.pop('id');row.update(status='pending',created=time.time(),started=None,finished=None,instance_id=None,prompt_id=None,error=None,progress='waiting',models_json=None)
+        row['submission_client_id']=None
         columns=list(row);jid=st.db.x('INSERT INTO jobs('+','.join(columns)+') VALUES('+','.join('?' for _ in columns)+')',list(row.values()))
         meta=json.loads(row['snapshot_json']);meta['params']['prefix']=f'anime/repeat_{jid}'
         st.db.x('UPDATE jobs SET snapshot_json=? WHERE id=?',(json.dumps(meta),jid))
@@ -77,11 +78,12 @@ class JobSnapshots:
             st.db.x('INSERT INTO creative_runs VALUES(?,?,?,?,?,?,NULL,NULL,NULL,?,NULL)',(creative['run_id'],jid,old['shot_id'],creative['recipe']['id'],creative['kind'],'pending',json.dumps(creative)))
         return jid
 
-    def compatible(self, job, instance):
+    def compatible(self, job, instance, cached_only=False):
         from anime_studio import build_workflow
         meta=self.meta(job);params=copy.deepcopy(meta['params'])
         # Readiness needs input slots, but must never upload files or submit a job.
         params['images']={slot:path for slot,path in params.get('files',{}).items()}
         graph=self.patch(job,build_workflow(meta['workflow'],meta['key'],params))
         recipe={'workflow':graph,'controls':[]}
-        return not self.st.creative.inspect_recipe(recipe,{},instance)['problems']
+        inspected = self.st.creative.inspect_recipe(recipe, {}, instance, cached_only=cached_only)
+        return None if inspected is None else not inspected['problems']
