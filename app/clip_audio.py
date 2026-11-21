@@ -66,21 +66,43 @@ def voice_filter(pinned, seconds, duration):
 
 
 def audio_inputs(workflow):
-    """Only connected audio inputs count; an unused LoadAudio cannot drive a render."""
+    """Find audio bound to a visual conditioning node on the saved picture path."""
     from anime_studio import SAVE_NODES
-    seen = set()
-    def visit(key):
-        if key in seen or key not in workflow:
-            return
-        seen.add(key)
-        for value in workflow[key].get('inputs', {}).values():
-            if isinstance(value,list) and len(value)==2:
-                visit(str(value[0]))
-    for key,node in workflow.items():
-        if node['class_type'] in SAVE_NODES and not node['class_type'].startswith('SaveAudio'):
-            visit(key)
-    return [key for key in seen if workflow[key]['class_type']=='LoadAudio' or
-            workflow[key].get('_meta',{}).get('title','').upper()=='AUDIO_IN']
+
+    def ancestors(roots):
+        pending = list(roots)
+        seen = set()
+        while pending:
+            key = pending.pop()
+            if key in seen or key not in workflow:
+                continue
+            seen.add(key)
+            node = workflow[key]
+            for field, value in node.get('inputs', {}).items():
+                if field == 'audio' and node['class_type'] in ('CreateVideo', 'VHS_VideoCombine', 'SaveVideo'):
+                    continue
+                if isinstance(value, list) and len(value) == 2 and isinstance(value[1], int):
+                    pending.append(str(value[0]))
+        return seen
+
+    visual_path = ancestors(key for key, node in workflow.items()
+                            if node['class_type'] in SAVE_NODES and not node['class_type'].startswith('SaveAudio'))
+    conditioning = []
+    for key in visual_path:
+        node = workflow[key]
+        if node['class_type'] == 'WanSoundImageToVideo':
+            fields = ('audio_encoder_output',)
+        elif (node.get('_meta') or {}).get('title', '').strip().upper() == 'AUDIO_CONDITIONING':
+            fields = ('audio', 'audio_encoder_output', 'audio_features', 'audio_embeds')
+        else:
+            continue
+        for field in fields:
+            value = node.get('inputs', {}).get(field)
+            if isinstance(value, list) and len(value) == 2 and isinstance(value[1], int):
+                conditioning.append(str(value[0]))
+    return [key for key in sorted(ancestors(conditioning))
+            if workflow[key]['class_type'] == 'LoadAudio' or
+            (workflow[key].get('_meta') or {}).get('title', '').strip().upper() == 'AUDIO_IN']
 
 
 def gpu_s2v(row):
