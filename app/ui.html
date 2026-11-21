@@ -720,9 +720,34 @@ function view(sid,tid){const video=$('#cut-'+sid+' video');if(+video?.dataset.ta
 function fullQuality(tid){const t=take(tid);if(!t)return;gen(t.stage==='continue'?'continue':'animate',[t.shot_id],{draft:false,seed:t.seed,segment:t.stage==='continue'?(t.segment||0):undefined})}
 function tog(id,on){on?sel.add(id):sel.delete(id);$('#selinfo').textContent=sel.size?`${sel.size} selected`:'Selected shots'}
 function selAll(on){sel=new Set(on?S.shots.filter(matches).map(s=>s.id):[]);renderShots()}
-async function gen(stage,ids,extra){if(stage==='continue'&&!extra){if(ids.length!==1)return toast('Open Continue shot on each shot to set its section direction.',1);return openContinuation(ids[0])}const b=Object.assign({stage,shot_ids:ids,takes:+$('#ntakes').value,draft:(stage==='animate'||stage==='continue')&&$('#draft').checked},extra||{});
+async function reviewKeyframe(shotId,referenceOrder){
+ const review=await post('/api/keyframe/review',{shot_id:shotId,reference_order:referenceOrder});
+ if(review.ok===false)return;
+ const refs=review.references;
+ const rows=refs.map((ref,index)=>'<div class="row"><span>'+esc(ref.label)+' · '+(ref.applied?'Reference '+(index+1):'Omitted')+'</span><button class="btn sm" data-reference-index="'+index+'" '+(index===0?'disabled':'')+'>Move up</button></div>').join('');
+ const text=value=>esc(value.join('\n\n')||'No text bound');
+ modal(`<div class="dlg-h"><h2>Review keyframe inputs</h2></div><div class="dlg-b">
+ <h3>Positive prompt</h3><pre style="white-space:pre-wrap">${text(review.positive)}</pre>
+ <h3>Negative prompt</h3><pre style="white-space:pre-wrap">${text(review.negative)}</pre>
+ <h3>Reference order</h3>${rows||'<p>No reference images assigned.</p>'}
+ <h3>LoRAs</h3>${review.loras.map(lora=>`<p>${esc(lora.name)} · ${esc(lora.strength??'Recipe strength')}</p>`).join('')||'<p>No LoRAs applied.</p>'}
+ ${review.omitted_loras.length?`<p class="warn-t">Omitted LoRAs · ${esc(review.omitted_loras.join(', '))}</p>`:''}
+ </div><div class="dlg-f"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn pri" id="queue-reviewed-keyframe">Generate keyframes</button></div>`);
+ for(const button of document.querySelectorAll('#dlg [data-reference-index]'))button.onclick=()=>{
+  const order=refs.map(ref=>ref.id), index=+button.dataset.referenceIndex;
+  [order[index-1],order[index]]=[order[index],order[index-1]];
+  reviewKeyframe(shotId,order);
+ };
+ $('#queue-reviewed-keyframe').onclick=async event=>{
+  const button=event.currentTarget;button.disabled=true;
+  const result=await gen('keyframe',[shotId],{keyframe_review_token:review.token,reference_order:referenceOrder});
+  if(result?.queued)closeModal();else button.disabled=false;
+ };
+}
+
+async function gen(stage,ids,extra){if(stage==='keyframe'&&ids.length===1&&!extra)return reviewKeyframe(ids[0]);if(stage==='continue'&&!extra){if(ids.length!==1)return toast('Open Continue shot on each shot to set its section direction.',1);return openContinuation(ids[0])}const b=Object.assign({stage,shot_ids:ids,takes:+$('#ntakes').value,draft:(stage==='animate'||stage==='continue')&&$('#draft').checked},extra||{});
  const r=await post('/api/generate',b);if(r.ok===false)return;
- toast(`Queued ${r.queued} job${r.queued===1?'':'s'}`+(r.audio_included?` · voice included in ${r.audio_included}`:'')+(r.audio_conditioned?` · ${r.audio_conditioned} audio-driven`:'')+((r.audio_notes||[]).length?`. ${r.audio_notes[0].slice(0,350)}`:'')+(r.skipped.length?`. Skipped ${r.skipped.length}: ${r.skipped.slice(0,2).join('; ')}${r.skipped.length>2?'…':''}`:''))}
+ toast(`Queued ${r.queued} job${r.queued===1?'':'s'}`+(r.audio_included?` · voice included in ${r.audio_included}`:'')+(r.audio_conditioned?` · ${r.audio_conditioned} audio-driven`:'')+((r.audio_notes||[]).length?`. ${r.audio_notes[0].slice(0,350)}`:'')+(r.skipped.length?`. Skipped ${r.skipped.length}: ${r.skipped.slice(0,2).join('; ')}${r.skipped.length>2?'…':''}`:''));return r}
 function bulk(stage){if(!sel.size)return toast('Select shots first, or tick Select all',1);gen(stage,[...sel])}
 let PLAYER=null,PLAYBTN=null;
 function playA(btn,url){if(PLAYER){PLAYER.pause();if(PLAYBTN){PLAYBTN.classList.remove('on');PLAYBTN.textContent='▶'}}

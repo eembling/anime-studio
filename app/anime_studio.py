@@ -255,6 +255,7 @@ MIGRATIONS = [  # columns added after v2.0 - existing projects get them on start
     ("voice_takes", "character_id", "INTEGER"), ("voice_takes", "line_id", "TEXT"),
     ("jobs", "voice_character_id", "INTEGER"), ("jobs", "voice_line_id", "TEXT"),
     ("jobs", "voice_autoselect", "INTEGER DEFAULT 0"), ("jobs", "voice_previous_audio", "TEXT"),
+    ("shots", "keyframe_reference_order", "TEXT"),
     ("jobs", "voice_ref_path", "TEXT"), ("jobs", "voice_ref_text", "TEXT"), ("jobs", "voice_direction", "TEXT"),
     ("takes", "input_signature", "TEXT"), ("voice_takes", "input_signature", "TEXT"),
     ("assets", "voice_desc", "TEXT DEFAULT ''"), ("assets", "voice_sample", "TEXT DEFAULT ''"),
@@ -473,6 +474,16 @@ class Studio:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(base64.b64decode(f["data"].split(",")[-1]))
         return self.rel(dest)
+
+    def keyframe_template(self, shot_id):
+        assignment = self.creative.assignment(shot_id, 'keyframe')
+        if assignment:
+            recipe = self.creative.recipe(assignment['recipe_id'])
+            return recipe['workflow'], assignment['values'], recipe
+        row = self.wf_row('keyframe')
+        if not row:
+            raise ValueError('Configure the keyframe workflow first.')
+        return json.loads(row['json']), {}, None
 
     def ordered_shots(self):
         return self.db.q("SELECT * FROM shots ORDER BY seq, id")
@@ -1159,25 +1170,36 @@ class Worker(threading.Thread):
                     if a: assets.append(a)
             assets = [dict(a, image=overrides[a['id']]['image']) if a['id'] in overrides else a for a in assets]
             assets = st.creative.scene_assets(shot['scene'], assets)
-            lines, refs, loras = [], [], []
-            for a in assets:
-                if a["lora"]:
-                    loras.append((a["lora"], a["lora_strength"]))
-                if a["image"] and st.abs(a["image"]).exists() and len(refs) < 3:
-                    refs.append(st.abs(a["image"]))
-                    lines.append(f"Picture {len(refs)} is {a['name']}" + (f" ({a['description']})" if a["description"] else ""))
-                elif a["description"]:
-                    lines.append(f"{a['name']}: {a['description']}")
-            if shot["ref_prev"] and len(refs) < 3:
-                prev = st.neighbor(shot, -1)
-                pp = st.take_path(prev["keyframe_take"]) if prev else None
-                if pp:
-                    refs.append(pp)
-                    lines.append(f"Picture {len(refs)} is the previous shot: keep the same location, lighting and outfits")
+            graph = job.get('_keyframe_template')
+            if graph is None:
+                graph, _, _ = st.keyframe_template(shot['id'])
+            limit = len(detect_slots(graph, 'keyframe')['refs'])
+            references = []
+            for asset in assets:
+                if asset['image'] and st.abs(asset['image']).is_file():
+                    label = asset['name'] + (f" ({asset['description']})" if asset['description'] else '')
+                    references.append((f"cast-{asset['id']}", label, st.abs(asset['image'])))
+            if shot['ref_prev']:
+                previous = st.neighbor(shot, -1)
+                image = st.take_path(previous['keyframe_take']) if previous else None
+                if image and image.is_file():
+                    references.append(('previous', 'the previous shot: keep the same location, lighting and outfits', image))
+            order = job.get('reference_order', json.loads(shot.get('keyframe_reference_order') or '[]'))
+            priority = {ident: index for index, ident in enumerate(order)}
+            references.sort(key=lambda ref: priority.get(ref[0], len(priority)))
+            chosen = references[:limit]
+            lines = [f'Picture {index+1} is {label}' for index, (_, label, _) in enumerate(chosen)]
+            chosen_ids = {ident for ident, _, _ in chosen}
+            lines += [f"{asset['name']}: {asset['description']}" for asset in assets
+                      if asset['description'] and f"cast-{asset['id']}" not in chosen_ids]
+            loras = [(asset['lora'], asset['lora_strength']) for asset in assets if asset['lora']]
+            p['review_references'] = [{'id': ident, 'label': label, 'path': st.rel(path), 'applied': index < limit}
+                                      for index, (ident, label, path) in enumerate(references)]
+            p['omitted_loras'] = [name for name, _ in loras[4:]]
             parts = [". ".join(lines), shot["keyframe_prompt"], shot["camera"], st.creative.direction(shot["id"]).get("notes", ""), context["lighting"], context["notes"], ". ".join(v["notes"] for v in context["variants"]), S.get("style_prompt", "")]
             p["prompt"] = ". ".join(x.strip().rstrip(".") for x in parts if x and x.strip()) + "."
             p["negative"] = S.get("keyframe_negative", "")
-            p["files"] = {f"ref{i + 1}": r for i, r in enumerate(refs)}
+            p["files"] = {f"ref{i + 1}": ref[2] for i, ref in enumerate(chosen)}
             p["loras"] = loras[:4]
             p["width"], p["height"] = S["kf_width"], S["kf_height"]
             return "keyframe", p
@@ -2160,8 +2182,53 @@ class API:
         return {"ok": True, "made": made, "skipped": skipped}
 
     # ---- generation / takes / jobs
+    def keyframe_review(self, body):
+        st = self.st
+        shot_id = int(body['shot_id'])
+        order = body.get('reference_order')
+        if order is not None and (not isinstance(order, list) or any(not isinstance(item, str) for item in order)):
+            raise ValueError('Invalid keyframe reference order.')
+        job = {'id': 0, 'shot_id': shot_id, 'seed': 0, 'stage': 'keyframe'}
+        if order is not None:
+            job['reference_order'] = order
+        key, params = Worker(st).compose(job)
+        template, controls, recipe = st.keyframe_template(shot_id)
+        problems = check_workflow(template, key)
+        if problems:
+            raise ValueError(' '.join(problems))
+        if recipe:
+            st.creative.keyframe_conditioning(shot_id, recipe, params)
+        params['images'] = {slot: path if isinstance(path, str) else st.rel(path)
+                            for slot, path in params['files'].items()}
+        graph = build_workflow(template, key, params)
+        for control, value in controls.items():
+            node, field = control.split('.', 1)
+            graph[node]['inputs'][field] = value
+        slots = detect_slots(graph, key)
+
+        def prompt_values(kind):
+            return [str(graph[node]['inputs'].get('text', graph[node]['inputs'].get('prompt', ''))) for node in slots[kind]]
+
+        loras = [{'name': node['inputs']['lora_name'], 'strength': node['inputs'].get('strength_model')}
+                 for node in graph.values() if node.get('inputs', {}).get('lora_name')]
+        stamps = {slot: st.production.file_stamp(path) for slot, path in params['images'].items()}
+        token = hashlib.sha256(json.dumps([graph, stamps], sort_keys=True).encode()).hexdigest()
+        return {'ok': True, 'token': token, 'positive': prompt_values('prompt'), 'negative': prompt_values('negative'),
+                'images': {slot: self.media(path) for slot, path in params['images'].items()}, 'loras': loras,
+                'references': params['review_references'], 'omitted_loras': params['omitted_loras']}
+
     def generate(self, b):
         with self.st.production.lock:
+            if b.get('keyframe_review_token'):
+                if b['stage'] != 'keyframe' or len(b.get('shot_ids', [])) != 1 or b.get('recipe_id'):
+                    raise ValueError('Review a single keyframe using its assigned recipe.')
+                sid = b['shot_ids'][0]
+                review = self.keyframe_review({'shot_id': sid, 'reference_order': b.get('reference_order')})
+                if review['token'] != b['keyframe_review_token']:
+                    raise ValueError('The keyframe inputs changed. Review them again before generating.')
+                if b.get('reference_order') is not None:
+                    self.st.db.x('UPDATE shots SET keyframe_reference_order=? WHERE id=?',
+                                 (json.dumps(b['reference_order']), sid))
             from voice_video import validate as validate_voice_video
             validate_voice_video({k: b[k] for k in ('voice_quality',) if k in b})
             before=self.st.db.one('SELECT COALESCE(MAX(id),0) n FROM jobs')['n']
@@ -2503,7 +2570,7 @@ ROUTES = {
     "/api/asset/save": "asset_save", "/api/asset/delete": "asset_delete", "/api/asset/use_sheet": "asset_use_sheet",
     "/api/shot/save": "shot_save", "/api/shot/delete": "shot_delete", "/api/shot/move": "shot_move",
     "/api/csv/import": "csv_import", "/api/voice": "voice", "/api/clips/upload": "clips_upload", "/api/clip/update": "clip_update",
-    "/api/clip/delete": "clip_delete", "/api/lines/match": "match", "/api/line/set": "line_set", "/api/voice_take/delete": "voice_take_delete", "/api/line/direction": "line_direction", "/api/generate": "generate", "/api/approve": "approve",
+    "/api/clip/delete": "clip_delete", "/api/lines/match": "match", "/api/line/set": "line_set", "/api/voice_take/delete": "voice_take_delete", "/api/line/direction": "line_direction", "/api/keyframe/review": "keyframe_review", "/api/generate": "generate", "/api/approve": "approve",
     "/api/take/delete": "take_delete", "/api/jobs": "job_action", "/api/music": "music", "/api/assemble": "assemble",
 }
 

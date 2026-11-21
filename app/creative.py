@@ -493,7 +493,12 @@ class CreativeStudio:
                     job['seed'] = int(number(body['seed'], 1, 2**48)) + len(made)
                     self.st.db.x('UPDATE jobs SET seed=? WHERE id=?', (job['seed'], job['id']))
                 if recipe:
-                    key, p = Worker(self.st).compose(dict(job, _lip_workflow=lip_workflow) if lip_workflow else job)
+                    compose_job = dict(job)
+                    if lip_workflow:
+                        compose_job['_lip_workflow'] = lip_workflow
+                    if stage == 'keyframe':
+                        compose_job['_keyframe_template'] = recipe['workflow']
+                    key, p = Worker(self.st).compose(compose_job)
                     self.freeze(job, recipe, values, key, p, manual=bool(body.get('manual')), batch=body.get('batch'))
                 made.append(job['id'])
         return {'ok': True, 'queued': len(made), 'job_ids': made, 'skipped': skipped}
@@ -504,6 +509,14 @@ class CreativeStudio:
         if not any(not c['problems'] for c in checks):
             problems = '; '.join(p for c in checks for p in c['problems']) or 'No enabled server accepts '+recipe['stage']+' jobs.'
             raise ValueError('Recipe is not ready. '+problems+' '+recipe.get('requirements', ''))
+
+    def keyframe_conditioning(self, shot_id, recipe, params):
+        direction = self.direction(shot_id)
+        if recipe['stage'] == 'keyframe' and recipe.get('purpose') == 'generation':
+            for slot in ('pose', 'depth', 'layout'):
+                if direction.get('conditioning') and direction.get(slot):
+                    self.require_slot(recipe, slot.upper())
+                    params['files']['creative_'+slot.upper()] = direction[slot]
 
     def freeze(self, job, recipe, values, key, params, **extras):
         p = copy.deepcopy(params)
@@ -523,12 +536,7 @@ class CreativeStudio:
             requested = extras['span']['end']-extras['span']['start'] if extras.get('span') else float(shot['duration'])
             seconds = min(requested, (int(recipe['max_frames'])-1)/float(recipe['fps']))
             p['length'] = min(int(recipe['max_frames']), max(1, 4*math.ceil(seconds*float(recipe['fps'])/4)+1))
-        direction = self.direction(job['shot_id'])
-        if recipe['stage'] == 'keyframe' and recipe.get('purpose') == 'generation':
-            for slot in ('pose', 'depth', 'layout'):
-                if direction.get('conditioning') and direction.get(slot):
-                    self.require_slot(recipe, slot.upper())
-                    p['files']['creative_'+slot.upper()] = direction[slot]
+        self.keyframe_conditioning(job['shot_id'], recipe, p)
         if recipe['stage'] == 'voice' and extras.get('kind') == 'phrase':
             p['prompt'] = self.spoken(job.get('voice_character_id'), p.get('prompt', ''))
         run_id = uuid.uuid4().hex
