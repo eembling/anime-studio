@@ -25,7 +25,7 @@ def capture(st, job, folder, fps):
 
 def embed(st, job, video):
     """Replace embedded sound with the captured selected voice, without retiming picture."""
-    from anime_studio import ffmpeg, media_seconds
+    from anime_studio import ffmpeg, media_seconds, record_import_file
     pinned = st.snapshots.meta(job).get('clip_audio')
     if not pinned:
         return video
@@ -41,6 +41,7 @@ def embed(st, job, video):
     filters = voice_filter(pinned,seconds,duration)
     frame_limit=['-frames:v',str(max(1,round(duration*float(pinned['fps']))))] if pinned.get('fps') else []
     output = video.with_name(video.stem+'-with-voice.mp4')
+    record_import_file(output)
     try:
         ffmpeg(['-i',str(video),'-i',str(voice),'-filter_complex','[1:a]'+filters+'[voice]',
                 '-map','0:v:0','-map','[voice]','-c:v','copy','-c:a','aac','-b:a','192k','-ar','48000','-ac','2',

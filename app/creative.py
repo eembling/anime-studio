@@ -730,13 +730,14 @@ class CreativeStudio:
         return {'ok': True, 'queued': 1, 'job_ids': [jid]}
 
     def finish_special(self, job, key, local):
-        from anime_studio import ffmpeg, media_seconds, stitch_frames, VID_EXT, AUD_EXT, IMG_EXT
+        from anime_studio import ffmpeg, media_seconds, stitch_frames, VID_EXT, AUD_EXT, IMG_EXT, record_import_file
         meta = self.meta(job)
         if meta.get('kind') == 'phrase':
             audio = next((p for p in local if p.suffix.lower() in AUD_EXT), None)
             if not audio:
                 raise ValueError('The phrase workflow produced no audio.')
             dest = self.st.data/'voices'/'lines'/('phrase-'+uuid.uuid4().hex+'.wav'); dest.parent.mkdir(exist_ok=True)
+            record_import_file(dest)
             ffmpeg(['-i', str(audio), '-ar', '48000', '-ac', '2', str(dest)])
             payload = {'path': self.st.rel(dest), 'seconds': media_seconds(dest), 'base_audio': meta['base_audio'],
                        'identity': meta['line_identity'], 'input_signature':(self.st.db.one('SELECT signature FROM production_inputs WHERE job_id=?',(job['id'],)) or {}).get('signature'), 'range': meta['range'], 'phrase': meta['phrase'], 'job_id': job['id']}
@@ -750,6 +751,7 @@ class CreativeStudio:
             frames = [p for p in local if p.suffix.lower() in IMG_EXT]
             if not frames: raise ValueError('The interval recipe produced no video or frames.')
             video = self.st.data/'cache'/('repair-generated-'+uuid.uuid4().hex+'.mp4')
+            record_import_file(video)
             stitch_frames(frames, meta['recipe']['fps'], video)
         length = span['end']-span['start']
         if media_seconds(video)+1/span['fps'] < length:
@@ -764,6 +766,7 @@ class CreativeStudio:
         graph.append(''.join(parts)+f'concat=n={len(parts)}:v=1:a=0[v]')
         folder = self.st.data/'shots'/f"{job['shot_id']:04d}"; folder.mkdir(exist_ok=True)
         dest = folder/('repaired-'+uuid.uuid4().hex+'.mp4')
+        record_import_file(dest)
         ffmpeg(['-i', str(source), '-i', str(video), '-filter_complex', ';'.join(graph), '-map', '[v]', '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-t', str(span['total']), str(dest)])
         signature = self.st.db.one('SELECT signature FROM production_inputs WHERE job_id=?', (job['id'],))['signature']
         self.st.db.x('INSERT INTO takes(shot_id,stage,path,fps,seed,job_id,created,frames,segment,input_signature) VALUES(?,?,?,?,?,?,?,?,?,?)',

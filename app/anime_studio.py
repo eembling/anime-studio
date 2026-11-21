@@ -23,6 +23,7 @@ import csv
 import glob
 import io
 import json
+from contextlib import contextmanager
 import mimetypes
 import os
 import random
@@ -267,6 +268,32 @@ class ProjectDatabaseAccessError(RuntimeError):
     """macOS/file authorization denied access to the existing project, not a corrupt database."""
 
 
+_IMPORT_CONTEXT = threading.local()
+
+
+def record_import_file(path):
+    manifest = getattr(_IMPORT_CONTEXT, 'manifest', None)
+    if manifest is not None:
+        with manifest.open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps(str(path)) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+
+def reconcile_import(studio, manifest):
+    committed = studio.db.one('SELECT token FROM render_imports WHERE token=?', (manifest.stem,))
+    if not committed:
+        for line in manifest.read_text(encoding='utf-8').splitlines():
+            try:
+                path = Path(json.loads(line)).resolve()
+            except (ValueError, TypeError):
+                continue
+            if studio.data in path.parents:
+                path.unlink(missing_ok=True)
+    manifest.unlink()
+    studio.db.x('DELETE FROM render_imports WHERE token=?', (manifest.stem,))
+
+
 class DB:
     def __init__(self, path):
         try:
@@ -281,6 +308,7 @@ class DB:
                     "Choose Project Folder and select the existing AnimeStudio Data folder to grant access. "
                     "Do not delete or replace studio.db. Original SQLite error: " + str(exc)) from exc
             raise
+        self._transaction_active = False
         self.conn.row_factory = sqlite3.Row
         self.lock = threading.RLock()
         with self.lock:
@@ -292,6 +320,18 @@ class DB:
                     if (table, col) == ("shots", "audio_mode"):   # audio from before v2.2 was one file per shot
                         self.conn.execute("UPDATE shots SET audio_mode='file' WHERE audio IS NOT NULL")
             self.conn.commit()
+
+    @contextmanager
+    def transaction(self):
+        with self.lock:
+            if self._transaction_active:
+                raise RuntimeError('Nested database transaction')
+            self._transaction_active = True
+            try:
+                with self.conn:
+                    yield
+            finally:
+                self._transaction_active = False
 
     def q(self, sql, args=()):
         with self.lock:
@@ -305,14 +345,16 @@ class DB:
         """Execute and return lastrowid (for INSERTs)."""
         with self.lock:
             cur = self.conn.execute(sql, args)
-            self.conn.commit()
+            if not self._transaction_active:
+                self.conn.commit()
             return cur.lastrowid
 
     def u(self, sql, args=()):
         """Execute and return the number of changed rows."""
         with self.lock:
             cur = self.conn.execute(sql, args)
-            self.conn.commit()
+            if not self._transaction_active:
+                self.conn.commit()
             return cur.rowcount
 
 
@@ -387,6 +429,10 @@ class Studio:
         for sub in ("uploads", "shots", "cast", "jobs", "exports", "voices", "cache"):
             (self.data / sub).mkdir(parents=True, exist_ok=True)
         self.db = DB(self.data / "studio.db")
+        self.db.x("CREATE TABLE IF NOT EXISTS render_imports(token TEXT PRIMARY KEY)")
+        if not export_worker:
+            for manifest in (self.data / "jobs").glob("*/*.render-import"):
+                reconcile_import(self, manifest)
         from voice_video import initialize as initialize_voice_video
         initialize_voice_video(self.db)
         for k, v in DEFAULT_SETTINGS.items():
@@ -625,6 +671,7 @@ class Studio:
                 graph += f"[{i}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay={delay}:all=1,apad=pad_dur={pad}[a{i}];"
             graph += "".join(f"[a{i}]" for i in range(len(lines))) + f"concat=n={len(lines)}:v=0:a=1[out]"
             dest = self.data / "voices" / f"shot{shot_id}_mix_{uuid.uuid4().hex[:6]}.wav"
+            record_import_file(dest)
             ffmpeg(ins + ["-filter_complex", graph, "-map", "[out]", "-ar", "48000", str(dest)])
             secs, dur = media_seconds(dest), float(s["duration"])
             if fit and secs + 0.4 > dur:
@@ -1339,10 +1386,19 @@ class Worker(threading.Thread):
             with st.production.lock:
                 if (db.one("SELECT status FROM jobs WHERE id=?", (job_id,)) or {}).get("status") != "running":
                     return
-                if not st.creative.finish_special(job, key, local):
-                    self.finish(job, key, local)
-            db.x("UPDATE jobs SET status='done', finished=?, progress='done' WHERE id=? AND status='running'", (time.time(), job_id))
-            st.creative.completed(db.one('SELECT * FROM jobs WHERE id=?', (job_id,)), 'done')
+                manifest = out_dir / (uuid.uuid4().hex + '.render-import')
+                manifest.touch()
+                _IMPORT_CONTEXT.manifest = manifest
+                try:
+                    with db.transaction():
+                        if not st.creative.finish_special(job, key, local):
+                            self.finish(job, key, local)
+                        db.x("UPDATE jobs SET status='done', finished=?, progress='done' WHERE id=?", (time.time(), job_id))
+                        st.creative.completed(db.one('SELECT * FROM jobs WHERE id=?', (job_id,)), 'done')
+                        db.x('INSERT INTO render_imports VALUES(?)', (manifest.stem,))
+                finally:
+                    _IMPORT_CONTEXT.manifest = None
+                    reconcile_import(st, manifest)
             from render_queue import remember_timings
             remember_timings(db)
             shutil.rmtree(out_dir, ignore_errors=True)
@@ -1387,6 +1443,7 @@ class Worker(threading.Thread):
             folder.mkdir(parents=True, exist_ok=True)
             safe = re.sub(r"[^A-Za-z0-9_-]+", "_", a["name"]).strip("_") or f"cast{a['id']}"
             dest = folder / f"{safe}_designed_{job['id']}_{output_id}.wav"
+            record_import_file(dest)
             ffmpeg(["-i", str(auds[0]), "-ar", "48000", str(dest)])
             has_ref = st.db.one("SELECT id FROM voice_clips WHERE asset_id=? AND is_ref=1", (a["id"],))
             st.db.x("INSERT INTO voice_clips(asset_id,path,name,transcript,seconds,is_ref,created) VALUES(?,?,?,?,?,?,?)",
@@ -1399,6 +1456,7 @@ class Worker(threading.Thread):
                 raise RuntimeError("The voice workflow saved no audio file.")
             (st.data / "voices" / "lines").mkdir(parents=True, exist_ok=True)
             dest = st.data / "voices" / "lines" / f"tts_j{job['id']}_{output_id}.wav"
+            record_import_file(dest)
             ffmpeg(["-i", str(auds[0]), "-ar", "48000", str(dest)])
             shot = st.db.one("SELECT * FROM shots WHERE id=?", (job["shot_id"],))
             if not shot:
@@ -1425,6 +1483,7 @@ class Worker(threading.Thread):
             if job.get("creative_json") and not imgs: raise ValueError("The recipe saved no image candidate.")
             for i, f in enumerate(imgs or local):
                 dest = folder / f"{stage}_j{job['id']}_{output_id}_{i}{f.suffix.lower()}"
+                record_import_file(dest)
                 shutil.move(str(f), dest)
                 made.append((dest, 0))
         else:
@@ -1436,11 +1495,13 @@ class Worker(threading.Thread):
             dest = folder / f"{stage}_j{job['id']}_{output_id}.mp4"
             if vids:
                 dest = dest.with_suffix(vids[0].suffix.lower())
+                record_import_file(dest)
                 shutil.move(str(vids[0]), dest)
             else:
                 if not st.tools()["ffmpeg"]:
                     raise RuntimeError("ffmpeg is needed on this Mac to turn frames into video: brew install ffmpeg")
                 self._progress(job["id"], f"stitching {len(imgs)} frames at {fps} fps")
+                record_import_file(dest)
                 stitch_frames(imgs, fps, dest)
             from clip_audio import embed as embed_clip_audio
             dest = embed_clip_audio(st, job, dest)
