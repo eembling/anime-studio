@@ -23,7 +23,7 @@ import csv
 import glob
 import io
 import json
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import math
 import mimetypes
 import os
@@ -459,6 +459,7 @@ def find_rife():
 
 class Studio:
     def __init__(self, data_dir, export_worker=False):
+        self.projects = None
         self.data = Path(data_dir).expanduser().resolve()
         for sub in ("uploads", "shots", "cast", "jobs", "exports", "voices", "cache"):
             (self.data / sub).mkdir(parents=True, exist_ok=True)
@@ -1398,17 +1399,38 @@ class Worker(threading.Thread):
                     continue
                 job = candidate
                 break
-            if job and db.u("UPDATE jobs SET status='running', instance_id=?, started=?, progress='starting', error=NULL "
-                            "WHERE id=? AND status='pending'", (inst["id"], job.get("started") or time.time(), job["id"])):
-                busy.add(inst["id"])
-                threading.Thread(target=self.execute, args=(job["id"], inst), daemon=True).start()
+            if not job:
+                continue
+            from platform_runtime import ControllerBusy
+            lease = self.st.projects.server_lock(inst['url']) if self.st.projects else nullcontext()
+            try:
+                lease.__enter__()
+            except ControllerBusy:
+                memory_waits[job['id']] = 'Another project is rendering on this server.'
+                continue
+            try:
+                if db.u("UPDATE jobs SET status='running', instance_id=?, started=?, progress='starting', error=NULL "
+                        "WHERE id=? AND status='pending'", (inst["id"], job.get("started") or time.time(), job["id"])):
+                    busy.add(inst["id"])
+                    threading.Thread(target=self.execute_leased, args=(job["id"], inst, lease), daemon=True).start()
+                    continue
+            except BaseException:
+                lease.__exit__(*sys.exc_info())
+                raise
+            lease.__exit__(None, None, None)
 
         for job in db.q("SELECT id,progress FROM jobs WHERE status='pending'"):
             wait = memory_waits.get(job['id'])
             if wait:
                 self._progress_wait(job, wait)
-            elif (job.get('progress') or '').startswith(('Waiting for GPU memory:', 'Waiting for current free GPU')):
+            elif (job.get('progress') or '').startswith(('Waiting for GPU memory:', 'Waiting for current free GPU', 'Another project is rendering')):
                 self._progress_wait(job, 'waiting')
+
+    def execute_leased(self, job_id, instance, lease):
+        try:
+            self.execute(job_id, instance)
+        finally:
+            lease.__exit__(None, None, None)
 
     def _progress_wait(self, job, value):
         if job['progress'] != value:
@@ -2176,7 +2198,8 @@ class API:
         except (OSError,ValueError):build={'version':VERSION,'commit':'development','branch':'local source'}
         return {"project_id":hashlib.sha256(str(st.data).encode()).hexdigest()[:24],"build":build,"alignment":st.alignment.state(),"settings": S, "tts_languages": TTS_LANGUAGES, "voice_sample": VOICE_SAMPLE, "shots": shots, "assets": assets, "instances": insts, "workflows": wfs, "starters": starters,
                 "jobs": jobs, "job_counts": counts, "assembly": A, "tools": st.tools(), "music_url": self.media(S.get("music")),
-                "version": VERSION, "platform": sys.platform, "background_rendering": (st.data/".keep-rendering").is_file(), "production": production, "render_queue": queue,
+                "version": VERSION, "platform": sys.platform,
+                "project_name": st.projects.name if st.projects else None, "background_rendering": (st.data/".keep-rendering").is_file(), "production": production, "render_queue": queue,
                 "audio_cues": [dict(c, url=self.media(c['path'])) for c in cues],
                 "audio_exports": [dict(e, url=self.media(e['output'])) for e in st.soundtrack.export_states(S, cues)],
                 "export_jobs": st.exports.rows() if hasattr(st,'exports') else [], "finishing": st.finishing.state(), "editor": st.editor.state(), "creative": st.creative.state(), "voice_recovery_count": len(voice_recovery_rows)}
@@ -3080,7 +3103,7 @@ def make_handler(st, api):
                     return self._send(200, INDEX_HTML, "text/html; charset=utf-8")
                 if path == '/shot_voices.js':
                     return self._send(200, (Path(__file__).resolve().parent / 'shot_voices.js').read_text(encoding='utf-8'), 'text/javascript; charset=utf-8')
-                if path in ('/voice_video.js','/studio_audio.js','/settings.js','/settings.css','/continuations.js','/workspace.js','/workspace.css','/finishing.js','/finishing.css','/shot_playback.js','/mix_processor.js','/audio_mix.json'):
+                if path in ('/voice_video.js','/studio_audio.js','/settings.js','/settings.css','/continuations.js','/workspace.js','/workspace.css','/finishing.js','/finishing.css','/shot_playback.js','/mix_processor.js','/audio_mix.json','/projects.js'):
                     return self._send(200, (Path(__file__).resolve().parent / path[1:]).read_text(encoding='utf-8'), 'application/json' if path.endswith('.json') else 'text/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8')
                 if path == '/creative.css':
                     return self._send(200, (Path(__file__).resolve().parent / 'creative.css').read_text(encoding='utf-8'), 'text/css; charset=utf-8')
@@ -3091,9 +3114,21 @@ def make_handler(st, api):
                 if path == '/production.js':
                     return self._send(200, (Path(__file__).resolve().parent / 'production.js').read_text(encoding='utf-8'), 'text/javascript; charset=utf-8')
                 if path == "/api/ping":
+                    counts = {}
+                    if st.projects and st.db.lock.acquire(blocking=False):
+                        try:
+                            counts = {row['status']: row['count'] for row in st.db.q(
+                                "SELECT status,COUNT(*) AS count FROM jobs WHERE status IN ('pending','running') GROUP BY status")}
+                        finally:
+                            st.db.lock.release()
                     return self._send(200, {"ok": True, "app": "anime-studio", "version": VERSION,
+                                            "projects": bool(st.projects), "job_counts": counts,
                                             "project": hashlib.sha256(str(st.data).encode()).hexdigest(),
                                             "background_rendering": (st.data/".keep-rendering").is_file()})
+                if path == "/api/projects":
+                    if not st.projects:
+                        return self._send(200, {"ok": False, "error": "Open the desktop app to manage projects."})
+                    return self._send(200, {"ok": True, "projects": st.projects.state()})
                 if path in ("/api/state", "/api/queue/state"):
                     queue_only = path != "/api/state"
                     etag = api.state_etag(queue_only)
@@ -3121,6 +3156,16 @@ def make_handler(st, api):
         def do_POST(self):
             try:
                 path = urllib.parse.urlparse(self.path).path
+                if path == "/api/projects":
+                    origin = f"http://127.0.0.1:{self.server.server_port}"
+                    if (not st.projects or self.headers.get("Host") != origin.removeprefix("http://")
+                            or self.headers.get("Origin") not in (None, origin)
+                            or self.headers.get_content_type() != "application/json"):
+                        return self._send(403, {"ok": False, "error": "Project actions require the local desktop app."})
+                    length = int(self.headers.get("Content-Length") or 0)
+                    if not 0 < length <= 32768:
+                        return self._send(400, {"ok": False, "error": "Invalid project request."})
+                    return self._send(200, st.projects.action(json.loads(self.rfile.read(length))))
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
                 fn = ROUTES.get(path)
                 if not fn:
@@ -3180,6 +3225,7 @@ def main():
     ap = argparse.ArgumentParser(description="Anime Studio - ComfyUI production app")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8700)
+    ap.add_argument("--projects", action="store_true", help="Enable the local desktop project catalog")
     ap.add_argument("--data", default="~/Documents/AnimeStudio")
     ap.add_argument("--export-workflows", metavar="DIR", help="Write the starter API workflows to DIR and exit")
     args = ap.parse_args()
@@ -3191,19 +3237,39 @@ def main():
                 (d / f"{key}__{name}_api.json").write_text(json.dumps(s["wf"], indent=2, ensure_ascii=False), encoding='utf-8')
         print("Wrote starter workflows to", d)
         return
-    from platform_runtime import project_controller
+    from platform_runtime import config_directory, project_controller
+    if args.projects and args.host != '127.0.0.1':
+        ap.error('Project management requires the IPv4 loopback interface.')
     project = Path(args.data).expanduser().resolve()
     project.mkdir(parents=True, exist_ok=True)
     with project_controller(project / '.controller.lock'):
         # Bind before touching project state so a failed launch cannot reset
         # another running controller's jobs.
+        preferred = args.port
+        if args.projects and not preferred:
+            from project_workspace import saved_port
+            preferred = saved_port(project) or 0
         try:
-            srv = ThreadingHTTPServer((args.host, args.port), BaseHTTPRequestHandler)
+            srv = ThreadingHTTPServer((args.host, preferred), BaseHTTPRequestHandler)
         except OSError as error:
-            print(f"Port {args.port} busy ({error}).", flush=True)
-            sys.exit(3)
+            if args.projects and args.port == 0 and preferred:
+                srv = ThreadingHTTPServer((args.host, 0), BaseHTTPRequestHandler)
+            else:
+                print(f"Port {args.port} busy ({error}).", flush=True)
+                sys.exit(3)
         with srv:
             st = Studio(project)
+            if args.projects:
+                from project_workspace import ProjectWorkspace
+                from project_storage import atomic_text
+                config = Path(os.environ.get('ANIME_STUDIO_CONFIG', str(config_directory())))
+                if getattr(sys, 'frozen', False):
+                    command = [sys.executable, '--backend']
+                else:
+                    command = [sys.executable, str(Path(__file__).resolve())]
+                st.projects = ProjectWorkspace(st, config, command)
+                atomic_text(project / '.controller-port', str(srv.server_port))
+
             import signal
 
             def stop_local(signum, frame):
@@ -3219,7 +3285,7 @@ def main():
             srv.RequestHandlerClass = make_handler(st, API(st))
             st.worker = Worker(st)
             st.worker.start()
-            print(f"Anime Studio {VERSION} -> http://{args.host}:{args.port}   data: {st.data}", flush=True)
+            print(f"Anime Studio {VERSION} -> http://{args.host}:{srv.server_port}   data: {st.data}", flush=True)
             srv.serve_forever()
 
 

@@ -3,6 +3,8 @@ import WebKit
 final class Check: NSObject, WKNavigationDelegate {
  var web: WKWebView!
  var tries=0
+ var projectCheck=false
+ var returningToOriginal=false
  var window:NSWindow!
  func start() {
   let config=WKWebViewConfiguration()
@@ -18,7 +20,9 @@ final class Check: NSObject, WKNavigationDelegate {
   NSApplication.shared.activate(ignoringOtherApps:true)
   web.load(URLRequest(url:URL(string:"http://127.0.0.1:8871")!))
  }
- func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { poll() }
+ func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+  if projectCheck { verifyProject() } else { poll() }
+ }
  func poll(){
   web.evaluateJavaScript("typeof S!=='undefined' && !!S?.finishing && !!document.querySelector('#shotlist video')") { result,error in
    if (result as? Bool)==true { self.clip();return }
@@ -152,10 +156,49 @@ final class Check: NSObject, WKNavigationDelegate {
    return true;
    """,arguments:[:],in:nil,in:.page){result in
     switch result{
-    case .success:print("Sound library import, copy and repeated Studio Effects placement passed");exit(0)
+    case .success:print("Sound library import, copy and repeated Studio Effects placement passed");self.createProject()
     case .failure(let error):print("FAIL sound effects",error);exit(1)
     }
    }
+ }
+
+ func createProject(){
+  projectCheck=true
+  web.evaluateJavaScript("""
+   document.querySelector('[data-t="projects"]').click();
+   document.querySelector('#t-projects button').click();
+   document.querySelector('#project-input').value='Native isolated project';
+   document.querySelector('#project-form').requestSubmit();
+   true
+   """){_,error in
+    if let error=error { print("FAIL project creation",error);exit(1) }
+   }
+ }
+ func verifyProject(){
+  let expected=returningToOriginal ? "S?.shots?.length===1&&S?.audio_cues?.length===2" :
+     "S?.project_name==='Native isolated project'&&S?.shots?.length===0&&S?.audio_cues?.length===0"
+  web.evaluateJavaScript(expected){value,error in
+   if (value as? Bool) != true {
+    if let error=error { print("FAIL project state",error);exit(1) }
+    DispatchQueue.main.asyncAfter(deadline:.now()+0.15){self.verifyProject()}
+    return
+   }
+   if self.returningToOriginal {
+    print("Native Projects create, switch back, and isolated media state passed");exit(0)
+   }
+   self.returningToOriginal=true
+   self.web.callAsyncJavaScript("""
+    document.querySelector('[data-t="projects"]').click();
+    for(let i=0;i<100;i++){
+     const button=document.querySelector('[data-open-project]');
+     if(button){button.click();return true}
+     await new Promise(resolve=>setTimeout(resolve,50));
+    }
+    throw Error('Original project not found in catalog');
+    """,arguments:[:],in:nil,in:.page){result in
+    if case .failure(let error)=result {print("FAIL switch project",error);exit(1)}
+   }
+  }
  }
 
 }

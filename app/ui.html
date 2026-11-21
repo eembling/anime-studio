@@ -339,6 +339,7 @@ button:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var
 <aside>
  <div class="brand"><svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true"><rect x="1" y="1" width="28" height="28" rx="7" fill="#C8372D"/><rect x="7" y="9" width="16" height="12" rx="2" fill="none" stroke="#fff" stroke-width="2"/><path d="M13 12.2v5.6l4.6-2.8z" fill="#fff"/></svg><b>Anime Studio</b></div>
  <nav id="nav">
+  <button data-t="projects"><span class="en">Projects</span><span class="n" id="active-project-name"></span></button>
   <div class="nav-group">Plan</div>
  <button data-t="script"><span class="en">Script</span><span class="jp">脚本</span></button>
   <button data-t="cast"><span class="en">Cast</span><span class="jp">キャラ表</span><span class="n" id="n-cast"></span></button>
@@ -360,6 +361,16 @@ button:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var
 <div class="top"><div><h1 id="pagetitle">Shots</h1><div class="sub" id="pagesub"></div></div><div class="stats" id="stats"></div></div>
 
 <div id="connection-status" class="warnbox" role="status" hidden></div>
+<section class="tab" id="t-projects">
+ <div class="toolbar">
+  <button class="btn pri" onclick="projectDialog('create')">New project</button>
+  <button class="btn" onclick="projectDialog('open')">Open existing project</button>
+  <button class="btn" onclick="loadProjects()">Refresh</button>
+ </div>
+ <div id="projects-status" class="muted" role="status"></div>
+ <div id="project-list"></div>
+</section>
+
 <section class="tab" id="t-script">
  <div class="script-wrap">
   <div class="page"><textarea id="script" spellcheck="true" aria-label="Script" placeholder="# Rooftop at dusk&#10;&#10;Aiko leans on the fence while the wind moves her scarf. The city glows below.&#10;&#10;AIKO: You came after all.&#10;&#10;KENJI: I always do."></textarea>
@@ -480,7 +491,7 @@ button:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var
 const $=s=>document.querySelector(s);
 let S=null,sel=new Set(),tab='shots',VOICES=null,FILTER='all',VIEW={},prevApproved={};
 const STAGES=['sheet','keyframe','animate','continue','lipsync','upscale','voice','voice_design','sound_effect','music_cue'];
-const TITLES={effects:['Sound Effects','Import and audition sounds. Copy an effect to place it on the Studio timeline.'],studio:['Studio','Edit the episode, manage history and deliver finished work.'],production:['Production','Preview pacing, check servers, and prepare one scene at a time.'],script:['Script','Write or paste the episode, then turn it into shots.'],cast:['Cast','Characters and locations with their reference sheets.'],voices:['Voices','Generate every line in its character’s voice, choose the best take, and play scenes back.'],shots:['Shots','Keyframe, animate and finish each shot.'],queue:['Render queue','Everything sent to ComfyUI, newest first.'],assemble:['Assemble','Put the episode together and export it for Resolve.'],settings:['Settings','Servers, workflows and project defaults.']};
+const TITLES={projects:['Projects','Open a project while other render queues keep running.'],effects:['Sound Effects','Import and audition sounds. Copy an effect to place it on the Studio timeline.'],studio:['Studio','Edit the episode, manage history and deliver finished work.'],production:['Production','Preview pacing, check servers, and prepare one scene at a time.'],script:['Script','Write or paste the episode, then turn it into shots.'],cast:['Cast','Characters and locations with their reference sheets.'],voices:['Voices','Generate every line in its character’s voice, choose the best take, and play scenes back.'],shots:['Shots','Keyframe, animate and finish each shot.'],queue:['Render queue','Everything sent to ComfyUI, newest first.'],assemble:['Assemble','Put the episode together and export it for Resolve.'],settings:['Settings','Servers, workflows and project defaults.']};
 const jsq=s=>esc(JSON.stringify((s??'').toString()));   // JS string literal, safe inside an onclick="…" attribute
 const esc=s=>(s??'').toString().replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function post(u,b){try{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.ok===false&&j.error)toast(j.error,1);await load(true);return j}catch(e){toast('Can’t reach the Anime Studio server. Reopen the app.',1);return {ok:false}}}
@@ -507,6 +518,7 @@ function go(t){const main=$('main');TAB_SCROLL[tab]={top:main.scrollTop,left:mai
  tab=t;document.querySelectorAll('#nav button').forEach(x=>{x.classList.toggle('on',x.dataset.t===t);if(x.dataset.t===t)x.setAttribute('aria-current','page');else x.removeAttribute('aria-current')});document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x.id==='t-'+t));render(true);
  const position=TAB_SCROLL[t]||{top:0,left:0};++SCROLL_PAINT;main.scrollTop=position.top;main.scrollLeft=position.left;
  if(leavingQueue||t==='queue')load(true);
+ if(t==='projects'&&typeof loadProjects==='function')loadProjects();
 }
 const STATE_ETAGS=new Map();
 let STATE_REQUEST=null;
@@ -563,6 +575,7 @@ function same(name,parts){const k=JSON.stringify(parts);if(SIG[name]===k)return 
 function render(force){return preserveMainScroll(()=>renderContent(force))}
 function renderContent(force){if(!S)return;if(force)for(const k in SIG)delete SIG[k];
  const version=$('#app-version');if(version){version.textContent='Anime Studio v'+S.version;version.title='Build '+(S.build?.commit||'development')}
+ const projectLabel=$('#active-project-name');if(projectLabel)projectLabel.textContent=S.project_name||'';
  const [t,sub]=TITLES[tab];$('#pagetitle').textContent=tab==='shots'?(S.settings.title||'Shots'):t;$('#pagesub').textContent=tab==='shots'?sub:sub;
  const c=S.job_counts,act=(c.pending||0)+(c.running||0),total=S.shots.reduce((a,s)=>a+(+s.duration||0),0),cn=counts();
  $('#n-shots').textContent=S.shots.length?`${S.shots.length} shots, ${fmtT(total)}`:'';
@@ -1022,4 +1035,4 @@ function exportSoundtrack(){const id=+$('#audioexport').value;if(!id)return toas
 /* ---------- settings ---------- */
 const WFLAB={keyframe:'Keyframes and turnaround sheets',animate:'Animate',animate_flf:'Animate to the next shot (first and last frame)',lipsync:'Voice animation / lip sync (optional)',upscale:'Upscale (optional)',voice:'Voices: text to speech (Qwen3-TTS)',voice_design:'Voice design: a new voice from a description (Qwen3-TTS)',sound_effect:'Sound effects and ambience',music_cue:'Music cues'};
 window.addEventListener('DOMContentLoaded',()=>{load();setInterval(()=>{if(!$('#modal').classList.contains('on')||$('#a_designed')||$('#sv-rows')||$('#creative-dialog'))load()},4000)});   // the cast dialog follows its voice takes
-</script><script src="/shot_voices.js"></script><script src="/editor.js"></script><script src="/shot_playback.js"></script><script src="/production.js"></script><script src="/creative.js"></script><script src="/settings.js"></script><script src="/continuations.js"></script><script src="/voice_video.js"></script><script src="/workspace.js"></script><script src="/finishing.js"></script><script src="/studio_audio.js"></script></body></html>
+</script><script src="/shot_voices.js"></script><script src="/editor.js"></script><script src="/shot_playback.js"></script><script src="/production.js"></script><script src="/creative.js"></script><script src="/settings.js"></script><script src="/continuations.js"></script><script src="/voice_video.js"></script><script src="/workspace.js"></script><script src="/finishing.js"></script><script src="/studio_audio.js"></script><script src="/projects.js"></script></body></html>

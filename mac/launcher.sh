@@ -37,17 +37,6 @@ fi
 export AS_PYTHON="$PY"
 command -v ffmpeg >/dev/null || echo "WARNING: ffmpeg not found - brew install ffmpeg"
 
-# Stop only a verified Anime Studio backend before resolving/migrating its data.
-STATUS="$(curl --noproxy "*" -s -m 1 "http://127.0.0.1:$AS_PORT/api/ping" 2>/dev/null || true)"
-if printf '%s' "$STATUS" | "$PY" -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("app")=="anime-studio" else 1)' 2>/dev/null; then
-  curl --noproxy "*" -s -m 2 -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$AS_PORT/api/quit" >/dev/null 2>&1 || true
-  for i in $(seq 1 20); do curl --noproxy "*" -s -m 1 "http://127.0.0.1:$AS_PORT/api/ping" >/dev/null 2>&1 || break; sleep 0.25; done
-fi
-if lsof -ti tcp:"$AS_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  alert "Port $AS_PORT is still in use. Close the other local server and reopen Anime Studio. No unrelated process was stopped."
-  exit 1
-fi
-
 # Resolve the remembered app-owned project, or safely copy a legacy project once.
 # The original stays untouched; the helper changes the preference only after validation.
 STORAGE_ARGS=(--config-dir "$CONF_DIR" --app-dir "$APPDIR")
@@ -57,6 +46,12 @@ if ! AS_DATA="$("$PY" "$RES/project_storage.py" "${STORAGE_ARGS[@]}")"; then
   exit 1
 fi
 export AS_DATA
+export ANIME_STUDIO_CONFIG="$CONF_DIR"
+if ! AS_PORT="$("$PY" "$RES/project_storage.py" --config-dir "$CONF_DIR" --override "$AS_DATA" --controller-port "$AS_PORT")"; then
+  alert "Could not select a local port for this project."
+  exit 1
+fi
+export AS_PORT
 echo "project data: $AS_DATA"
 BIN="$HERE/AnimeStudioWindow"
 if [ -x "$BIN" ] && [ ! "$RES/main.swift" -nt "$BIN" ]; then
@@ -73,7 +68,7 @@ fi
 # Fallback: server in the background + a browser window
 if ! curl --noproxy "*" -s -m 1 "http://127.0.0.1:$AS_PORT/api/ping" >/dev/null 2>&1; then
   echo "starting server"
-  nohup "$PY" "$AS_SCRIPT" --host 127.0.0.1 --port "$AS_PORT" --data "$AS_DATA" >> "$AS_DATA/app.log" 2>&1 &
+  nohup "$PY" "$AS_SCRIPT" --projects --host 127.0.0.1 --port "$AS_PORT" --data "$AS_DATA" >> "$AS_DATA/app.log" 2>&1 &
   for i in $(seq 1 60); do curl --noproxy "*" -s -m 1 "http://127.0.0.1:$AS_PORT/api/ping" >/dev/null 2>&1 && break; sleep 0.5; done
 fi
 if ! curl --noproxy "*" -s -m 1 "http://127.0.0.1:$AS_PORT/api/ping" >/dev/null 2>&1; then

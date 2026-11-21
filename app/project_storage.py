@@ -89,7 +89,8 @@ def resolve_storage(config, app_dir=None, override=None, home=None):
             if not saved_path:
                 raise ValueError('The saved project location is empty. No project was replaced.')
             source = Path(saved_path).expanduser().resolve()
-            if inside(source, config):
+            from project_workspace import identity, read_catalog
+            if inside(source, config) or identity(source) in read_catalog(config):
                 if not source.is_dir():
                     raise ValueError('The saved project folder is missing: ' + str(source))
                 return source
@@ -118,9 +119,15 @@ def main():
     parser.add_argument('--config-dir', default=str(config_directory()))
     parser.add_argument('--app-dir')
     parser.add_argument('--override')
+    parser.add_argument('--controller-port', type=int)
     args = parser.parse_args()
     try:
-        print(resolve_storage(args.config_dir,args.app_dir,args.override))
+        project = resolve_storage(args.config_dir,args.app_dir,args.override)
+        if args.controller_port is not None:
+            from project_workspace import launch_port
+            print(launch_port(project, args.controller_port))
+        else:
+            print(project)
     except Exception as error:
         print('Could not load the saved Anime Studio project: ' + str(error),file=sys.stderr)
         return 1
