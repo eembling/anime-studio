@@ -35,7 +35,7 @@ class SubmissionRecoveryTests(unittest.TestCase):
                         return {'remote-id': result}
                     self.fail(f'Unexpected request {method} {route}')
 
-                with patch('anime_studio.http_json', side_effect=request), patch('anime_studio.http', return_value=b'fixture'), \
+                with patch('anime_studio.http_json', side_effect=request), patch('anime_studio.comfy_download'), \
                      patch('comfy_events.ProgressEvents'), patch.object(worker, 'finish') as finish, patch('anime_studio.traceback.print_exc'):
                     worker.execute(jid, instance)
                     self.assertIn('Submission unconfirmed', db.one('SELECT error FROM jobs WHERE id=?', (jid,))['error'])

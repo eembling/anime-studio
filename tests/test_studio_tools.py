@@ -189,7 +189,9 @@ class EditorTests(unittest.TestCase):
             calls.append((method,url))
             if method=='POST':self.fail('Reconnection must not resubmit a prompt')
             return {'existing-prompt':entry}
-        with patch.object(app,'http_json',side_effect=request), patch.object(app,'http',return_value=b'old render image'), patch('comfy_events.ProgressEvents.start',return_value=None):
+        def download(url, path, progress=None):
+            app.ffmpeg(['-f','lavfi','-i','color=red:s=32x32','-frames:v','1',str(path)])
+        with patch.object(app,'http_json',side_effect=request), patch.object(app,'comfy_download',side_effect=download), patch('comfy_events.ProgressEvents.start',return_value=None):
             app.Worker(self.st).execute(jid,{'id':1,'url':'http://mock:8188'})
         self.assertEqual(self.st.db.one('SELECT status FROM jobs WHERE id=?',(jid,))['status'],'done')
         self.assertEqual(self.st.db.one('SELECT COUNT(*) n FROM takes WHERE job_id=?',(jid,))['n'],1)
@@ -198,13 +200,15 @@ class EditorTests(unittest.TestCase):
     def test_render_file_names_remain_unique_when_job_ids_are_reused(self):
         worker=app.Worker(self.st)
         job={'id':1,'shot_id':self.a,'asset_id':None,'stage':'keyframe','seed':7,'segment':None,'draft':0}
-        paths=[]
-        for content in (b'first render',b'new render'):
-            file=self.st.data/'jobs'/'result.png';file.write_bytes(content)
+        paths=[]; images=[]
+        for color in ('red','blue'):
+            file=self.st.data/'jobs'/'result.png'
+            app.ffmpeg(['-f','lavfi','-i',f'color={color}:s=32x32','-frames:v','1',str(file)])
+            images.append(file.read_bytes())
             worker.finish(job,'keyframe',[file])
             paths.append(self.st.db.q('SELECT path FROM takes ORDER BY id DESC')[0]['path'])
         self.assertNotEqual(*paths)
-        self.assertEqual(self.st.abs(paths[0]).read_bytes(),b'first render')
+        self.assertEqual(self.st.abs(paths[0]).read_bytes(),images[0])
 
     def test_archive_metadata_cannot_reference_files_outside_project(self):
         snapshot=self.editor.snapshot()

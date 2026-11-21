@@ -66,7 +66,7 @@ class JobSnapshots:
         if not old or not old.get('snapshot_json'):raise ValueError('This older render has no captured inputs. Generate a new take from its shot instead.')
         if old['status'] not in ('done','error','cancelled'):raise ValueError('Wait for this render to finish before repeating it.')
         row=dict(old);row.pop('id');row.update(status='pending',created=time.time(),started=None,finished=None,instance_id=None,prompt_id=None,error=None,progress='waiting',models_json=None)
-        row['submission_client_id']=None
+        row.update(submission_client_id=None, remote_client_id=None)
         columns=list(row);jid=st.db.x('INSERT INTO jobs('+','.join(columns)+') VALUES('+','.join('?' for _ in columns)+')',list(row.values()))
         meta=json.loads(row['snapshot_json']);meta['params']['prefix']=f'anime/repeat_{jid}'
         st.db.x('UPDATE jobs SET snapshot_json=? WHERE id=?',(json.dumps(meta),jid))

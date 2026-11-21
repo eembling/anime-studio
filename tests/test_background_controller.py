@@ -68,10 +68,10 @@ print(p.pid)
                 self.assertIn('already has a render controller', duplicate.stderr)
                 for _ in range(80):
                     state=api('/api/state')
-                    if state['job_counts'].get('done') == 2:
+                    if state['job_counts'].get('done') == 2 or state['job_counts'].get('error'):
                         break
                     time.sleep(.25)
-                self.assertEqual(state['job_counts'], {'done':2})
+                self.assertEqual(state['job_counts'], {'done':2}, [(j['id'],j.get('error')) for j in state['jobs']])
                 self.assertEqual(len(state['shots'][0]['takes']),2)
             finally:
                 if launcher.stdout and not launcher.stdout.closed:

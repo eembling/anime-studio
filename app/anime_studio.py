@@ -272,6 +272,7 @@ MIGRATIONS = [  # columns added after v2.0 - existing projects get them on start
     ("jobs", "voice_character_id", "INTEGER"), ("jobs", "voice_line_id", "TEXT"),
     ("jobs", "voice_autoselect", "INTEGER DEFAULT 0"), ("jobs", "voice_previous_audio", "TEXT"),
     ("shots", "keyframe_reference_order", "TEXT"),
+    ("jobs", "submission_client_id", "TEXT"),
     ("jobs", "voice_ref_path", "TEXT"), ("jobs", "voice_ref_text", "TEXT"), ("jobs", "voice_direction", "TEXT"),
     ("takes", "input_signature", "TEXT"), ("voice_takes", "input_signature", "TEXT"),
     ("assets", "voice_desc", "TEXT DEFAULT ''"), ("assets", "voice_sample", "TEXT DEFAULT ''"),
@@ -1571,7 +1572,6 @@ class Worker(threading.Thread):
                     raise RuntimeError("Submission unconfirmed. Check the original ComfyUI queue before repeating this render. "
                                        "Reconnect checks the existing submission without sending it again.")
                 db.x("UPDATE jobs SET prompt_id=? WHERE id=?", (pid, job_id))
-            client_id = client_id or (f"anime-studio-{job_id}" if pid else f"anime-studio-{uuid.uuid4().hex}")
             from render_queue import workflow_models, prompt_graph
             if not pid:
                 db.x("UPDATE jobs SET models_json=NULL WHERE id=?",(job_id,))
@@ -1606,15 +1606,23 @@ class Worker(threading.Thread):
                 elif data.get('node'):
                     self._progress(job_id, 'Executing node ' + str(data['node']))
             # Already accepted jobs may predate namespaced submissions.
-            client_id = job.get("remote_client_id") or f"anime-studio-{job_id}"
+            client_id = client_id or job.get("remote_client_id") or f"anime-studio-{job_id}"
             if not pid:
                 client_id = f"anime-studio-{st.render_namespace}-{uuid.uuid4().hex}"
             events = ProgressEvents(base, client_id, progress_event).start()
+            def transfer_progress(label, current, total):
+                row = db.one("SELECT status FROM jobs WHERE id=?", (job_id,))
+                if not row or row['status'] != 'running':
+                    raise RuntimeError("Render transfer cancelled.")
+                length = f" / {total:,}" if total is not None else ""
+                self._progress(job_id, f"{label}: {current:,}{length} bytes")
+
             if not pid:
                 self._progress(job_id, "uploading inputs")
                 attempt = client_id.removeprefix("anime-studio-")
                 p["prefix"] = f"anime/{st.render_namespace}/{attempt}_{job['stage']}"
-                p["images"] = {slot: comfy_upload(base, path, f"anime_j{job_id}_{attempt}_{slot}{Path(path).suffix.lower()}")
+                p["images"] = {slot: comfy_upload(base, path, f"anime_j{job_id}_{attempt}_{slot}{Path(path).suffix.lower()}",
+                                                  lambda current, total: transfer_progress("Uploading " + slot, current, total))
                                for slot, path in p["files"].items()}
                 wf = build_workflow(tpl, key, p)
                 wf = st.snapshots.patch(job,wf) if job.get("snapshot_json") else st.creative.patch_controls(job, wf)
@@ -1634,7 +1642,9 @@ class Worker(threading.Thread):
                 if not res.get("prompt_id") and res.get("node_errors"):
                     db.x("UPDATE jobs SET submission_client_id=NULL WHERE id=?", (job_id,))
                     raise RuntimeError("ComfyUI rejected the workflow: " + json.dumps(res["node_errors"])[:2500])
-                pid = res["prompt_id"]
+                pid = res.get("prompt_id")
+                if not pid:
+                    raise RuntimeError("Submission unconfirmed. ComfyUI did not return a prompt ID.")
                 db.x("UPDATE jobs SET prompt_id=?, models_json=?, remote_client_id=?, progress='queued on ComfyUI' WHERE id=?", (pid, json.dumps(workflow_models(wf)), client_id, job_id))
             t0, timeout, fails, entry = time.time(), int(float(st.settings().get("job_timeout") or 3600)), 0, None
             while True:
@@ -2038,7 +2048,7 @@ class API:
         # Refresh periodically even if nothing wrote to the project database.
         interval = 4 if active else 60
         health = [(key, value.get('ok'), value.get('info')) for key, value in sorted(st.health.copy().items())]
-        value = (st.state_session, changes, version, int(time.time() / interval), health, st.alignment.setup_state)
+        value = (st.state_session, changes, version, int(time.time() / interval), health, st.alignment.setup_state, (st.data/'.keep-rendering').is_file())
         return '"' + hashlib.sha256(repr(value).encode()).hexdigest() + '"'
 
     def state(self, _=None):
@@ -3041,7 +3051,9 @@ def make_handler(st, api):
                 if path == '/production.js':
                     return self._send(200, (Path(__file__).resolve().parent / 'production.js').read_text(encoding='utf-8'), 'text/javascript; charset=utf-8')
                 if path == "/api/ping":
-                    return self._send(200, {"ok": True, "app": "anime-studio", "version": VERSION})
+                    return self._send(200, {"ok": True, "app": "anime-studio", "version": VERSION,
+                                            "project": hashlib.sha256(str(st.data).encode()).hexdigest(),
+                                            "background_rendering": (st.data/".keep-rendering").is_file()})
                 if path in ("/api/state", "/api/queue/state"):
                     queue_only = path != "/api/state"
                     etag = api.state_etag(queue_only)
