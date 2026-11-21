@@ -736,6 +736,46 @@ def _tagged(wf, tag):
     return sorted([k for k, n in wf.items() if _title(n).upper() == tag], key=_nid)
 
 
+def visual_prompt_slots(wf, tag):
+    """Inspect conditioning socket ancestry rather than graph order."""
+    pending = [key for key, node in wf.items()
+               if node['class_type'] in SAVE_NODES and not node['class_type'].startswith('SaveAudio')]
+    seen, bindings = set(), set()
+    socket = 'positive' if tag == 'PROMPT' else 'negative'
+    while pending:
+        key = pending.pop()
+        if key in seen or key not in wf:
+            continue
+        seen.add(key)
+        for field, value in wf[key].get('inputs', {}).items():
+            if isinstance(value, list) and len(value) == 2 and isinstance(value[1], int):
+                if field == socket:
+                    bindings.add(str(value[0]))
+                pending.append(str(value[0]))
+
+    # Trace upstream from the relevant conditioning sockets. Stop at the
+    # encoder so shared CLIP loaders do not cross positive/negative paths.
+    pending, seen, encoders = list(bindings), set(), set()
+    while pending:
+        key = pending.pop()
+        if key in seen or key not in wf:
+            continue
+        seen.add(key)
+        node = wf[key]
+        if node['class_type'] in TEXT_ENCODERS or _title(node).upper() == tag:
+            encoders.add(key)
+            continue
+        for field, value in node.get('inputs', {}).items():
+            if field in ('positive', 'negative') and field != socket:
+                continue
+            if isinstance(value, list) and len(value) == 2 and isinstance(value[1], int):
+                pending.append(str(value[0]))
+    tagged = _tagged(wf, tag)
+    if tagged:
+        return [key for key in tagged if key in encoders]
+    return sorted(encoders, key=_nid)
+
+
 def detect_slots(wf, key):
     keys = sorted(wf.keys(), key=_nid)
     cls = lambda k: wf[k].get("class_type") or ""
@@ -747,6 +787,9 @@ def detect_slots(wf, key):
          "save": [k for k in keys if cls(k) in SAVE_NODES],
          "seeds": [[k, f] for k in keys for f in ("seed", "noise_seed") if isinstance(ins(k).get(f), int)],
          "refs": [], "start_image": [], "end_image": [], "video_in": [], "audio_in": [], "size": [], "ref_text": []}
+    if key in ("keyframe", "animate", "animate_flf", "lipsync"):
+        m["prompt"] = visual_prompt_slots(wf, "PROMPT")
+        m["negative"] = visual_prompt_slots(wf, "NEGATIVE")
     if key == "keyframe":
         m["refs"] = [k for i in (1, 2, 3) for k in _tagged(wf, f"REF{i}")] or loads[:3]
         m["size"] = _tagged(wf, "SIZE") or [k for k in keys if "Latent" in cls(k) and {"width", "height"} <= set(ins(k))][:1]
@@ -783,6 +826,12 @@ def check_workflow(wf, key):
     m, p = detect_slots(wf, key), []
     if key in ("keyframe", "animate", "animate_flf", "lipsync") and not m["prompt"]:
         p.append("No prompt node (title a text-encode node PROMPT).")
+    if key in ("keyframe", "animate", "animate_flf", "lipsync"):
+        for tag, slot in (("PROMPT", "prompt"), ("NEGATIVE", "negative")):
+            if set(_tagged(wf, tag)) - set(m[slot]):
+                p.append(f"Tagged {tag} node does not feed its matching visual conditioning input.")
+        if set(m["prompt"]) & set(m["negative"]):
+            p.append("Positive and negative conditioning share a text encoder. Bind separate prompt nodes.")
     if key in ("animate", "animate_flf", "lipsync") and not m["start_image"] and not (key == 'lipsync' and m['video_in']):
         p.append("No start image (title a Load Image node START_IMAGE).")
     if key == "animate_flf" and not m["end_image"]:
