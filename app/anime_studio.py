@@ -23,6 +23,7 @@ import csv
 import glob
 import io
 import json
+import math
 import mimetypes
 import os
 import random
@@ -217,6 +218,7 @@ DEFAULT_SETTINGS = {
     "line_gap": "0.3",
     "tts_model": "1.7B", "tts_language": "Auto",
     "job_timeout": "3600",
+    "video_min_free_vram": "0",
     "music": "",
 }
 DEFAULT_INSTANCES = [("ComfyUI 172.16.2.70", "http://172.16.2.70:8188", ",".join(JOB_STAGES))]
@@ -1024,6 +1026,19 @@ def list_voices():
 # ======================================================================================
 # Job worker: one job at a time per ComfyUI server, matched by role
 # ======================================================================================
+def video_gpu_wait(job, health, minimum_gib, now):
+    if job['stage'] not in ('animate', 'continue', 'lipsync', 'upscale') or job.get('prompt_id') or not minimum_gib:
+        return ''
+    free = [device['vram_free'] for device in health.get('hardware', [])
+            if isinstance(device.get('vram_free'), (int, float))]
+    if not free or now - health.get('t', 0) > 30:
+        return 'Waiting for current free GPU memory telemetry.'
+    available = max(free) / 2**30
+    if available < minimum_gib:
+        return f'Waiting for GPU memory: {available:.1f} GiB free, {minimum_gib:g} GiB configured.'
+    return ''
+
+
 class Worker(threading.Thread):
     daemon = True
 
@@ -1054,7 +1069,7 @@ class Worker(threading.Thread):
             for d in j.get("devices", []):
                 nm = re.sub(r"^cuda:\d+\s*", "", d.get("name", "?")).split(" : ")[0]
                 parts.append(f"{nm} - {d.get('vram_free', 0) / 2**30:.1f} of {d.get('vram_total', 0) / 2**30:.1f} GB free")
-            self.st.health[inst["id"]] = {"ok": True, "info": "; ".join(parts), "t": time.time(), "hardware":[{k:d.get(k) for k in ("name","vram_total")} for d in j.get("devices",[])]}
+            self.st.health[inst["id"]] = {"ok": True, "info": "; ".join(parts), "t": time.time(), "hardware":[{k:d.get(k) for k in ("name","vram_total","vram_free")} for d in j.get("devices",[])]}
         except Exception as e:
             self.st.health[inst["id"]] = {"ok": False, "info": str(e)[:200], "t": time.time()}
 
@@ -1066,6 +1081,8 @@ class Worker(threading.Thread):
         db = self.st.db
         if db.one("SELECT id FROM jobs WHERE status='pending' LIMIT 1"):
             self.st.production.inspect()
+        minimum_gib = float(self.st.settings().get("video_min_free_vram") or 0)
+        memory_waits = {}
         busy = {r["instance_id"] for r in db.q("SELECT instance_id FROM jobs WHERE status='running'")}
         for inst in db.q("SELECT * FROM instances WHERE enabled=1"):
             if inst["id"] in busy or not self.st.health.get(inst["id"], {}).get("ok"):
@@ -1090,12 +1107,27 @@ class Worker(threading.Thread):
                     continue
                 if not candidate.get('snapshot_json') and not candidate.get('creative_json') and not candidate.get('prompt_id') and candidate['stage'] in ('animate', 'continue') and shot and shot['end_next'] and not (readiness or {}).get('animate_flf', {}).get('ready'):
                     continue
+                wait = video_gpu_wait(candidate, self.st.health[inst['id']], minimum_gib, time.time())
+                if wait:
+                    memory_waits[candidate['id']] = wait
+                    continue
                 job = candidate
                 break
             if job and db.u("UPDATE jobs SET status='running', instance_id=?, started=?, progress='starting', error=NULL "
                             "WHERE id=? AND status='pending'", (inst["id"], job.get("started") or time.time(), job["id"])):
                 busy.add(inst["id"])
                 threading.Thread(target=self.execute, args=(job["id"], inst), daemon=True).start()
+
+        for job in db.q("SELECT id,progress FROM jobs WHERE status='pending'"):
+            wait = memory_waits.get(job['id'])
+            if wait:
+                self._progress_wait(job, wait)
+            elif (job.get('progress') or '').startswith(('Waiting for GPU memory:', 'Waiting for current free GPU')):
+                self._progress_wait(job, 'waiting')
+
+    def _progress_wait(self, job, value):
+        if job['progress'] != value:
+            self.st.db.x("UPDATE jobs SET progress=? WHERE id=? AND status='pending'", (value, job['id']))
 
     def _progress(self, job_id, text):
         self.st.db.x("UPDATE jobs SET progress=? WHERE id=? AND status='running'", (text, job_id))
@@ -1735,6 +1767,11 @@ class API:
     # ---- settings / servers / workflows / tools
     def settings(self, b):
         vals = dict(b.get("settings") or {})
+        if "video_min_free_vram" in vals:
+            headroom = float(vals["video_min_free_vram"])
+            if not math.isfinite(headroom) or headroom < 0:
+                raise ValueError("Minimum free GPU memory must be zero or greater.")
+            vals["video_min_free_vram"] = headroom
         if "tts_language" in vals:
             vals["tts_language"] = norm_choice(vals["tts_language"], TTS_LANGUAGES, "Auto")
         if "tts_model" in vals:

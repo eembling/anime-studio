@@ -124,6 +124,9 @@ def queue_snapshot(jobs, history, instances, health=None, readiness=None, now=No
     for rank, job in enumerate(queued, 1):
         job['queue_position'] = rank
         job['estimated_progress'] = 0
+        if (job.get('progress') or '').startswith(('Waiting for GPU memory:', 'Waiting for current free GPU')):
+            job['wait_reason'] = job['progress']
+            continue
         eligible = []
         for sid, server in servers.items():
             if job['stage'] not in server.get('roles', '').split(',') or health.get(sid, {}).get('ok') is False:
