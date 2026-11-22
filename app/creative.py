@@ -429,7 +429,7 @@ class CreativeStudio:
 
     def recipe_check(self, body):
         recipe = self.recipe(body['recipe_id']); values = self.control_values(recipe, body.get('values') or {})
-        servers = [self.inspect_recipe(recipe, values, inst, True) for inst in self.st.db.q('SELECT * FROM instances WHERE enabled=1') if recipe['stage'] in inst['roles'].split(',')]
+        servers = [self.inspect_recipe(recipe, values, inst, True) for inst in self.st.instances(enabled_only=True) if recipe['stage'] in inst['roles'].split(',')]
         return {'ok': True, 'servers': servers, 'ready': any(not s['problems'] for s in servers), 'requirements': recipe['requirements']}
 
     def owned(self, body):
@@ -507,7 +507,7 @@ class CreativeStudio:
         return {'ok': True, 'queued': len(made), 'job_ids': made, 'skipped': skipped}
 
     def require_ready(self, recipe, values):
-        servers = self.st.db.q('SELECT * FROM instances WHERE enabled=1')
+        servers = self.st.instances(enabled_only=True)
         checks = [self.inspect_recipe(recipe, values, s) for s in servers if recipe['stage'] in s['roles'].split(',')]
         if not any(not c['problems'] for c in checks):
             problems = '; '.join(p for c in checks for p in c['problems']) or 'No enabled server accepts '+recipe['stage']+' jobs.'

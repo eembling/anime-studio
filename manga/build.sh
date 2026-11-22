@@ -1,0 +1,20 @@
+#!/bin/bash
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(dirname "$HERE")"
+APP="${1:-$ROOT/dist}/Manga Studio.app"
+RES="$APP/Contents/Resources"
+PY="${MANGA_PYTHON:-$(command -v python3)}"
+PIL="$("$PY" -c 'import PIL, pathlib; print(pathlib.Path(PIL.__file__).parent)')"
+mkdir -p "$RES"/{manga,app,workflows,vendor} "$APP/Contents/MacOS"
+cp "$HERE"/{index.html,studio.css,studio.js,generation.py,planner.py,compose.py,studio.py} "$RES/manga/"
+cp "$ROOT/app/settings.css" "$RES/app/"
+cp "$ROOT"/app/{anime_studio,comfy_events,render_queue,render_diagnostics,cast_exchange,script_dialogue,timeline}.py "$RES/app/"
+cp "$ROOT"/workflows/keyframe__qwen_edit_2509_api.json "$RES/workflows/"
+cp -R "$PIL" "$RES/vendor/"
+cp "$HERE/AppIcon.icns" "$RES/"
+cp "$HERE/Info.plist" "$APP/Contents/"
+printf '%s\n' "$PY" > "$RES/python-path"
+xcrun swiftc -module-cache-path "${TMPDIR:-/tmp}/manga-swift-cache" -O -target "$(uname -m)-apple-macos12.0" "$HERE/main.swift" -o "$APP/Contents/MacOS/MangaStudio" -framework Cocoa -framework WebKit
+codesign --force --sign - "$APP"
+echo "Built $APP"

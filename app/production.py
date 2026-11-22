@@ -131,7 +131,7 @@ class Production:
             if not refresh and self.readiness and time.time() - self.readiness['checked'] < 60:
                 return self.readiness
             servers = []
-            for inst in self.st.db.q('SELECT * FROM instances WHERE enabled=1'):
+            for inst in self.st.instances(enabled_only=True):
                 stages = {}
                 try:
                     info = self.http('GET', inst['url'].rstrip('/') + '/object_info', timeout=8)
@@ -186,7 +186,7 @@ class Production:
             shot['keyframe_approved'] = bool(approval and approval['signature'] == digest([shot['keyframe_take'], self.signature(shot, 'keyframe')]))
         averages = {r['stage']: round(r['seconds']) for r in self.st.db.q("SELECT stage,AVG(finished-started) seconds FROM render_timing_history GROUP BY stage")}
         pending = self.st.db.q("SELECT * FROM jobs WHERE status='pending' ORDER BY priority DESC,id")
-        servers = self.st.db.q('SELECT * FROM instances WHERE enabled=1')
+        servers = self.st.instances(enabled_only=True)
         loads = {s['id']: 0 for s in servers}
         estimates = {}
         for job in self.st.db.q("SELECT * FROM jobs WHERE status='running'"):

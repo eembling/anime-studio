@@ -97,6 +97,8 @@ Use [the CSV template](../examples/shotlist_template.csv). Fields include sequen
 
 ## 5. Cast
 
+To reuse characters and locations in Manga Studio, choose **Export to Manga Studio**, select entries, and save the library ZIP. In Manga Studio’s **Cast** screen, choose **Import from Anime Studio** and open the ZIP. The library includes visual descriptions, LoRA settings, reference images, turnaround sheets, and versioned reference collections.
+
 ### Establish picture identity
 
 Create character, location or prop entries. Add a reference image and a concise description of persistent visual traits. Turnaround sheets help maintain clothing, proportions and appearance. Select a sheet when it should become the asset's active reference.

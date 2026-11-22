@@ -18,6 +18,12 @@ from platform_runtime import storage_lock
 from project_storage import atomic_text
 
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+SHARED_SETTINGS = frozenset({
+    'default_duration', 'draft_width', 'draft_height', 'draft_max_frames',
+    'kf_width', 'kf_height', 'sheet_width', 'sheet_height', 'vid_width', 'vid_height',
+    'default_voice', 'tts_model', 'tts_language', 'job_timeout', 'video_min_free_vram',
+})
+SERVER_FIELDS = ('name', 'url', 'roles', 'enabled')
 
 
 def identity(folder):
@@ -69,7 +75,7 @@ def launch_port(folder, preferred):
 
 
 class ProjectWorkspace:
-    def __init__(self, studio, config, command):
+    def __init__(self, studio, config, command, default_servers):
         self.studio = studio
         self.config = config.resolve()
         self.config.mkdir(parents=True, exist_ok=True)
@@ -80,6 +86,111 @@ class ProjectWorkspace:
             if self.current not in catalog:
                 self.register(catalog, studio.data, studio.settings().get('title') or studio.data.name)
             self.name = catalog[self.current]['name']
+        self.configuration_path = self.config / 'generation-settings.json'
+        self.configuration_lock = self.config / 'generation-settings.lock'
+        self.configuration_revision = None
+        with storage_lock(self.configuration_lock):
+            if not self.configuration_path.exists():
+                self.write_configuration(self.initial_configuration(catalog, default_servers))
+            else:
+                self.load_configuration()
+
+    def initial_configuration(self, catalog, default_servers):
+        defaults = {tuple(server) + (1,) for server in default_servers}
+        projects = [self.studio.db.q]
+        databases = []
+        profiles = []
+        try:
+            for key, item in catalog.items():
+                if key == self.current:
+                    continue
+                path = Path(item['path']) / 'studio.db'
+                try:
+                    connection = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=1)
+                    connection.row_factory = sqlite3.Row
+                    databases.append(connection)
+                    projects.append(connection.execute)
+                except (OSError, sqlite3.Error):
+                    continue
+            for query in projects:
+                try:
+                    servers = [dict(row) for row in query('SELECT name,url,roles,enabled FROM instances ORDER BY id')]
+                    workflows = {row['stage']:dict(row) for row in query('SELECT * FROM workflows')}
+                    settings = {row['key']:row['value'] for row in query('SELECT key,value FROM settings') if row['key'] in SHARED_SETTINGS}
+                except sqlite3.Error:
+                    continue
+                customized = sum(tuple(row[key] for key in SERVER_FIELDS) not in defaults for row in servers)
+                profiles.append((customized, servers, workflows, settings))
+        finally:
+            for connection in databases:
+                connection.close()
+        # Keep the current project's setup when it is already configured.
+        if not profiles[0][0]:
+            profiles.sort(key=lambda profile: -profile[0])
+        _, preferred, workflows, settings = profiles[0]
+        servers = {row['url']:row for row in preferred}
+        for _, rows, _, _ in profiles[1:]:
+            for row in rows:
+                if tuple(row[key] for key in SERVER_FIELDS) not in defaults:
+                    servers.setdefault(row['url'], row)
+        return {'servers':list(servers.values()), 'workflows':workflows, 'settings':settings}
+
+    def configuration_stamp(self):
+        stat = self.configuration_path.stat()
+        return stat.st_ino, stat.st_mtime_ns, stat.st_size
+
+    def refresh_configuration(self):
+        if self.configuration_revision == self.configuration_stamp():
+            return
+        # Keep ordinary state polling independent of server readiness checks.
+        with self.studio.production.lock, storage_lock(self.configuration_lock):
+            if self.configuration_revision != self.configuration_stamp():
+                self.load_configuration()
+
+    def load_configuration(self):
+        self.apply_configuration(json.loads(self.configuration_path.read_text(encoding='utf-8')))
+
+    def write_configuration(self, configuration):
+        atomic_text(self.configuration_path, json.dumps(configuration, indent=2))
+        self.apply_configuration(configuration)
+
+    def apply_configuration(self, configuration):
+        st = self.studio
+        if self.configuration_revision is None or self.configuration['servers'] != configuration['servers']:
+            with st.db.transaction():
+                rows = {row['url']: row for row in st.db.q('SELECT * FROM instances ORDER BY shared_retired DESC,id DESC')}
+                st.db.x('UPDATE instances SET shared_retired=1 WHERE shared_retired=0')
+                for server in configuration['servers']:
+                    values = tuple(server[key] for key in SERVER_FIELDS)
+                    prior = rows.get(server['url'])
+                    if prior:
+                        st.db.x('UPDATE instances SET name=?,url=?,roles=?,enabled=?,shared_retired=0 WHERE id=?', (*values, prior['id']))
+                    else:
+                        st.db.x('INSERT INTO instances(name,url,roles,enabled) VALUES(?,?,?,?)', values)
+            if hasattr(st, 'worker'):
+                st.worker.last_health = 0
+        self.configuration = configuration
+        self.configuration_revision = self.configuration_stamp()
+        st.production.readiness = {}
+
+    def change_configuration(self, update):
+        with storage_lock(self.configuration_lock):
+            configuration = json.loads(self.configuration_path.read_text(encoding='utf-8'))
+            update(configuration)
+            self.write_configuration(configuration)
+
+    def save_server(self, server_id, values):
+        def update(configuration):
+            servers = configuration['servers']
+            if server_id:
+                prior = self.studio.db.one('SELECT url FROM instances WHERE id=? AND shared_retired=0', (server_id,))
+                if not prior or not any(row['url'] == prior['url'] for row in servers):
+                    raise ValueError('This server has changed. Reload the server list and try again.')
+                servers[:] = [row for row in servers if row['url'] != prior['url']]
+            if values:
+                servers[:] = [row for row in servers if row['url'] != values['url']]
+                servers.append(values)
+        self.change_configuration(update)
 
     def register(self, catalog, folder, name):
         key = identity(folder)

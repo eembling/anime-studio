@@ -406,6 +406,7 @@ AIKO (under her breath): You came after all.</pre></details>
 
 <section class="tab" id="t-cast">
  <div class="toolbar"><button class="btn pri" onclick="editAsset()">Add character or location</button>
+  <button class="btn" onclick="exportMangaCast()">Export to Manga Studio</button>
   <span class="group"><span class="lbl">Sheets per click</span><select id="sheetn"><option>1</option><option selected>2</option><option>4</option></select></span>
   <span class="sp"></span><span class="muted" style="font-size:13px;max-width:60ch">Reference images go to Qwen-Image-Edit as Picture 1–3. A clean turnaround sheet does more for consistency than anything else.</span></div>
  <div class="models" id="cast"></div>
@@ -690,6 +691,22 @@ function renderDesigned(){const el=$('#a_designed');if(!el||!$('#modal').classLi
   <td style="text-align:right;white-space:nowrap">${c.id===DREF?'<span class="flag">reference</span>':`<button class="btn sm" type="button" onclick="post('/api/clip/update',{id:${c.id},is_ref:true})">Use as reference</button>`}
   <button class="btn sm ghost" type="button" onclick="post('/api/reveal',{path:${jsq(c.path)}})" title="${esc(c.path)}">Show file</button>
   <button class="btn sm danger" type="button" onclick="if(confirm('Delete this take?'))post('/api/clip/delete',{id:${c.id}})">Delete</button></td></tr>`).join('')}</tbody></table></div>`:'')}
+function exportMangaCast(){
+ const entries=S.assets.filter(a=>a.kind==='character'||a.kind==='location');
+ if(!entries.length)return toast('Add a character or location to export.',1);
+ modal(`<div class="dlg-h"><h2>Export to Manga Studio</h2></div><div class="dlg-b"><p>Choose characters and locations to include with their descriptions, LoRA settings and reference images.</p>
+ ${entries.map(a=>`<label style="display:block"><input type="checkbox" name="manga-export" value="${a.id}" checked> ${esc(a.name)} · ${esc(a.kind)}</label>`).join('')}</div>
+ <div class="dlg-f"><button class="btn" onclick="closeModal()">Close</button><button class="btn pri" onclick="downloadMangaCast()">Export library</button></div>`);
+}
+function downloadMangaCast(){
+ const ids=Array.from(document.querySelectorAll('input[name="manga-export"]:checked'),el=>el.value);
+ if(!ids.length)return toast('Choose at least one character or location.',1);
+ const link=document.createElement('a');
+ link.href='/api/cast/export?ids='+ids.join(',');
+ link.download='anime-studio-cast.zip';
+ link.click();
+ closeModal();
+}
 async function editAsset(id){const a=id?S.assets.find(x=>x.id===id):{kind:'character',name:'',description:'',voice:'',lora:'',lora_strength:1,clips:[],voice_desc:'',voice_sample:''};
  const ref=refOf(a);DLG_AID=id||null;DREF=ref?ref.id:null;delete SIG.designed;
  const dReady=wfOK('voice_design'),dTakers=S.instances.some(i=>i.enabled&&i.roles.split(',').includes('voice_design'));
