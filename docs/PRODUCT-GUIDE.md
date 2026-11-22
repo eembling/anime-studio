@@ -176,6 +176,16 @@ Use **Edit shot** for kind, duration, prompts, camera, cast, continuity flags an
 
 The episode strip shows relative shot duration and jumps to a shot. Filters show missing keyframes, clips, ready shots or lines without audio. Bulk controls act on selected shots; additional voice and finishing actions are under **More actions**.
 
+### Tag speech bubbles (manga panels)
+
+**Edit shot → Speech bubbles** records who says what in the panel before anything is generated. Each bubble has a style (speech, shout, whisper, thought, narration box or sound effect), a speaker, the words, an optional expression and a position. **Copy from dialogue** turns the shot's `NAME: line` dialogue into bubbles, keeping `NAME (angry): …` delivery notes as the expression.
+
+- A speaker who is not yet tagged in the shot is added to its cast, so their reference image is sent. Tick **Off-panel** for a voice that is heard but not drawn.
+- Bubbles drive the acting in the keyframe prompt: the speaker is drawn mid-word with the chosen expression and the other characters listen. Animation prompts name who talks so the right mouth moves.
+- When a shot has no bubbles, its dialogue lines are used for acting only.
+- **Settings → Project → Speech bubbles in keyframes** chooses how lettering reaches the model: *Off* (acting only), *Leave space* (no text is drawn and the balloon areas stay uncluttered, for lettering afterwards) or *Draw balloons* (the model draws each balloon, its tail and the exact quoted words). **Panel reading order** decides where *Auto* balloons go: right to left for manga, left to right for comics. A balloon set to *Auto* sits above its speaker when the speaker has a Direction composition box.
+- **Review keyframe inputs** shows the bubbles and the full structured prompt before you generate. Changing bubbles marks earlier keyframes outdated.
+
 ### Choose and delete keyframes
 
 Generate candidates and click the preferred keyframe to select it. Enlarging a preview is different from choosing it. Each keyframe has a delete control labeled with its take and shot, so you can remove the intended candidate while reviewing the board.

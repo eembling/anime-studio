@@ -16,6 +16,7 @@ from script_dialogue import (apply_script_block, dialogue_line, prepare_script_c
                              recover_dialogue, script_blocks, script_preview_token)
 import hashlib
 from timeline import frames as timeline_frames, layout as timeline_layout
+import manga
 import argparse
 import base64
 import copy
@@ -251,6 +252,7 @@ DEFAULT_SETTINGS = {
     "job_timeout": "3600",
     "video_min_free_vram": "0",
     "music": "",
+    "lettering_mode": "off", "reading_direction": "rtl",
 }
 DEFAULT_INSTANCES = [("ComfyUI 172.16.2.70", "http://172.16.2.70:8188", ",".join(JOB_STAGES))]
 
@@ -294,6 +296,7 @@ MIGRATIONS = [  # columns added after v2.0 - existing projects get them on start
     ("jobs", "voice_ref_path", "TEXT"), ("jobs", "voice_ref_text", "TEXT"), ("jobs", "voice_direction", "TEXT"),
     ("takes", "input_signature", "TEXT"), ("voice_takes", "input_signature", "TEXT"),
     ("assets", "voice_desc", "TEXT DEFAULT ''"), ("assets", "voice_sample", "TEXT DEFAULT ''"),
+    ("shots", "bubbles", "TEXT DEFAULT '[]'"),
 ]
 
 # ======================================================================================
@@ -1528,8 +1531,7 @@ class Worker(threading.Thread):
             references = []
             for asset in assets:
                 if asset['image'] and st.abs(asset['image']).is_file():
-                    label = asset['name'] + (f" ({asset['description']})" if asset['description'] else '')
-                    references.append((f"cast-{asset['id']}", label, st.abs(asset['image'])))
+                    references.append((f"cast-{asset['id']}", manga.asset_label(asset), st.abs(asset['image'])))
             if shot['ref_prev']:
                 previous = st.neighbor(shot, -1)
                 image = st.take_path(previous['keyframe_take']) if previous else None
@@ -1539,23 +1541,28 @@ class Worker(threading.Thread):
             priority = {ident: index for index, ident in enumerate(order)}
             references.sort(key=lambda ref: priority.get(ref[0], len(priority)))
             chosen = references[:limit]
-            lines = [f'Picture {index+1} is {label}' for index, (_, label, _) in enumerate(chosen)]
-            chosen_ids = {ident for ident, _, _ in chosen}
-            lines += [f"{asset['name']}: {asset['description']}" for asset in assets
-                      if asset['description'] and f"cast-{asset['id']}" not in chosen_ids]
+            bubbles, _ = manga.effective(st, shot)
+            names = {a['id']: a['name'] for a in assets if (a.get('kind') or 'character') == 'character'}
+            for bubble in bubbles:
+                cid = bubble.get('character_id')
+                if cid and cid not in names:
+                    row = st.db.one("SELECT name FROM assets WHERE id=?", (cid,))
+                    if row:
+                        names[cid] = row['name']
             loras = [(asset['lora'], asset['lora_strength']) for asset in assets if asset['lora']]
             p['review_references'] = [{'id': ident, 'label': label, 'path': st.rel(path), 'applied': index < limit}
                                       for index, (ident, label, path) in enumerate(references)]
             p['omitted_loras'] = [name for name, _ in loras[4:]]
-            parts = [". ".join(lines), shot["keyframe_prompt"], shot["camera"], st.creative.direction(shot["id"]).get("notes", ""), context["lighting"], context["notes"], ". ".join(v["notes"] for v in context["variants"]), S.get("style_prompt", "")]
-            p["prompt"] = ". ".join(x.strip().rstrip(".") for x in parts if x and x.strip()) + "."
+            p["prompt"] = manga.compose_keyframe(chosen=chosen, assets=assets, shot=shot, direction=st.creative.direction(shot["id"]),
+                                                 context=context, bubbles=bubbles, settings=S, names=names)
+            p["bubbles"] = bubbles
             p["negative"] = S.get("keyframe_negative", "")
             p["files"] = {f"ref{i + 1}": ref[2] for i, ref in enumerate(chosen)}
             p["loras"] = loras[:4]
             p["width"], p["height"] = S["kf_width"], S["kf_height"]
             return "keyframe", p
         kf = st.take_path(shot["keyframe_take"])
-        text = ", ".join(x for x in (shot["motion_prompt"] or shot["keyframe_prompt"], shot["camera"], S.get("motion_suffix", "")) if x)
+        text = ", ".join(x for x in (shot["motion_prompt"] or shot["keyframe_prompt"], manga.motion_acting(st, shot) if stage == "animate" else "", shot["camera"], S.get("motion_suffix", "")) if x)
         draft = bool(job.get("draft"))
         size = (S["draft_width"], S["draft_height"]) if draft else (S["vid_width"], S["vid_height"])
 
@@ -2152,6 +2159,7 @@ class API:
             s['voice_token']=edit_token(st,s)
             s['voice_suggestion']=voice_suggestions.get(s['id'],[])
             s["lines"] = lines
+            s["bubbles"] = manga.parse(s)
             s["continuation"] = st.sections.state(s)
             chain = st.chain(s)
             covered = st.chain_seconds(chain) if chain else 0.0
@@ -2219,6 +2227,9 @@ class API:
             vals["tts_language"] = norm_choice(vals["tts_language"], TTS_LANGUAGES, "Auto")
         if "tts_model" in vals:
             vals["tts_model"] = norm_choice(vals["tts_model"], ["0.6B", "1.7B"], "1.7B")
+        for key, options in (("lettering_mode", manga.LETTERING_MODES), ("reading_direction", manga.READING_DIRECTIONS)):
+            if key in vals and vals[key] not in options:
+                raise ValueError(f"Choose one of: {', '.join(options)}.")
         for k, v in vals.items():
             self.st.db.x("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (k, str(v)))
         return {"ok": True}
@@ -2377,6 +2388,15 @@ class API:
                 vals[f] = 1 if vals[f] in TRUE else 0
         if "asset_ids" in b:
             vals["asset_ids"] = json.dumps([int(x) for x in b["asset_ids"]][:8])
+        if "bubbles" in b:
+            current = st.db.one("SELECT * FROM shots WHERE id=?", (b["id"],)) if b.get("id") else {"asset_ids": "[]"}
+            if not current:
+                raise ValueError("That shot was deleted.")
+            tagged = json.loads(vals.get("asset_ids") or current.get("asset_ids") or "[]")
+            bubbles, add = manga.validate(st, dict(current, asset_ids=tagged), b["bubbles"])
+            vals["bubbles"] = json.dumps(bubbles)
+            if add:
+                vals["asset_ids"] = json.dumps(tagged + add)
         if b.get("audio_file"):
             vals["audio"] = st.save_upload(b["audio_file"], "voices")
             vals["audio_mode"] = "file"
@@ -2670,7 +2690,8 @@ class API:
         token = hashlib.sha256(json.dumps([graph, stamps], sort_keys=True).encode()).hexdigest()
         return {'ok': True, 'token': token, 'positive': prompt_values('prompt'), 'negative': prompt_values('negative'),
                 'images': {slot: self.media(path) for slot, path in params['images'].items()}, 'loras': loras,
-                'references': params['review_references'], 'omitted_loras': params['omitted_loras']}
+                'references': params['review_references'], 'omitted_loras': params['omitted_loras'],
+                'bubbles': params.get('bubbles', []), 'bubble_source': manga.effective(st, st.db.one('SELECT * FROM shots WHERE id=?', (shot_id,)))[1]}
 
     def generate(self, b):
         with self.st.production.lock:
@@ -3095,7 +3116,7 @@ def make_handler(st, api):
                     return self._send(200, INDEX_HTML, "text/html; charset=utf-8")
                 if path == '/shot_voices.js':
                     return self._send(200, (Path(__file__).resolve().parent / 'shot_voices.js').read_text(encoding='utf-8'), 'text/javascript; charset=utf-8')
-                if path in ('/voice_video.js','/studio_audio.js','/settings.js','/settings.css','/continuations.js','/workspace.js','/workspace.css','/finishing.js','/finishing.css','/shot_playback.js','/mix_processor.js','/audio_mix.json','/projects.js'):
+                if path in ('/voice_video.js','/studio_audio.js','/settings.js','/settings.css','/continuations.js','/workspace.js','/workspace.css','/finishing.js','/finishing.css','/shot_playback.js','/mix_processor.js','/audio_mix.json','/projects.js','/manga.js'):
                     return self._send(200, (Path(__file__).resolve().parent / path[1:]).read_text(encoding='utf-8'), 'application/json' if path.endswith('.json') else 'text/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8')
                 if path == '/creative.css':
                     return self._send(200, (Path(__file__).resolve().parent / 'creative.css').read_text(encoding='utf-8'), 'text/css; charset=utf-8')

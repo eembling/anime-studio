@@ -11,7 +11,7 @@ The app talks to ComfyUI over its HTTP API. The core image/video workflows use n
 
 ## Documentation
 
-Start with the [documentation index](docs/README.md). The [product guide](docs/PRODUCT-GUIDE.md) covers every workspace and production workflow; the [design guide](docs/DESIGN-GUIDE.md) defines the visual system, interaction rules and accessibility targets. Developers can use the [architecture guide](docs/ARCHITECTURE.md), and maintainers can use the [setup and operations guide](docs/OPERATIONS.md).
+Start with the [documentation index](docs/README.md). The manga plan and speech-bubble prompting are in [Manga Studio](docs/MANGA-STUDIO.md). The [product guide](docs/PRODUCT-GUIDE.md) covers every workspace and production workflow; the [design guide](docs/DESIGN-GUIDE.md) defines the visual system, interaction rules and accessibility targets. Developers can use the [architecture guide](docs/ARCHITECTURE.md), and maintainers can use the [setup and operations guide](docs/OPERATIONS.md).
 
 The guides describe the current 2.11 interface. Older version sections below are release history.
 
