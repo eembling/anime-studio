@@ -7,6 +7,7 @@ These guides describe the 2.11 codebase and its current dialogue UX. They are pr
 ## Choose a guide
 
 - **[Creative tools](CREATIVE-TOOLS.md):** reference versions, pose/camera direction, selective repairs, performance editing and recipe experiments.
+- **[Manga Studio](MANGA-STUDIO.md):** speech-bubble tagging, how keyframe prompts are built, and the roadmap for pages, lettering and export.
 - **[Product guide](PRODUCT-GUIDE.md):** terminology, first project, every workspace, dialogue and character voices, generation, episode editing, music, recovery and final delivery. Start here to use the app.
 - **[Design guide](DESIGN-GUIDE.md):** product principles, navigation, visual tokens, component anatomy, interaction states, accessibility, writing and acceptance criteria. Use this when designing or implementing a feature.
 - **[Architecture guide](ARCHITECTURE.md):** runtime, modules, persistence, render dispatch, voice identity, dependency tracking and API conventions. Start here to change the implementation.

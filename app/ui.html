@@ -303,6 +303,13 @@ pre{background:var(--paper);border:1px solid var(--line2);border-radius:5px;padd
 .dlg-f{display:flex;gap:8px;justify-content:flex-end;padding:14px 22px;border-top:1px solid var(--line2);position:sticky;bottom:0;background:var(--sheet)}
 .g3{display:grid;grid-template-columns:2fr 1fr 1fr;gap:0 14px}.g2{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
 .picks{display:flex;flex-wrap:wrap;gap:6px}
+.bubbles{margin:14px 0 4px;border-top:1px solid var(--line);padding-top:10px}.bubbles-h{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}.bubbles-h h3{font:600 16px var(--f-display);margin:0}
+.bubble-row{display:grid;grid-template-columns:22px 130px 150px 150px 1fr;gap:6px;align-items:start;margin:6px 0;padding:6px;border:1px solid var(--line);border-radius:8px}
+.bubble-row textarea{grid-column:2/-1;min-height:40px}.bubble-row input:not([type=checkbox]){grid-column:2/4}.bubble-row .check{grid-column:4/5;align-self:center}.bubble-acts{grid-column:5/6;justify-self:end;display:flex;gap:4px}
+.bubble-row.narration,.bubble-row.sfx{grid-template-columns:22px 130px 150px 1fr}.bubble-row.narration .bubble-acts,.bubble-row.sfx .bubble-acts{grid-column:4/5}
+.bubble-no{font:600 13px var(--f-display);color:var(--graphite);align-self:center}
+.bubble-chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}.bubble-chip{font-size:12px;border:1px solid var(--line);border-radius:12px;padding:2px 8px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bubble-chip.shout{border-color:var(--red)}.bubble-chip.thought{border-style:dashed}.bubble-chip.narration,.bubble-chip.sfx{background:var(--line)}
 .picks label{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:99px;padding:3px 10px 3px 4px;cursor:pointer;font-size:13px}
 .picks label:has(input:checked){border-color:var(--blue);background:var(--blue-soft)}
 .picks input{display:none}
@@ -815,7 +822,7 @@ function renderShotsContent(){
    <p>${esc(s.keyframe_prompt)||'<span class="muted">No keyframe description yet.</span>'}</p>
    ${s.kind==='motion'&&s.motion_prompt&&s.motion_prompt!==s.keyframe_prompt?`<p class="mp"><b>Motion:</b> ${esc(s.motion_prompt)}</p>`:''}${s.camera?`<p class="cam"><b>Camera:</b> ${esc(s.camera)}</p>`:''}
    ${dia?`<div class="lines">${dia}${s.audio_mode!=='file'&&(s.lines||[]).length>1&&s.audio_url?`<div class="mixbar"><button class="play" onclick="playA(this,'${s.audio_url}')" aria-label="Play all lines">▶</button>All lines together</div>`:''}</div>`:''}
-   <div class="flags">${s.draft_in_use?'<span class="flag" style="border-color:var(--amber);color:var(--amber)">Uses a draft clip</span>':''}${s.kind==='motion'?`<span class="flag">${+S.settings.out_fps||16} fps playback</span>`:''}${s.ref_prev?'<span class="flag">Matches previous shot</span>':''}${s.end_next?'<span class="flag">Ends on next shot</span>':''}${s.notes?`<span class="flag">${esc(s.notes)}</span>`:''}</div>
+   <div class="flags">${s.draft_in_use?'<span class="flag" style="border-color:var(--amber);color:var(--amber)">Uses a draft clip</span>':''}${s.kind==='motion'?`<span class="flag">${+S.settings.out_fps||16} fps playback</span>`:''}${s.ref_prev?'<span class="flag">Matches previous shot</span>':''}${s.end_next?'<span class="flag">Ends on next shot</span>':''}${s.notes?`<span class="flag">${esc(s.notes)}</span>`:''}</div>${typeof bubbleChips==='function'?bubbleChips(s):''}
    <div class="acts"><button class="btn sm pri" onclick="editShotVoices(${s.id})">Dialogue</button><button class="btn sm" onclick="editShot(${s.id})">Edit shot</button><button class="btn sm" onclick="openShotFinishing(${s.id})">Transitions & audio timing</button><button class="btn sm" onclick="renderFinishedShot(${s.id})">Export with sound</button><button class="btn sm" onclick="openDirector(${s.id})">Direction</button><button class="btn sm" onclick="openRepair(${s.id})">Repair</button><button class="btn sm ghost" onclick="editShot(null,${s.seq})">Add shot after</button></div>${continuationCard(s)}</div>
   <div class="stages">
    <div class="stage"><div class="st-h"><span class="dot ${stState(s.keyframe_take,s.active.keyframe)}"></span>Keyframe<span class="cnt">${kfs.length?kfs.length+' take'+(kfs.length>1?'s':''):''}</span><span class="btns"><button class="btn sm" onclick="gen('keyframe',[${s.id}])">${kfs.length?'More':'Generate'}</button></span></div>
@@ -847,6 +854,7 @@ async function reviewKeyframe(shotId,referenceOrder){
  modal(`<div class="dlg-h"><h2>Review keyframe inputs</h2></div><div class="dlg-b">
  <h3>Positive prompt</h3><pre style="white-space:pre-wrap">${text(review.positive)}</pre>
  <h3>Negative prompt</h3><pre style="white-space:pre-wrap">${text(review.negative)}</pre>
+ ${review.bubbles&&review.bubbles.length&&typeof BUBBLE_SPEAKERLESS!=='undefined'?`<h3>Speech bubbles${review.bubble_source==='dialogue'?' (from dialogue lines)':''}</h3>${review.bubbles.map((b,i)=>`<p>${i+1}. ${esc(BUBBLE_SPEAKERLESS.includes(b.kind)?(b.kind==='sfx'?'Sound effect':'Narration'):((S.assets.find(a=>a.id===b.character_id)||{}).name||'No speaker'))} · ${esc(b.kind)}${b.off_panel?' · off-panel':''} — “${esc(b.text)}”</p>`).join('')}`:''}
  <h3>Reference order</h3>${rows||'<p>No reference images assigned.</p>'}
  <h3>LoRAs</h3>${review.loras.map(lora=>`<p>${esc(lora.name)} · ${esc(lora.strength??'Recipe strength')}</p>`).join('')||'<p>No LoRAs applied.</p>'}
  ${review.omitted_loras.length?`<p class="warn-t">Omitted LoRAs · ${esc(review.omitted_loras.join(', '))}</p>`:''}
@@ -891,13 +899,14 @@ function editShot(id,after){const s=id?S.shots.find(x=>x.id===id):{scene:'',kind
  <label class="check"><input type="checkbox" id="f_next" ${s.end_next?'checked':''}> End on the next shot’s keyframe (first and last frame)</label></div>
  <label class="f" for="f_dia">Dialogue (<code>AIKO: line</code>, or plain words for a single-character shot)</label><textarea id="f_dia" style="min-height:48px">${esc(s.dialogue)}</textarea>
  <p>Save the dialogue above, then choose the speaking character and generate its voice.</p><button class="btn" id="f_voice_save" type="button">Save shot & choose character voices</button>
+ ${typeof bubbleEditorHTML==='function'?bubbleEditorHTML(id?s:null):''}
  <label class="f" for="f_audio">Or one audio file for the whole shot (replaces the line audio)</label><div class="toolbar" style="margin:0"><input type="file" id="f_audio" accept="audio/*" style="width:auto">${s.audio_mode==='file'&&s.audio_url?`<button class="play" type="button" onclick="playA(this,'${s.audio_url}')">▶</button><label class="check"><input type="checkbox" id="f_clr"> Remove it and use line audio</label>`:''}</div>
  <label class="f" for="f_notes">Notes</label><input id="f_notes" value="${esc(s.notes)}"></div>
  <div class="dlg-f"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn pri" id="f_save">${id?'Save shot':'Add shot'}</button></div>`);
- $('#f_kind').value=s.kind;$('#f_rt').value=s.retime||'hold';if(id)lineTable(id);
+ $('#f_kind').value=s.kind;$('#f_rt').value=s.retime||'hold';if(id)lineTable(id);if(typeof renderBubbles==='function'){renderBubbles();$('.picks')?.addEventListener('change',renderBubbles)}
  const saveShot=async(openVoices=false)=>{const b={id:id||undefined,scene:$('#f_scene').value,kind:$('#f_kind').value,duration:+$('#f_dur').value,keyframe_prompt:$('#f_kp').value,
   motion_prompt:$('#f_mp').value,camera:$('#f_cam').value,dialogue:$('#f_dia').value,retime:$('#f_rt').value,ref_prev:$('#f_prev').checked,end_next:$('#f_next').checked,
-  notes:$('#f_notes').value,asset_ids:[...document.querySelectorAll('.picks input:checked')].map(x=>+x.value)};
+  notes:$('#f_notes').value,asset_ids:[...document.querySelectorAll('.picks input:checked')].map(x=>+x.value),bubbles:typeof bubblePayload==='function'?bubblePayload():undefined};
   if(after!=null)b.after_seq=after;const af=$('#f_audio').files[0];if(af)b.audio_file=await readFile(af);if($('#f_clr')&&$('#f_clr').checked)b.clear_audio=true;
   const result=await post('/api/shot/save',b);if(result.ok===false)return;closeModal();if(openVoices)editShotVoices(result.id)};
  $('#f_save').onclick=()=>saveShot(false);$('#f_voice_save').onclick=()=>saveShot(true)}
@@ -1096,4 +1105,4 @@ function exportSoundtrack(){const id=+$('#audioexport').value;if(!id)return toas
 /* ---------- settings ---------- */
 const WFLAB={keyframe:'Keyframes and turnaround sheets',animate:'Animate',animate_flf:'Animate to the next shot (first and last frame)',lipsync:'Voice animation / lip sync (optional)',upscale:'Upscale (optional)',voice:'Voices: text to speech (Qwen3-TTS)',voice_design:'Voice design: a new voice from a description (Qwen3-TTS)',sound_effect:'Sound effects and ambience',music_cue:'Music cues'};
 window.addEventListener('DOMContentLoaded',()=>{load();setInterval(()=>{if(!$('#modal').classList.contains('on')||$('#a_designed')||$('#sv-rows')||$('#creative-dialog'))load()},4000)});   // the cast dialog follows its voice takes
-</script><script src="/shot_voices.js"></script><script src="/editor.js"></script><script src="/shot_playback.js"></script><script src="/production.js"></script><script src="/creative.js"></script><script src="/settings.js"></script><script src="/continuations.js"></script><script src="/voice_video.js"></script><script src="/workspace.js"></script><script src="/finishing.js"></script><script src="/studio_audio.js"></script><script src="/projects.js"></script></body></html>
+</script><script src="/shot_voices.js"></script><script src="/editor.js"></script><script src="/shot_playback.js"></script><script src="/production.js"></script><script src="/creative.js"></script><script src="/settings.js"></script><script src="/continuations.js"></script><script src="/voice_video.js"></script><script src="/workspace.js"></script><script src="/finishing.js"></script><script src="/studio_audio.js"></script><script src="/projects.js"></script><script src="/manga.js"></script></body></html>
