@@ -143,7 +143,7 @@ Useful read routes are `/api/ping`, `/api/state`, `/api/csv/export`, `/api/workf
 
 Business failures can return HTTP 200 with `{ "ok": false, "error": "..." }`. Clients must inspect the body. Some operations can partially succeed and include a distinct result flag, such as saved dialogue with no queued voices.
 
-The bundled backend binds to loopback and has no general user-authentication layer. Treat it as a local application service, not an internet-facing server. ComfyUI addresses should be reachable through the deployment's intended trusted network. Validate paths, uploads, archive contents and user-controlled text at their owning boundaries; local operation does not make those inputs inherently safe.
+The bundled backend binds to loopback and has no general user-authentication layer. Every request must carry a loopback `Host` header (`127.0.0.1`, `localhost` or `[::1]` plus the port), and every POST must be `application/json` with no `Origin` or a same-origin one. This blocks other websites in the user's browser (cross-site form or `text/plain` posts) and DNS rebinding. To reach the backend from another machine on purpose, start it with `--host <address>` or list host names in `ANIME_STUDIO_ALLOWED_HOSTS`; local clients and tests must send `Content-Type: application/json`. Treat it as a local application service, not an internet-facing server. ComfyUI addresses should be reachable through the deployment's intended trusted network. Validate paths, uploads, archive contents and user-controlled text at their owning boundaries; local operation does not make those inputs inherently safe.
 
 ## 11. Change and validation workflow
 

@@ -6,8 +6,11 @@ from urllib.parse import urlsplit
 from anime_studio import check_workflow, detect_slots
 from compose import frames
 from planner import uid
+from lettering import prompt_lines
+from keyframe_prompt import ignores_negative
 
 DEFAULTS = dict(panel_size=1024, sheet_width=1280, sheet_height=768, timeout=3600,
+                page_preset="web", dpi=300, bleed=False, tone="color", lettering_caps=False, vertical_cjk=True,
                 negative="Blurred linework, illegible text, watermarks, distorted anatomy.")
 LIMITS = dict(panel_size=(256,4096), sheet_width=(256,4096), sheet_height=(256,4096), timeout=(10,86400))
 
@@ -108,7 +111,9 @@ def prompt_inputs(s, cast, parts, previous=None, additional=()):
             for j in range(len(group)):
                 row,col = divmod(j,grid_columns(len(group)))
                 lines.append(f"Picture {i}, row {row+1}, column {col+1}: {next(subjects)}.")
-    return dict(prompt="\n".join(x for x in lines+parts+[s["style"],"No speech balloons, captions, typography or lettering."] if x),
+    # The starter graph samples at CFG 1, where a negative prompt has no effect: say it in the positive prompt too.
+    avoid = "Avoid: "+s["negative"].strip().rstrip(".")+"." if s.get("negative","").strip() and (ignores_negative(graph) if graph else True) else ""
+    return dict(prompt="\n".join(x for x in lines+parts+[s["style"],"No speech balloons, captions, typography or lettering.",avoid] if x),
                 negative=s["negative"], refs=refs, ref_groups=groups,
                 loras=[[a["lora"],a["strength"]] for a in cast if a["lora"]])
 
@@ -118,8 +123,15 @@ def panel_inputs(s, chapter, page, index):
     by_id = {a["id"]:a for a in s["assets"]}
     parts = [page["scene"], page.get("direction_notes",""),page.get("lighting",""),page.get("continuity",""),
              panel["prompt"],panel.get("camera",""),panel.get("director",""),"Single panel illustration."]
-    if panel["lettering"]:
-        parts.append("Convey the meaning visually: "+panel["lettering"])
+    balloons = panel.get("balloons") or []
+    characters = [k for k in panel["cast"] if by_id.get(k, {}).get("kind") == "character"]
+    names = {a["id"]: a["name"] for a in s["assets"]}
+    parts += prompt_lines(balloons, characters, names, chapter["direction"], panel.get("treatment", "auto"))
+    spoken = [b for b in balloons if b["kind"] != "sfx"]
+    if spoken:
+        # The words guide expression and staging; the lettering itself is added later, never drawn by the model.
+        parts.append("Convey the meaning visually, without drawing any text: " +
+                     " ".join((names.get(b["speaker"], "Caption") if b["speaker"] else "Caption") + ": " + b["text"] for b in spoken))
     previous = None
     if panel.get("previous"):
         sequence = [p for pg in chapter["pages"] for p in pg["panels"]]
@@ -135,7 +147,7 @@ def panel_inputs(s, chapter, page, index):
         ref = next(r for r in a["refs"] if r["id"]==image)
         additional.append((image,f"{a['name']} — {ref['label']}"))
     result = prompt_inputs(s,[by_id[k] for k in panel["cast"]],parts,previous,additional)
-    _,_,w,h = frames(len(page["panels"]),page["layout"],chapter["direction"])[index]
+    _,_,w,h = frames(len(page["panels"]),page["layout"],chapter["direction"],weights=page.get("weights"))[index]
     scale = s["panel_size"]/max(w,h)
     result.update(width=max(16,round(w*scale/16)*16), height=max(16,round(h*scale/16)*16))
     return result

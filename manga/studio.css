@@ -121,3 +121,24 @@ tr:last-child td{border-bottom:0}
 .take-choice{border:1px solid var(--line);border-radius:5px;padding:8px;cursor:pointer}
 .take-choice img{width:100%;height:90px;object-fit:contain;background:var(--paper)}
 .take-choice input{justify-self:start}.take-choice:has(input:checked){border-color:var(--red);background:var(--red-soft)}
+
+/* ---------- speech balloons ---------- */
+.balloons{border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.balloon-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;border:1px solid var(--line2);border-radius:6px;padding:8px 10px;margin:0 0 8px}
+.balloon-row legend{font:600 12px var(--f-display);color:var(--graphite)}
+.balloon-row .wide{grid-column:1/-1}
+.balloon-row .row{grid-column:1/-1;justify-content:flex-end}
+.balloon-list{list-style:none;margin:6px 0;padding:0;display:flex;flex-direction:column;gap:4px}
+.balloon-chip{border:1px solid var(--line);border-radius:14px;padding:3px 10px;font-size:13px;background:var(--sheet)}
+.balloon-chip.shout{border-color:var(--red)}
+.balloon-chip.thought,.balloon-chip.whisper{border-style:dashed}
+.balloon-chip.caption,.balloon-chip.sfx{border-radius:4px;background:var(--paper)}
+.proof-wrap{position:relative;display:block;line-height:0}
+.proof-wrap .proof{width:100%;height:auto;display:block}
+.proof-overlay{position:absolute;inset:0}
+.drag-balloon{position:absolute;border:2px dashed transparent;border-radius:50%;cursor:move;touch-action:none}
+.drag-balloon:hover,.drag-balloon:focus-visible{border-color:var(--blue);background:rgba(47,111,168,.08)}
+.drag-tail{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:var(--red);border:2px solid #fff;cursor:crosshair;touch-action:none;opacity:.85}
+.drag-gutter{position:absolute;left:0;right:0;height:10px;margin-top:-5px;cursor:row-resize;touch-action:none}
+.drag-gutter:hover{background:rgba(200,55,45,.25)}
+.warn{color:var(--amber);font-size:13px;margin:4px 0}

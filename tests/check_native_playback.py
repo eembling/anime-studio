@@ -48,7 +48,7 @@ def main():
                 status = controller_status(Path(item['path']))
                 if status and status['port'] != 8871:
                     try:
-                        opener.open(urllib.request.Request(f"http://127.0.0.1:{status['port']}/api/quit", data=b'{}'), timeout=2).close()
+                        opener.open(urllib.request.Request(f"http://127.0.0.1:{status['port']}/api/quit", data=b'{}', headers={'Content-Type':'application/json'}), timeout=2).close()
                     except OSError:
                         pass
             process.terminate()

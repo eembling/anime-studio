@@ -3143,12 +3143,32 @@ def range_offset(value, size):
     return int(digits or "0")
 
 
+# Host names allowed besides loopback: the --host the server was started on, plus
+# ANIME_STUDIO_ALLOWED_HOSTS (comma-separated) for deliberate access from another machine.
+EXTRA_HOSTS = {h.strip().lower() for h in os.environ.get("ANIME_STUDIO_ALLOWED_HOSTS", "").split(",") if h.strip()}
+
+
 def make_handler(st, api):
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
         def log_message(self, *a):
             pass
+
+        def _trusted(self, post=False):
+            """Only this machine's own app pages may talk to the backend (blocks cross-site requests and DNS rebinding)."""
+            port = self.server.server_port
+            host = (self.headers.get("Host") or "").strip().lower()
+            allowed = {f"{name}:{port}" for name in ("127.0.0.1", "localhost", "[::1]", *EXTRA_HOSTS)}
+            if host not in allowed:
+                return False
+            if post:
+                origin = self.headers.get("Origin")
+                if origin not in (None, "http://" + host):
+                    return False
+                if self.headers.get_content_type() != "application/json":
+                    return False
+            return True
 
         def _send(self, code, body, ctype="application/json", extra=None):
             if isinstance(body, (dict, list)):
@@ -3165,6 +3185,8 @@ def make_handler(st, api):
             self.wfile.write(body)
 
         def do_GET(self):
+            if not self._trusted():
+                return self._send(403, {"ok": False, "error": "Requests must come from the Anime Studio app on this computer."})
             try:
                 path = urllib.parse.urlparse(self.path).path
                 if path in ("/", "/index.html"):
@@ -3244,6 +3266,8 @@ def make_handler(st, api):
                 self._send(500, {"error": str(e)})
 
         def do_POST(self):
+            if not self._trusted(post=True):
+                return self._send(403, {"ok": False, "error": "Requests must come from the Anime Studio app on this computer."})
             try:
                 path = urllib.parse.urlparse(self.path).path
                 shared_write = st.projects and path in ('/api/settings', '/api/instance/save', '/api/instance/delete',
@@ -3340,6 +3364,8 @@ def main():
     from platform_runtime import config_directory, project_controller
     if args.projects and args.host != '127.0.0.1':
         ap.error('Project management requires the IPv4 loopback interface.')
+    if args.host not in ('127.0.0.1', '0.0.0.0', '::', ''):
+        EXTRA_HOSTS.add(args.host.lower())
     project = Path(args.data).expanduser().resolve()
     project.mkdir(parents=True, exist_ok=True)
     with project_controller(project / '.controller.lock'):
