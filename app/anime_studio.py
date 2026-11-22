@@ -947,7 +947,7 @@ def visual_prompt_slots(wf, tag):
     return sorted(encoders, key=_nid)
 
 
-def detect_slots(wf, key):
+def detect_slots(wf, key, *, all_references=False):
     keys = sorted(wf.keys(), key=_nid)
     cls = lambda k: wf[k].get("class_type") or ""
     ins = lambda k: wf[k].get("inputs", {})
@@ -963,6 +963,11 @@ def detect_slots(wf, key):
         m["negative"] = visual_prompt_slots(wf, "NEGATIVE")
     if key == "keyframe":
         m["refs"] = [k for i in (1, 2, 3) for k in _tagged(wf, f"REF{i}")] or loads[:3]
+        if all_references:
+            numbered = [(int(match[1]), k) for k in loads
+                        if (match := re.fullmatch(r"REF([1-9][0-9]*)", _title(wf[k]).upper()))]
+            if numbered:
+                m["refs"] = [k for _, k in sorted(numbered)]
         m["size"] = _tagged(wf, "SIZE") or [k for k in keys if "Latent" in cls(k) and {"width", "height"} <= set(ins(k))][:1]
     elif key in ("animate", "animate_flf", "lipsync"):
         m["start_image"] = (_tagged(wf, "START_IMAGE") or loads)[:1]
@@ -1079,9 +1084,9 @@ def inject_loras(wf, loras):
             n["inputs"]["model"] = chains[sk]
 
 
-def build_workflow(template, key, p):
+def build_workflow(template, key, p, *, all_references=False):
     wf = copy.deepcopy(template)
-    m = detect_slots(wf, key)
+    m = detect_slots(wf, key, all_references=all_references)
     for k in m["prompt"]:
         _set_text(wf[k], p.get("prompt", ""))
     if p.get("negative") is not None:
@@ -3184,6 +3189,24 @@ def make_handler(st, api):
                         return self._send(304, b"", extra=headers)
                     data = api.queue_poll() if queue_only else api.state()
                     return self._send(200, data, extra=headers)
+                if path == "/api/cast/export":
+                    from cast_exchange import export_cast
+                    from tempfile import TemporaryFile
+                    args = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query, keep_blank_values=True)
+                    with TemporaryFile() as bundle:
+                        try:
+                            ids = {int(v) for v in args["ids"][0].split(",")} if "ids" in args else None
+                            export_cast(st, bundle, ids)
+                        except ValueError as exc:
+                            return self._send(400, {"error": str(exc)})
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/zip")
+                        self.send_header("Content-Disposition", 'attachment; filename="anime-studio-cast.zip"')
+                        self.send_header("Content-Length", str(bundle.tell()))
+                        self.end_headers()
+                        bundle.seek(0)
+                        shutil.copyfileobj(bundle, self.wfile)
+                    return
                 if path == "/api/csv/export":
                     return self._send(200, api.csv_export(), "text/csv", {"Content-Disposition": 'attachment; filename="shotlist.csv"'})
                 if path.startswith("/api/workflow/"):
