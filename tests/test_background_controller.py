@@ -32,7 +32,7 @@ class BackgroundControllerTests(unittest.TestCase):
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             def api(route, payload=None):
                 data = json.dumps(payload).encode() if payload is not None else None
-                with opener.open(base+route, data=data, timeout=12) as response:
+                with opener.open(urllib.request.Request(base+route, data=data, headers={'Content-Type':'application/json'}), timeout=12) as response:
                     return json.load(response)
 
             mock = subprocess.Popen([sys.executable, str(ROOT/'tests/mock_comfy.py'), str(mock_port),

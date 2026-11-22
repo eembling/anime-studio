@@ -103,6 +103,8 @@ To reuse characters and locations in Manga Studio, choose **Export to Manga Stud
 
 Create character, location or prop entries. Add a reference image and a concise description of persistent visual traits. Turnaround sheets help maintain clothing, proportions and appearance. Select a sheet when it should become the asset's active reference.
 
+**How keyframe prompts are built.** Review keyframe inputs shows one labelled line per part: which picture is which character or location, the setting and characters in frame, the keyframe text, placement from Direction composition boxes, acting (who is speaking in the shot's dialogue, and who listens), camera, direction and continuity notes, then the visual style. When the keyframe workflow samples at CFG 1, as the Lightning starter does, the negative prompt has no effect, so **Avoid in keyframes** is also added to the positive prompt as an *Avoid:* line. Animation prompts name who talks, so the right character's mouth moves.
+
 A character LoRA can be named in the asset settings when the corresponding file is available on the ComfyUI server. The app does not train a LoRA. References and LoRA choices affect keyframe generation and can make previous keyframe selections outdated.
 
 ### Establish voice identity

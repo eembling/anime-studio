@@ -6,6 +6,7 @@ These guides describe the 2.11 codebase and its current dialogue UX. They are pr
 
 ## Choose a guide
 
+- **[Manga Studio](../manga/README.md):** the separate manga app: script planning, speech balloons, page layouts, proofs and CBZ/PDF export.
 - **[Creative tools](CREATIVE-TOOLS.md):** reference versions, pose/camera direction, selective repairs, performance editing and recipe experiments.
 - **[Product guide](PRODUCT-GUIDE.md):** terminology, first project, every workspace, dialogue and character voices, generation, episode editing, music, recovery and final delivery. Start here to use the app.
 - **[Design guide](DESIGN-GUIDE.md):** product principles, navigation, visual tokens, component anatomy, interaction states, accessibility, writing and acceptance criteria. Use this when designing or implementing a feature.

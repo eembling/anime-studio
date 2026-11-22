@@ -2,6 +2,7 @@
 import re
 from uuid import uuid4
 from script_dialogue import dialogue_line, METADATA
+from lettering import balloon, kind_for
 
 
 def uid():
@@ -14,8 +15,8 @@ def asset(name, kind="character"):
 
 
 def paginate(script, limit, assets):
-    if not 1 <= limit <= 6:
-        raise ValueError("Choose one to six panels per page.")
+    if not 1 <= limit <= 9:
+        raise ValueError("Choose one to nine panels per page.")
     pages, panels = [], []
     scene = "Opening"
     pending = None
@@ -35,8 +36,8 @@ def paginate(script, limit, assets):
             panels.clear()
 
     def panel(action, raw):
-        return dict(id=uid(), prompt=action, lettering="", cast=[], source=raw,
-                    takes=[], selected="", treatment="caption")
+        return dict(id=uid(), prompt=action, lettering="", balloons=[], cast=[], source=raw,
+                    takes=[], selected="", treatment="auto")
 
     explicit = False
     context = {}
@@ -51,6 +52,7 @@ def paginate(script, limit, assets):
             assets.append(match)
         if match["id"] not in pending["cast"]:
             pending["cast"].append(match["id"])
+        return match
 
     lines = script.splitlines()
     for index,raw in enumerate(lines):
@@ -95,6 +97,8 @@ def paginate(script, limit, assets):
             continue
         if screenplay_speaker and not sep and last_field=="lettering" and pending:
             pending["lettering"] += " "+clean
+            if pending["balloons"]:
+                pending["balloons"][-1]["text"] += " "+clean
             pending["source"] += "\n"+raw
             continue
         if screenplay_speaker and not sep:
@@ -133,13 +137,16 @@ def paginate(script, limit, assets):
                 pending = panel("","")
             speaker = entry["speaker"]
             pending["lettering"] = (pending["lettering"]+"\n"+speaker+": "+entry["text"]).strip()
-            if not pending["prompt"]:
-                pending["prompt"] = "A visual beat for "+speaker
             if entry["direction"]:
                 pending["director"] = " ".join(filter(None,[pending.get("director"),speaker+" ("+entry["direction"]+")"]))
+            kind = kind_for(speaker, entry["direction"])
             if speaker.upper() not in ("CAPTION","SFX"):
-                cast_member(speaker)
-                pending["treatment"] = "upper-right"
+                member = cast_member(speaker)
+                if member["kind"] != "character":
+                    kind = "caption"
+                pending["balloons"].append(balloon(kind, member["id"] if kind != "caption" else "", entry["text"]))
+            else:
+                pending["balloons"].append(balloon(kind, "", entry["text"]))
             last_field = "lettering"
         else:
             if not explicit:
@@ -159,4 +166,41 @@ def paginate(script, limit, assets):
             for a in assets:
                 if a["id"] not in item["cast"] and re.search(r"(?<!\w)" + re.escape(a["name"]) + r"(?!\w)", (" ".join([item["prompt"],page["scene"],page.get("direction_notes","")]) if a["kind"]=="location" else item["prompt"]), re.I):
                     item["cast"].append(a["id"])
+    stage(pages, assets)
+    return pages
+
+
+WIDE, MEDIUM, CLOSE = "Wide establishing shot", "Medium shot", "Close-up"
+
+
+def stage(pages, assets):
+    """Give dialogue-only panels a drawable beat and suggest varied framing where the script names none."""
+    names = {a["id"]: a["name"] for a in assets}
+    scene, last_action, recent = None, "", []
+    for page in pages:
+        if page["scene"] != scene:
+            scene, last_action, recent, first = page["scene"], "", [], True
+        else:
+            first = False
+        for index, item in enumerate(page["panels"]):
+            speakers = [names[b["speaker"]] for b in item.get("balloons", []) if b["speaker"] in names and not b["off_panel"]]
+            if item["prompt"].strip():
+                last_action = item["prompt"]
+            elif speakers:
+                who = " and ".join(dict.fromkeys(speakers))
+                item["prompt"] = f"{who}, reacting in the moment" + (f". Continuing from: {last_action}" if last_action else f", {scene}")
+            else:
+                item["prompt"] = f"An establishing view of {scene}" + (f". {last_action}" if last_action else "")
+            if not item.get("camera"):
+                if first and index == 0:
+                    choice = WIDE
+                elif speakers and not item["prompt"] == last_action:
+                    choice = CLOSE
+                else:
+                    choice = MEDIUM
+                if recent[-2:] == [choice, choice]:          # three identical framings in a row read flat
+                    choice = MEDIUM if choice != MEDIUM else CLOSE
+                item["camera"] = choice
+                item["camera_suggested"] = True
+            recent.append(item["camera"])
     return pages

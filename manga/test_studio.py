@@ -102,7 +102,9 @@ class StudioFlow(unittest.TestCase):
                 for panel in page["panels"]:
                     post("take",chapter=c["id"],page=page["id"],panel=panel["id"],take=panel["takes"][0])
             with zipfile.ZipFile(io.BytesIO(get("/cbz/"+c["id"]))) as book:
-                self.assertEqual(book.namelist(),["0001.png","0002.png"])
+                self.assertEqual(book.namelist(),["ComicInfo.xml","0001.png","0002.png"])
+                self.assertIn(b"<Manga>YesAndRightToLeft</Manga>", book.read("ComicInfo.xml"))
+                self.assertIn(b"<PageCount>2</PageCount>", book.read("ComicInfo.xml"))
                 self.assertEqual(book.read("0001.png"),get("/png/"+ctx["chapter"]+"/"+ctx["page"]))
             post("split",**ctx,panel=c["pages"][0]["panels"][1]["id"])
             post("plan",**draft)

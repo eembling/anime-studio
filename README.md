@@ -58,7 +58,7 @@ The server needs **32 GB of system RAM or more**. The Wan 14B fp8 models are 14.
 3. Open it. The first time, right-click it and choose **Open**, because the app isn't signed.
 4. Settings and project data load automatically from `~/Library/Application Support/AnimeStudio`. On the first updated launch, the app copies your remembered legacy project into this app-owned location, validates the database, and remembers the new location. The original folder stays intact. Later launches use the saved copy without accessing Documents or asking you to select a folder. Set `ANIME_STUDIO_DATA` to explicitly use another folder.
 
-You can also run it without the app bundle: `python3 app/anime_studio.py`, then open http://127.0.0.1:8700.
+You can also run it without the app bundle: `python3 app/anime_studio.py`, then open http://127.0.0.1:8700. The backend only answers requests addressed to this computer (`127.0.0.1` or `localhost`) from its own pages, so other websites can't reach it. To use it from another machine on purpose, start it with `--host <address>` or set `ANIME_STUDIO_ALLOWED_HOSTS` to a comma-separated list of host names.
 
 **Optional:** for optional conversion of other source frame rates, unzip rife-ncnn-vulkan (github.com/nihui/rife-ncnn-vulkan/releases) into `~/Downloads` or `~/Applications`. The app finds it there.
 
